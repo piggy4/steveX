@@ -1,0 +1,26 @@
+{
+  "agents": [
+    {
+      "name": "steveX",
+      "minecraft": {
+        "host": "localhost",
+        "port": 25301,
+        "username": "steveX-1",
+        "auth": "offline",
+        "version": false
+      },
+      "llm": {
+        "provider": "deepseek",
+        "apiKey": "",
+        "model": "deepseek-v4-flash",
+        "baseUrl": "https://api.deepseek.com/v1/chat/completions",
+        "timeoutMs": 20000
+      }
+    }
+  ],
+  "web": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 8090
+  }
+}
