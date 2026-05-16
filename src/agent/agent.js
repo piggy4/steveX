@@ -12,6 +12,8 @@ class SteveXAgent {
     this.movements = null
     this.commands = {}
     this.commandList = []
+    this.connecting = false
+    this.connected = false
 
     // Load commands from filesystem
     const { commands, list } = loadCommands()
@@ -28,20 +30,35 @@ class SteveXAgent {
   }
 
   start() {
+    this.connecting = true
+    this.connected = false
     this.bot = createBot(this.config.minecraft)
     this.bot.loadPlugin(pathfinder)
     this.registerEvents()
   }
 
   registerEvents() {
+    this.bot.on('login', () => {
+      this.connected = true
+    })
+
     this.bot.once('spawn', () => {
+      this.connecting = false
+      this.connected = true
       logInfo(`Bot spawned (${this.name})`)
       const mcData = mcDataLoader(this.bot.version)
       this.movements = new Movements(this.bot, mcData)
       this.bot.pathfinder.setMovements(this.movements)
     })
 
+    this.bot.on('end', () => {
+      this.connecting = false
+      this.connected = false
+    })
+
     this.bot.on('kicked', (reason) => {
+      this.connecting = false
+      this.connected = false
       logError(`Bot kicked (${this.name})`, reason)
     })
 
@@ -51,6 +68,8 @@ class SteveXAgent {
         logInfo(`Pathfinder timeout (${this.name})`)
         return
       }
+      this.connecting = false
+      this.connected = false
       logError(`Bot error (${this.name})`, error)
     })
   }
@@ -93,9 +112,12 @@ class SteveXAgent {
     return new Promise(resolve => setTimeout(resolve, ms))
   }
 
-  /** Whether the bot is connected and spawned. */
+  /** Whether the bot is connected and spawned, or is actively connecting. */
   isOnline() {
-    return Boolean(this.bot && this.bot.player)
+    if (!this.bot) return false
+    if (this.connected) return true
+    if (this.connecting) return true
+    return false
   }
 
   /** The in-game username, falling back to config. */

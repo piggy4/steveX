@@ -35,7 +35,7 @@ class AgentManager {
 
   disconnectAll() {
     for (const entry of this.agentMap.values()) {
-      if (entry.agent && entry.agent.isOnline()) {
+      if (entry.agent) {
         this.eventBus.emit('agent:disconnect', { name: entry.name })
         entry.agent.shutdown()
       }
