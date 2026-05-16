@@ -14,16 +14,10 @@ class SteveXAgent {
     this.bot = null
     this.movements = null
     this.commands = commands || {}
-    /** @type {'disconnected'|'connecting'|'connected'} */
-    this.status = 'disconnected'
-  }
-
-  getAvailableCommands() {
-    return Object.keys(this.commands).sort()
+    this.connected = false
   }
 
   start() {
-    this.status = 'connecting'
     const mc = this.config.minecraft
     this.bot = mineflayer.createBot({
       host: mc.host,
@@ -37,12 +31,8 @@ class SteveXAgent {
   }
 
   registerEvents() {
-    this.bot.on('login', () => {
-      this.status = 'connected'
-    })
-
     this.bot.once('spawn', () => {
-      this.status = 'connected'
+      this.connected = true
       console.log(`[info] Bot spawned (${this.name})`)
       const mcData = mcDataLoader(this.bot.version)
       this.movements = new Movements(this.bot, mcData)
@@ -50,11 +40,11 @@ class SteveXAgent {
     })
 
     this.bot.on('end', () => {
-      this.status = 'disconnected'
+      this.connected = false
     })
 
     this.bot.on('kicked', (reason) => {
-      this.status = 'disconnected'
+      this.connected = false
       console.error(`[error] Bot kicked (${this.name})`, reason)
     })
 
@@ -64,7 +54,7 @@ class SteveXAgent {
         console.log(`[info] Pathfinder timeout (${this.name})`)
         return
       }
-      this.status = 'disconnected'
+      this.connected = false
       console.error(`[error] Bot error (${this.name})`, error)
     })
   }
@@ -91,7 +81,7 @@ class SteveXAgent {
 
     const handler = this.commands[command]
     if (!handler) {
-      const available = this.getAvailableCommands().join(', ')
+      const available = Object.keys(this.commands).sort().join(', ')
       return { ok: false, error: `Unknown command: ${command}. Available: ${available}` }
     }
 
@@ -103,10 +93,9 @@ class SteveXAgent {
     }
   }
 
-  /** Whether the bot is connected and spawned, or is actively connecting. */
+  /** Whether the bot is connected and spawned. */
   isOnline() {
-    if (!this.bot) return false
-    return this.status !== 'disconnected'
+    return !!(this.bot && this.connected)
   }
 
   /** The in-game username, falling back to config. */
@@ -116,10 +105,10 @@ class SteveXAgent {
 
   /** Gracefully disconnect the bot from the server. */
   shutdown() {
-    if (this.bot && this.bot.end) {
+    if (this.bot) {
       this.bot.end()
     }
-    this.status = 'disconnected'
+    this.connected = false
   }
 }
 

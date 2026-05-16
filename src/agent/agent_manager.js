@@ -96,8 +96,8 @@ class AgentManager {
       const agent = this.agents.get(cfg.name)
       statuses.push({
         name: cfg.name,
-        username: agent ? agent.getUsername() : cfg.minecraft.username,
-        online: agent ? agent.isOnline() : false
+        username: agent?.getUsername() ?? cfg.minecraft.username,
+        online: agent?.isOnline() ?? false
       })
     }
     return statuses
