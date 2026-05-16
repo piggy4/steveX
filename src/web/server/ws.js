@@ -25,6 +25,18 @@ function setupWebSocket(server, manager) {
     }))
   })
 
+  // ── Periodic status updates every 3 seconds ──
+  const statusInterval = setInterval(() => {
+    broadcast(wss, {
+      type: 'snapshot',
+      agents: manager.getStatus(),
+      uptimeSec: Math.floor(process.uptime())
+    })
+  }, 3000)
+
+  // Clean up interval when server closes
+  wss.on('close', () => clearInterval(statusInterval))
+
   // ── AgentManager eventBus → WebSocket broadcast ──
 
   const eventBus = manager.eventBus

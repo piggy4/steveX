@@ -84,6 +84,8 @@ async function refresh() {
 
 reloadButton.addEventListener('click', async () => {
   await fetch('/api/reload', { method: 'POST' })
+  // Wait a moment for agents to establish connections before checking status
+  await new Promise(resolve => setTimeout(resolve, 1500))
   await refresh()
 })
 
