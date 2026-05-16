@@ -1,283 +1,290 @@
-// ── steveX Debug Console ──
-// WebSocket-driven real-time agent monitoring
+// steveX Debug Console — static front-end prototype
+// This file intentionally does not require backend APIs. It renders the UI from
+// local state so the page can be opened as a pure frontend mock.
 
-const grid = document.getElementById('grid')
+const icons = {
+  home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg>',
+  agents: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+  world: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z"/></svg>',
+  tasks: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>',
+  capsules: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 8a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v8a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4Z"/><path d="M8 11h8"/><path d="M9 15h6"/><path d="M9 7l2 2 4-4"/></svg>',
+  evolution: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-5 6"/><path d="M19 9h-5"/><path d="M19 9v5"/></svg>',
+  configs: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6 1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.31.49.99 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>',
+  logs: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M9 13h6"/><path d="M9 17h3"/></svg>',
+  refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M21 12a9 9 0 0 0-15-6.7L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 15 6.7L21 16"/><path d="M21 21v-5h-5"/></svg>',
+  plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
+  search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>',
+  link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>',
+  unlink: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M17 7h1a5 5 0 0 1 0 10h-2"/><path d="M8 17H6A5 5 0 0 1 6 7h1"/><path d="M12 7h2"/><path d="M10 17h2"/><path d="m2 2 20 20"/></svg>',
+  heart: '<svg class="heart" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8Z"/></svg>',
+  gamepad: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M6 12h4"/><path d="M8 10v4"/><path d="M15 13h.01"/><path d="M18 11h.01"/><path d="M17.3 6H6.7a4 4 0 0 0-3.9 3.1l-1 4.6a4 4 0 0 0 6.7 3.7L10.5 15h3l2 2.4a4 4 0 0 0 6.7-3.7l-1-4.6A4 4 0 0 0 17.3 6Z"/></svg>',
+  brain: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M9.5 2A3.5 3.5 0 0 0 6 5.5v.4A4.5 4.5 0 0 0 4.5 14v.5a3.5 3.5 0 0 0 5.7 2.7"/><path d="M14.5 2A3.5 3.5 0 0 1 18 5.5v.4A4.5 4.5 0 0 1 19.5 14v.5a3.5 3.5 0 0 1-5.7 2.7"/><path d="M12 2v20"/><path d="M8 8h4"/><path d="M12 8h4"/><path d="M8 13h4"/><path d="M12 13h4"/></svg>',
+  pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>',
+  walk: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="13" cy="4" r="2"/><path d="M8 22l3-7"/><path d="M16 22l-2-6-3-2 1-5"/><path d="m7 12 4-3 4 1"/></svg>'
+}
+
+const agentsList = document.getElementById('agents-list')
+const searchInput = document.getElementById('agent-search')
+const statusFilter = document.getElementById('status-filter')
+const sortBy = document.getElementById('sort-by')
 const reloadButton = document.getElementById('reload')
+const newAgentButton = document.getElementById('new-agent')
 const uptimeEl = document.getElementById('uptime')
 const wsIndicator = document.getElementById('ws-indicator')
+const sidebarWs = document.getElementById('sidebar-ws')
 
-// ── WebSocket ──
+let uptimeSeconds = 33
+let nextAgentId = 3
 
-const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-const ws = new WebSocket(`${protocol}//${location.host}`)
-
-ws.onopen = () => {
-  wsIndicator.className = 'status ws-status online'
-  wsIndicator.textContent = 'WS: online'
-}
-
-ws.onclose = () => {
-  wsIndicator.className = 'status ws-status offline'
-  wsIndicator.textContent = 'WS: offline'
-  // Auto-reconnect after 2s
-  setTimeout(() => {
-    if (ws.readyState === WebSocket.CLOSED) {
-      window.location.reload()
-    }
-  }, 2000)
-}
-
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data)
-
-  switch (data.type) {
-    case 'snapshot':
-      applySnapshot(data)
-      break
-
-    case 'agent:connect':
-    case 'agent:disconnect':
-      handleAgentStatus(data.name, data.type === 'agent:connect')
-      break
-
-    case 'agent:command:start':
-      addLog(data.name, 'cmd-start', {
-        command: data.command,
-        timestamp: data.timestamp
-      })
-      break
-
-    case 'agent:command:done':
-      addLog(data.name, data.ok ? 'cmd-done' : 'cmd-error', {
-        command: data.command,
-        output: data.output || data.error || '',
-        timestamp: data.timestamp
-      })
-      break
-
-    case 'agent:llm:input':
-      addLog(data.name, 'llm-input', {
-        model: data.model,
-        prompt: data.prompt,
-        timestamp: data.timestamp
-      })
-      break
-
-    case 'agent:llm:output':
-      addLog(data.name, 'llm-output', {
-        model: data.model,
-        response: data.response,
-        timestamp: data.timestamp
-      })
-      break
+let agents = [
+  {
+    name: 'steveX-1',
+    online: true,
+    health: 20,
+    maxHealth: 20,
+    mode: 'Survival',
+    model: 'deepseek-v4-flash',
+    position: { x: 123, y: 64, z: -45 },
+    action: 'Mining iron ore'
+  },
+  {
+    name: 'steveX-2',
+    online: true,
+    health: 20,
+    maxHealth: 20,
+    mode: 'Creative',
+    model: 'deepseek-v4-flash',
+    position: { x: 98, y: 70, z: 210 },
+    action: 'Building wall'
   }
-}
+]
 
-// ── Initial load via HTTP ──
-
-async function refresh() {
-  const response = await fetch('/api/status')
-  const data = await response.json()
-  uptimeEl.textContent = `Uptime: ${data.uptimeSec}s`
-  buildGrid(data.agents)
-}
-
-reloadButton.addEventListener('click', async () => {
-  await fetch('/api/reload', { method: 'POST' })
-  // Wait a moment for agents to establish connections before checking status
-  await new Promise(resolve => setTimeout(resolve, 1500))
-  await refresh()
-})
-
-// ── Card management ──
-
-function buildGrid(agents) {
-  const existingNames = new Set()
-  agents.forEach((agent) => {
-    existingNames.add(agent.name)
-    ensureCard(agent)
-  })
-  // Remove cards for agents that no longer exist
-  const cards = grid.querySelectorAll('.card')
-  cards.forEach((card) => {
-    if (!existingNames.has(card.dataset.agentName)) {
-      card.remove()
-    }
+function hydrateIcons(root = document) {
+  root.querySelectorAll('[data-icon]').forEach((slot) => {
+    const name = slot.dataset.icon
+    if (icons[name]) slot.innerHTML = icons[name]
   })
 }
 
-function ensureCard(agent) {
-  let card = grid.querySelector(`.card[data-agent-name="${agent.name}"]`)
-  if (!card) {
-    card = createCard(agent)
-    grid.appendChild(card)
-  }
-  updateStatusPill(card, agent.online)
-  updateUsernamePill(card, agent.username)
-}
+function render() {
+  const query = searchInput.value.trim().toLowerCase()
+  const status = statusFilter.value
+  const order = sortBy.value
 
-function createCard(agent) {
-  const card = document.createElement('section')
-  card.className = 'card'
-  card.dataset.agentName = agent.name
-
-  card.innerHTML = `
-    <h2>${escapeHtml(agent.name)}</h2>
-    <div>
-      <span class="pill status-pill"></span>
-      <span class="pill username-pill"></span>
-    </div>
-    <div class="actions">
-      <button class="green" data-action="connect">Connect</button>
-      <button class="orange" data-action="disconnect">Disconnect</button>
-    </div>
-    <div class="command">
-      <input type="text" class="cmd-input"
-        placeholder="Command: goto 0 64 0, dig, lookat..." />
-      <button class="secondary" data-action="command">Run</button>
-    </div>
-    <div class="log-panel"></div>
-  `
-
-  updateStatusPill(card, agent.online)
-  updateUsernamePill(card, agent.username)
-
-  // Attach button handlers
-  const buttons = card.querySelectorAll('button')
-  buttons.forEach((btn) => {
-    btn.addEventListener('click', () => onAction(agent.name, btn, card))
+  let visibleAgents = agents.filter((agent) => {
+    const matchesText = agent.name.toLowerCase().includes(query)
+    const matchesStatus = status === 'all' || (status === 'online' ? agent.online : !agent.online)
+    return matchesText && matchesStatus
   })
 
-  return card
-}
+  visibleAgents = visibleAgents.sort((a, b) => {
+    if (order === 'status') return Number(b.online) - Number(a.online) || a.name.localeCompare(b.name)
+    if (order === 'health') return b.health - a.health || a.name.localeCompare(b.name)
+    return a.name.localeCompare(b.name, undefined, { numeric: true })
+  })
 
-function updateStatusPill(card, online) {
-  const pill = card.querySelector('.status-pill')
-  if (!pill) return
-  pill.className = `pill status-pill ${online ? 'online' : 'offline'}`
-  pill.textContent = online ? 'online' : 'offline'
-}
-
-function updateUsernamePill(card, username) {
-  const pill = card.querySelector('.username-pill')
-  if (!pill) return
-  pill.textContent = username || '—'
-}
-
-function handleAgentStatus(name, online) {
-  const card = grid.querySelector(`.card[data-agent-name="${name}"]`)
-  if (!card) return
-  updateStatusPill(card, online)
-}
-
-// ── Log entries ──
-
-function addLog(name, entryType, data) {
-  const card = grid.querySelector(`.card[data-agent-name="${name}"]`)
-  if (!card) return
-
-  const panel = card.querySelector('.log-panel')
-  if (!panel) return
-
-  const entry = document.createElement('div')
-  entry.className = `log-entry ${entryType}`
-
-  const time = data.timestamp
-    ? new Date(data.timestamp).toLocaleTimeString()
-    : new Date().toLocaleTimeString()
-
-  switch (entryType) {
-    case 'cmd-start':
-      entry.innerHTML = `<span class="log-time">${time}</span> <span class="log-tag">[CMD]</span> → ${escapeHtml(data.command)}`
-      break
-
-    case 'cmd-done':
-      entry.innerHTML = `<span class="log-time">${time}</span> <span class="log-tag">[CMD]</span> ← ${escapeHtml(data.command)}<br>${escapeHtml(data.output)}`
-      break
-
-    case 'cmd-error':
-      entry.innerHTML = `<span class="log-time">${time}</span> <span class="log-tag">[CMD]</span> ✕ ${escapeHtml(data.command)}<br>${escapeHtml(data.output)}`
-      break
-
-    case 'llm-input':
-      entry.innerHTML = `<span class="log-time">${time}</span> <span class="log-tag">[LLM]</span> → <em>${escapeHtml(data.model)}</em><br>${escapeHtml(truncate(data.prompt, 2000))}`
-      break
-
-    case 'llm-output':
-      entry.innerHTML = `<span class="log-time">${time}</span> <span class="log-tag">[LLM]</span> ← <em>${escapeHtml(data.model)}</em><br>${escapeHtml(truncate(data.response, 2000))}`
-      break
-  }
-
-  panel.appendChild(entry)
-  panel.scrollTop = panel.scrollHeight
-
-  // Keep max 200 entries to avoid memory bloat
-  while (panel.children.length > 200) {
-    panel.firstChild.remove()
-  }
-}
-
-// ── Actions ──
-
-async function onAction(name, button, card) {
-  const action = button.dataset.action
-
-  if (action === 'connect' || action === 'disconnect') {
-    await fetch(`/api/agents/${encodeURIComponent(name)}/${action}`, {
-      method: 'POST'
-    })
+  if (!visibleAgents.length) {
+    agentsList.innerHTML = '<div class="empty-state">No agents match the current filters.</div>'
     return
   }
 
-  if (action === 'command') {
-    const input = card.querySelector('.cmd-input')
-    const command = input.value.trim()
-    if (!command) return
+  agentsList.innerHTML = visibleAgents.map(agentTemplate).join('')
+  hydrateIcons(agentsList)
+}
 
-    const response = await fetch(`/api/agents/${encodeURIComponent(name)}/command`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command })
-    })
-    const result = await response.json()
+function agentTemplate(agent) {
+  const statusClass = agent.online ? 'online' : 'offline'
+  const statusText = agent.online ? 'online' : 'offline'
+  const percent = Math.max(0, Math.min(100, Math.round((agent.health / agent.maxHealth) * 100)))
+  const position = `x: ${agent.position.x}, y: ${agent.position.y}, z: ${agent.position.z}`
 
-    // Show result in log panel via WebSocket would be real-time,
-    // but for HTTP commands we render inline too
-    addLog(name, result.ok ? 'cmd-done' : 'cmd-error', {
-      command,
-      output: result.output || result.error || 'Done',
-      timestamp: Date.now()
-    })
+  return `
+    <article class="agent-card" data-agent-name="${escapeHtml(agent.name)}">
+      <div class="agent-header">
+        <div class="agent-id">
+          <h2>${escapeHtml(agent.name)}</h2>
+          <span class="dot ${statusClass}" aria-hidden="true"></span>
+          <span class="state-label">${statusText}</span>
+        </div>
 
-    input.value = ''
+        <div class="agent-actions">
+          <button class="btn soft-success" type="button" data-action="connect" data-agent="${escapeHtml(agent.name)}">
+            <span data-icon="link"></span>
+            Connect
+          </button>
+          <button class="btn soft-danger" type="button" data-action="disconnect" data-agent="${escapeHtml(agent.name)}">
+            <span data-icon="unlink"></span>
+            Disconnect
+          </button>
+        </div>
+      </div>
+
+      <div class="agent-body">
+        <div class="stats-panel">
+          <div class="stats-column">
+            <div class="stat-row">
+              <div class="stat-label">Health</div>
+              <div class="stat-value">
+                <span data-icon="heart"></span>
+                <span class="health-wrap">
+                  <span class="health-number">${agent.health} / ${agent.maxHealth}</span>
+                  <span class="health-bar" aria-label="Health ${percent}%"><span class="health-fill" style="--health:${percent}%"></span></span>
+                </span>
+              </div>
+            </div>
+
+            <div class="stat-row">
+              <div class="stat-label">Game Mode</div>
+              <div class="stat-value"><span data-icon="gamepad"></span>${escapeHtml(agent.mode)}</div>
+            </div>
+
+            <div class="stat-row">
+              <div class="stat-label">Model</div>
+              <div class="stat-value"><span data-icon="brain"></span>${escapeHtml(agent.model)}</div>
+            </div>
+          </div>
+
+          <div class="stats-column">
+            <div class="stat-row">
+              <div class="stat-label">Position</div>
+              <div class="stat-value"><span data-icon="pin"></span>${escapeHtml(position)}</div>
+            </div>
+
+            <div class="stat-row">
+              <div class="stat-label">Current Action</div>
+              <div class="stat-value"><span data-icon="walk"></span>${escapeHtml(agent.action)}</div>
+            </div>
+
+            <div class="stat-row">
+              <div class="stat-label">Status</div>
+              <div class="stat-value"><span class="dot ${statusClass}"></span>${agent.online ? 'Online' : 'Offline'}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="command-stack">
+          <form class="command-panel" data-action="command" data-agent="${escapeHtml(agent.name)}">
+            <div class="command-title">Send Command <span>(to Agent)</span></div>
+            <div class="command-row">
+              <input type="text" name="message" placeholder="Enter command..." autocomplete="off" />
+              <button class="btn send" type="submit">Send</button>
+            </div>
+          </form>
+
+          <form class="command-panel" data-action="message" data-agent="${escapeHtml(agent.name)}">
+            <div class="command-title">Send Message <span>(to LLM Planner)</span></div>
+            <div class="command-row">
+              <input type="text" name="message" placeholder="Enter message for LLM Planner..." autocomplete="off" />
+              <button class="btn send" type="submit">Send</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </article>
+  `
+}
+
+function setWsStatus(isOnline) {
+  wsIndicator.textContent = isOnline ? 'WS: online' : 'WS: offline'
+  wsIndicator.className = isOnline ? 'ws-online' : 'ws-offline'
+  sidebarWs.textContent = wsIndicator.textContent
+  const sidebarDot = document.querySelector('.sidebar-status .dot')
+  sidebarDot.className = `dot ${isOnline ? 'online' : 'offline'}`
+}
+
+function updateUptime() {
+  uptimeEl.textContent = `Uptime: ${uptimeSeconds}s`
+}
+
+function mutateAgent(name, updater) {
+  agents = agents.map((agent) => agent.name === name ? { ...agent, ...updater(agent) } : agent)
+  render()
+}
+
+function handleAgentAction(event) {
+  const button = event.target.closest('button[data-action]')
+  if (!button) return
+
+  const name = button.dataset.agent
+  const action = button.dataset.action
+
+  if (action === 'connect') {
+    mutateAgent(name, () => ({ online: true, action: 'Connected and awaiting task' }))
+  }
+
+  if (action === 'disconnect') {
+    mutateAgent(name, () => ({ online: false, action: 'Disconnected' }))
   }
 }
 
-// ── Snapshot handler (WebSocket on connect) ──
+function handleFormSubmit(event) {
+  const form = event.target.closest('form.command-panel')
+  if (!form) return
 
-function applySnapshot(data) {
-  uptimeEl.textContent = `Uptime: ${data.uptimeSec}s`
-  if (data.agents) {
-    buildGrid(data.agents)
-  }
+  event.preventDefault()
+
+  const input = form.querySelector('input[name="message"]')
+  const value = input.value.trim()
+  if (!value) return
+
+  const type = form.dataset.action === 'command' ? 'Command sent' : 'Message queued'
+  mutateAgent(form.dataset.agent, () => ({ action: `${type}: ${value}` }))
+  input.value = ''
 }
 
-// ── Helpers ──
+function addAgent() {
+  const id = nextAgentId++
+  agents = [
+    ...agents,
+    {
+      name: `steveX-${id}`,
+      online: true,
+      health: 20,
+      maxHealth: 20,
+      mode: id % 2 ? 'Survival' : 'Creative',
+      model: 'deepseek-v4-flash',
+      position: { x: 80 + id * 12, y: 64 + id, z: id % 2 ? -32 : 180 + id * 8 },
+      action: 'Awaiting instruction'
+    }
+  ]
+  render()
+}
 
-function escapeHtml(str) {
-  if (!str) return ''
-  return String(str)
+function reloadConfig() {
+  reloadButton.animate([
+    { transform: 'translateY(0)' },
+    { transform: 'translateY(-1px) scale(0.98)' },
+    { transform: 'translateY(0)' }
+  ], { duration: 220 })
+
+  uptimeSeconds = 33
+  updateUptime()
+  setWsStatus(true)
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
 }
 
-function truncate(str, maxLen) {
-  if (!str || str.length <= maxLen) return str
-  return str.slice(0, maxLen) + '…'
-}
+searchInput.addEventListener('input', render)
+statusFilter.addEventListener('change', render)
+sortBy.addEventListener('change', render)
+newAgentButton.addEventListener('click', addAgent)
+reloadButton.addEventListener('click', reloadConfig)
+agentsList.addEventListener('click', handleAgentAction)
+agentsList.addEventListener('submit', handleFormSubmit)
 
-// ── Bootstrap ──
+setInterval(() => {
+  uptimeSeconds += 1
+  updateUptime()
+}, 1000)
 
-refresh()
+hydrateIcons()
+updateUptime()
+setWsStatus(true)
+render()

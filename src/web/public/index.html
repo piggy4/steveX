@@ -7,18 +7,79 @@
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-  <header>
-    <div>
-      <h1>steveX Debug Console</h1>
-      <span class="subtitle">AI Agent 实时调试台</span>
-    </div>
-    <div class="toolbar">
-      <button id="reload">Reload Config</button>
-      <span class="status" id="uptime">Uptime: --</span>
-      <span class="status ws-status offline" id="ws-indicator">WS: offline</span>
-    </div>
-  </header>
-  <main id="grid"></main>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="steveX navigation">
+      <div class="brand">
+        <div class="brand-mark">steveX</div>
+        <div class="brand-subtitle">Debug Console</div>
+      </div>
+
+      <nav class="nav-list" aria-label="Primary">
+        <a class="nav-item" href="#"><span data-icon="home"></span>Overview</a>
+        <a class="nav-item active" href="#"><span data-icon="agents"></span>Agents</a>
+        <a class="nav-item" href="#"><span data-icon="world"></span>World</a>
+        <a class="nav-item" href="#"><span data-icon="tasks"></span>Tasks</a>
+        <a class="nav-item" href="#"><span data-icon="capsules"></span>Capsules</a>
+        <a class="nav-item" href="#"><span data-icon="evolution"></span>Evolution</a>
+        <a class="nav-item" href="#"><span data-icon="configs"></span>Configs</a>
+        <a class="nav-item" href="#"><span data-icon="logs"></span>Logs</a>
+      </nav>
+
+      <div class="sidebar-status">
+        <span class="dot online"></span>
+        <span id="sidebar-ws">WS: online</span>
+      </div>
+    </aside>
+
+    <main class="page">
+      <header class="topbar">
+        <div class="title-group">
+          <h1>Agents</h1>
+          <span>智能体管理</span>
+        </div>
+
+        <div class="top-actions">
+          <span id="uptime">Uptime: 33s</span>
+          <span id="ws-indicator" class="ws-online">WS: online</span>
+          <button id="reload" class="btn ghost" type="button">
+            <span data-icon="refresh"></span>
+            Reload Config
+          </button>
+        </div>
+      </header>
+
+      <section class="controls" aria-label="Agent controls">
+        <label class="search-box" for="agent-search">
+          <span data-icon="search"></span>
+          <input id="agent-search" type="search" placeholder="Search agents..." autocomplete="off" />
+        </label>
+
+        <div class="select-wrap">
+          <select id="status-filter" aria-label="Filter by status">
+            <option value="all">All Status</option>
+            <option value="online">Online</option>
+            <option value="offline">Offline</option>
+          </select>
+        </div>
+
+        <div class="select-wrap">
+          <select id="sort-by" aria-label="Sort agents">
+            <option value="name">Sort by: Name</option>
+            <option value="status">Sort by: Status</option>
+            <option value="health">Sort by: Health</option>
+          </select>
+        </div>
+
+        <button id="new-agent" class="btn primary" type="button">
+          <span data-icon="plus"></span>
+          New Agent
+        </button>
+      </section>
+
+      <section id="agents-list" class="agents-list" aria-live="polite"></section>
+    </main>
+  </div>
+
   <script src="/app.js"></script>
 </body>
 </html>
