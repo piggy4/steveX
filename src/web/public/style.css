@@ -1,20 +1,20 @@
 :root {
-  --bg: #fbfaf8;
+  --bg: #f8f9fb;
   --panel: #ffffff;
-  --panel-soft: #fcfbfa;
-  --line: #e9e4df;
-  --line-strong: #ddd7d0;
-  --text: #171513;
-  --muted: #7b746d;
-  --muted-2: #9a928a;
-  --accent: #d76625;
-  --accent-dark: #bd5519;
-  --accent-soft: #fff2ea;
+  --panel-soft: #fafbfc;
+  --line: #dfe3e9;
+  --line-strong: #d0d7dd;
+  --text: #000000;
+  --muted: #6d717b;
+  --muted-2: #8b8a9a;
+  --accent: #2563eb;
+  --accent-dark: #1d4ed8;
+  --accent-soft: #eff6ff;
   --success: #43ad51;
   --success-dark: #23672b;
   --success-soft: #eefaf0;
-  --danger-soft: #fff4ef;
-  --shadow: 0 18px 50px rgba(42, 33, 26, 0.08);
+  --danger-soft: #fef2f2;
+  --shadow: 0 18px 50px rgba(26, 35, 42, 0.08);
   --radius-xl: 14px;
   --radius-lg: 12px;
   --radius-md: 10px;
@@ -34,8 +34,8 @@ body {
   margin: 0;
   color: var(--text);
   background:
-    radial-gradient(circle at 7% 10%, rgba(220, 107, 36, 0.08), transparent 28%),
-    radial-gradient(circle at 93% 0%, rgba(224, 214, 207, 0.55), transparent 30%),
+    radial-gradient(circle at 7% 10%, rgba(37, 99, 235, 0.06), transparent 28%),
+    radial-gradient(circle at 93% 0%, rgba(192, 202, 243, 0.55), transparent 30%),
     var(--bg);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -55,7 +55,7 @@ select {
 button:focus-visible,
 input:focus-visible,
 select:focus-visible {
-  outline: 3px solid rgba(215, 102, 37, 0.24);
+  outline: 3px solid rgba(37, 99, 235, 0.24);
   outline-offset: 2px;
 }
 
@@ -108,7 +108,7 @@ select:focus-visible {
   display: flex;
   align-items: center;
   gap: 18px;
-  color: #57514b;
+  color: #4b4b57;
   border-radius: 9px;
   text-decoration: none;
   font-size: 17px;
@@ -122,13 +122,13 @@ select:focus-visible {
 }
 
 .nav-item:hover {
-  background: rgba(224, 214, 207, 0.42);
+  background: rgba(223, 217, 249, 0.42);
   color: var(--text);
 }
 
 .nav-item.active {
-  color: #674123;
-  background: #f0e9e2;
+  color: #1e40af;
+  background: #dbeafe;
 }
 
 .sidebar-status {
@@ -143,7 +143,7 @@ select:focus-visible {
   background: rgba(255, 255, 255, 0.82);
   border: 1px solid var(--line);
   border-radius: 9px;
-  box-shadow: 0 12px 30px rgba(42, 33, 26, 0.04);
+  box-shadow: 0 12px 30px rgba(26, 28, 42, 0.04);
 }
 
 .dot {
@@ -160,8 +160,8 @@ select:focus-visible {
 }
 
 .dot.offline {
-  background: #d26b39;
-  box-shadow: 0 0 0 3px rgba(210, 107, 57, 0.09);
+  background: #dc2626;
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.09);
 }
 
 .page {
@@ -198,7 +198,7 @@ select:focus-visible {
   display: flex;
   align-items: center;
   gap: 16px;
-  color: #655f59;
+  color: #595a65;
   font-size: 15px;
   white-space: nowrap;
 }
@@ -208,7 +208,7 @@ select:focus-visible {
 }
 
 .ws-offline {
-  color: #af551f;
+  color: #dc2626;
 }
 
 .btn {
@@ -235,23 +235,23 @@ select:focus-visible {
 
 .btn.ghost {
   color: #46403a;
-  background: #ddd7d1;
+  background: #d1d3dd;
   box-shadow: 0 8px 18px rgba(42, 33, 26, 0.05);
 }
 
 .btn.ghost:hover {
-  background: #d5cec7;
+  background: #c7cad5;
 }
 
 .btn.primary {
   min-width: 160px;
   color: #fff;
-  background: linear-gradient(180deg, #df762f, var(--accent));
-  box-shadow: 0 12px 26px rgba(215, 102, 37, 0.22);
+  background: linear-gradient(180deg, #3b82f6, var(--accent));
+  box-shadow: 0 12px 26px rgba(37, 99, 235, 0.22);
 }
 
 .btn.primary:hover {
-  background: linear-gradient(180deg, #e47b33, var(--accent-dark));
+  background: linear-gradient(180deg, #60a5fa, var(--accent-dark));
 }
 
 .btn.soft-success {
@@ -267,20 +267,20 @@ select:focus-visible {
 
 .btn.soft-danger {
   min-width: 176px;
-  color: var(--accent);
+  color: #dc2626;
   background: var(--danger-soft);
-  border-color: #f3d7c9;
+  border-color: #fecaca;
 }
 
 .btn.soft-danger:hover {
-  background: #ffede5;
+  background: #fee2e2;
 }
 
 .btn.send {
   min-width: 74px;
   color: #1f1c19;
-  background: #ddd7d1;
-  border-color: #ddd7d1;
+  background: #d4d1dd;
+  border-color: #d2d1dd;
 }
 
 .controls {
@@ -300,13 +300,13 @@ select:focus-visible {
   background: rgba(255, 255, 255, 0.88);
   border: 1px solid var(--line-strong);
   border-radius: 9px;
-  box-shadow: 0 10px 28px rgba(42, 33, 26, 0.03);
+  box-shadow: 0 10px 28px rgba(27, 26, 42, 0.03);
 }
 
 .search-box svg {
   width: 20px;
   height: 20px;
-  color: #7b746d;
+  color: #6d6d7b;
 }
 
 .search-box input {
@@ -319,7 +319,7 @@ select:focus-visible {
 }
 
 .search-box input::placeholder {
-  color: #918982;
+  color: #868291;
 }
 
 .select-wrap {
@@ -333,7 +333,7 @@ select:focus-visible {
   top: 50%;
   pointer-events: none;
   transform: translateY(-56%);
-  color: #5e5750;
+  color: #52505e;
   font-size: 17px;
 }
 
@@ -342,7 +342,7 @@ select {
   height: 54px;
   appearance: none;
   padding: 0 42px 0 18px;
-  color: #241f1b;
+  color: #1b1b24;
   background: rgba(255, 255, 255, 0.9);
   border: 1px solid var(--line-strong);
   border-radius: 9px;
@@ -388,8 +388,15 @@ select {
 }
 
 .agent-id .state-label {
-  color: #2b6d32;
   font-size: 15px;
+}
+
+.agent-id .state-label[data-status="online"] {
+  color: #2b6d32;
+}
+
+.agent-id .state-label[data-status="offline"] {
+  color: #dc2626;
 }
 
 .agent-actions {
@@ -433,7 +440,7 @@ select {
 }
 
 .stat-label {
-  color: #504942;
+  color: #424550;
   font-size: 14px;
   line-height: 1;
 }
@@ -473,7 +480,7 @@ select {
   width: 100%;
   height: 4px;
   overflow: hidden;
-  background: #e8e4df;
+  background: #e1dfe8;
   border-radius: 999px;
 }
 
@@ -503,7 +510,7 @@ select {
 }
 
 .command-title span {
-  color: #716a63;
+  color: #686371;
   font-weight: 500;
 }
 
@@ -525,7 +532,7 @@ select {
 }
 
 .command-row input::placeholder {
-  color: #918982;
+  color: #838291;
 }
 
 .empty-state {
@@ -637,7 +644,7 @@ select {
   max-height: 260px;
   overflow-y: auto;
   padding: 14px 16px;
-  background: #faf7f4;
+  background: #f4f6fa;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -679,5 +686,5 @@ select {
 
 .log-entry.llm-input,
 .log-entry.llm-output {
-  color: #4a433c;
+  color: #3e3c4a;
 }
