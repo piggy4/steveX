@@ -629,3 +629,55 @@ select {
     width: 100%;
   }
 }
+
+/* ── Log panel (per agent card) ── */
+
+.log-panel {
+  margin-top: 20px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 14px 16px;
+  background: #faf7f4;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.log-entry {
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(0,0,0,0.04);
+  word-break: break-all;
+}
+
+.log-entry:last-child {
+  border-bottom: 0;
+}
+
+.log-time {
+  color: var(--muted-2);
+  font-size: 11px;
+  margin-right: 6px;
+}
+
+.log-tag {
+  font-weight: 700;
+  font-size: 11px;
+  margin-right: 4px;
+}
+
+.log-entry.cmd-start,
+.log-entry.cmd-done,
+.log-entry.cmd-error {
+  color: var(--text);
+}
+
+.log-entry.cmd-error {
+  color: var(--accent);
+}
+
+.log-entry.llm-input,
+.log-entry.llm-output {
+  color: #4a433c;
+}
