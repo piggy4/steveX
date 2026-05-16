@@ -1,7 +1,7 @@
 // ── steveX Agents page ──
 // Rendering + event handlers for the agent management view.
 
-import { getState, addLog } from '../lib/state.js'
+import { getState, addLog, subscribe } from '../lib/state.js'
 import { connectAgent, disconnectAgent, sendCommand } from '../lib/api.js'
 import { escapeHtml } from '../lib/utils.js'
 import { hydrateIcons } from '../lib/icons.js'
@@ -69,6 +69,10 @@ function agentCardHtml(agent) {
             <span data-icon="unlink"></span>
             Disconnect
           </button>
+          <button class="btn ghost" type="button" data-action="log" data-agent="${escapeHtml(agent.name)}">
+            <span data-icon="logs"></span>
+            Agent Log
+          </button>
         </div>
       </div>
 
@@ -133,60 +137,94 @@ function agentCardHtml(agent) {
           </form>
         </div>
       </div>
-
-      <div class="log-panel"></div>
     </article>
   `
 }
 
-// ── Log rendering (per agent card) ──
+// ── Log modal ──
 
-function renderLogPanel(card, name) {
-  const panel = card.querySelector('.log-panel')
-  if (!panel) return
+function showLogModal(name) {
+  // Remove any existing modal
+  const existing = document.getElementById('log-modal')
+  if (existing) existing.remove()
 
   const entries = getState().logs[name] || []
 
-  // Only render new entries (append)
-  const currentCount = panel.children.length
-  for (let i = currentCount; i < entries.length; i++) {
-    const entry = entries[i]
-    const el = document.createElement('div')
-    el.className = `log-entry ${entry.type}`
+  const modal = document.createElement('div')
+  modal.id = 'log-modal'
+  modal.className = 'log-modal-overlay'
+  modal.innerHTML = `
+    <div class="log-modal">
+      <div class="log-modal-header">
+        <h2>${escapeHtml(name)} <span>Agent Log</span></h2>
+        <button class="log-modal-close" type="button">&times;</button>
+      </div>
+      <div class="log-modal-body">
+        ${entries.length === 0 ? '<div class="log-empty">No log entries yet.</div>' : ''}
+      </div>
+    </div>
+  `
 
-    const time = entry.timestamp
-      ? new Date(entry.timestamp).toLocaleTimeString()
-      : new Date().toLocaleTimeString()
+  document.body.appendChild(modal)
 
-    let html = ''
-    switch (entry.type) {
-      case 'cmd-start':
-        html = `<span class="log-time">${time}</span> <span class="log-tag">[CMD]</span> \u2192 ${escapeHtml(entry.command)}`
-        break
-      case 'cmd-done':
-        html = `<span class="log-time">${time}</span> <span class="log-tag">[CMD]</span> \u2190 ${escapeHtml(entry.command)}<br>${escapeHtml(entry.output)}`
-        break
-      case 'cmd-error':
-        html = `<span class="log-time">${time}</span> <span class="log-tag">[CMD]</span> \u2715 ${escapeHtml(entry.command)}<br>${escapeHtml(entry.output)}`
-        break
-      case 'llm-input':
-        html = `<span class="log-time">${time}</span> <span class="log-tag">[LLM]</span> \u2192 <em>${escapeHtml(entry.model)}</em><br>${escapeHtml(entry.prompt ? entry.prompt.slice(0, 2000) + (entry.prompt.length > 2000 ? '\u2026' : '') : '')}`
-        break
-      case 'llm-output':
-        html = `<span class="log-time">${time}</span> <span class="log-tag">[LLM]</span> \u2190 <em>${escapeHtml(entry.model)}</em><br>${escapeHtml(entry.response ? entry.response.slice(0, 2000) + (entry.response.length > 2000 ? '\u2026' : '') : '')}`
-        break
+  // Populate existing entries
+  const body = modal.querySelector('.log-modal-body')
+  for (const entry of entries) {
+    body.appendChild(buildLogEntryEl(entry))
+  }
+  body.scrollTop = body.scrollHeight
+
+  // Close handlers
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal || e.target.closest('.log-modal-close')) {
+      modal.remove()
     }
+  })
 
-    el.innerHTML = html
-    panel.appendChild(el)
+  // Subscribe for live updates while modal is open
+  const unsub = subscribe(() => {
+    if (!document.getElementById('log-modal')) {
+      unsub()
+      return
+    }
+    const currentEntries = getState().logs[name] || []
+    const currentCount = body.children.length - (body.querySelector('.log-empty') ? 1 : 0)
+    for (let i = currentCount; i < currentEntries.length; i++) {
+      body.appendChild(buildLogEntryEl(currentEntries[i]))
+    }
+    body.scrollTop = body.scrollHeight
+  })
+}
+
+function buildLogEntryEl(entry) {
+  const el = document.createElement('div')
+  el.className = `log-entry ${entry.type}`
+
+  const time = entry.timestamp
+    ? new Date(entry.timestamp).toLocaleTimeString()
+    : new Date().toLocaleTimeString()
+
+  let html = ''
+  switch (entry.type) {
+    case 'cmd-start':
+      html = `<span class="log-time">${time}</span> <span class="log-tag">[CMD]</span> \u2192 ${escapeHtml(entry.command)}`
+      break
+    case 'cmd-done':
+      html = `<span class="log-time">${time}</span> <span class="log-tag">[CMD]</span> \u2190 ${escapeHtml(entry.command)}<br>${escapeHtml(entry.output)}`
+      break
+    case 'cmd-error':
+      html = `<span class="log-time">${time}</span> <span class="log-tag">[CMD]</span> \u2715 ${escapeHtml(entry.command)}<br>${escapeHtml(entry.output)}`
+      break
+    case 'llm-input':
+      html = `<span class="log-time">${time}</span> <span class="log-tag">[LLM]</span> \u2192 <em>${escapeHtml(entry.model)}</em><br>${escapeHtml(entry.prompt ? entry.prompt.slice(0, 2000) + (entry.prompt.length > 2000 ? '\u2026' : '') : '')}`
+      break
+    case 'llm-output':
+      html = `<span class="log-time">${time}</span> <span class="log-tag">[LLM]</span> \u2190 <em>${escapeHtml(entry.model)}</em><br>${escapeHtml(entry.response ? entry.response.slice(0, 2000) + (entry.response.length > 2000 ? '\u2026' : '') : '')}`
+      break
   }
 
-  // Trim overflow
-  while (panel.children.length > 200) {
-    panel.firstChild.remove()
-  }
-
-  panel.scrollTop = panel.scrollHeight
+  el.innerHTML = html
+  return el
 }
 
 // ── Render the full agents list ──
@@ -216,7 +254,6 @@ export function renderAgents(container) {
 
     // Update dynamic parts without full re-render
     updateDynamicFields(card, agent)
-    renderLogPanel(card, agent.name)
   })
 
   // Remove cards for agents that no longer exist
@@ -273,6 +310,8 @@ function handleClick(e) {
     connectAgent(name)
   } else if (action === 'disconnect') {
     disconnectAgent(name)
+  } else if (action === 'log') {
+    showLogModal(name)
   }
 }
 
