@@ -127,9 +127,11 @@ class SteveXAgent {
 
   /** Gracefully disconnect the bot from the server. */
   shutdown() {
-    if (this.bot) {
-      this.bot.quit('Shutdown')
+    if (this.bot && this.bot.end) {
+      this.bot.end()
     }
+    this.connecting = false
+    this.connected = false
   }
 }
 
