@@ -1,12 +1,12 @@
 # steveX 项目工作状态文档
 
-> 最后更新：2026-05-16
+> 最后更新：2026-05-16 20:20
 
 ---
 
 ## 一、项目定位
 
-本项目旨在构建一套**以"版本控制"与"群体进化"为核心的多智能体系统架构**，在 Minecraft 虚拟环境中探索 AI Agent 的前沿技术。详见 [`项目简介v0515.md`]（项目根目录）。
+本项目旨在构建一套**以"版本控制"与"群体进化"为核心的多智能体系统架构**，在 Minecraft 虚拟环境中探索 AI Agent 的前沿技术。
 
 ---
 
@@ -22,13 +22,13 @@ AgentManager (多 Agent 管理)
     └── 事件总线 (eventBus → WebSocket 推送)
     ↓
 SteveXAgent (单个 Agent 实例)
-    ├── Bot (mineflayer)          ← Minecraft 连接 (✅ 已实现)
-    ├── Commands (77 个命令)       ← 57 action + 14 query + 6 creative (✅ 已完成)
-    ├── LLM (DeepSeekClient)       ← 客户端已实现，Agent 层尚未集成
-    ├── Memory                     ← src/memory/ 存在（空）
-    ├── Blackboard                 ← src/blackboard/ 存在（空）
-    ├── Capsules                   ← src/capsules/ 存在（空）
-    ├── Benchmarks                 ← src/benchmarks/ + benchmarks/ 存在（空）
+    ├── Bot (mineflayer)           ← Minecraft 连接 (✅ 已实现，内联在 agent.js 中)
+    ├── Commands (77 个命令)        ← 57 action + 14 query + 6 creative (✅ 已完成)
+    ├── LLM (DeepSeekClient)        ← 客户端已实现，Agent 层尚未集成
+    ├── Memory                      ← src/memory/ 存在（空）
+    ├── Blackboard                  ← src/blackboard/ 存在（空）
+    ├── Capsules                    ← src/capsules/ 存在（空）
+    ├── Benchmarks                  ← src/benchmarks/ + benchmarks/ 存在（空）
 
     ↓
 Web 面板 (Express + WebSocket)
@@ -54,17 +54,14 @@ Web 面板 (Express + WebSocket)
 | **配置系统** | ✅ 完成 | JSON 配置 + 环境配置文件合并覆盖 |
 | **日志系统** | ✅ 完成 | console.log/error 封装，支持附加元数据 |
 
-### 🔄 进行中
-
-| 子系统 | 状态 | 说明 |
-|--------|------|------|
-| **Agent 认知架构** | 🔄 设计中 | 拆分为 Brain / Planner / Executor / Reflector / Memory 五大模块 |
-
 ### ❌ 未开始
+
+> 所有子系统均处于未开始状态。认知架构已完成设计，详见第五章。
 
 | 子系统 | 状态 | 预期阶段 |
 |--------|------|----------|
 | **LLM 集成到 Agent** | ❌ | Phase 1 — 让 Agent 能用 LLM 自主决策 |
+| **Agent 认知架构 (Brain/Planner/Executor/Reflector/Memory)** | ❌ | Phase 1 — 设计已完成，代码未编写 |
 | **Memory 记忆系统** | ❌ | Phase 2 — 文件系统持久化记忆 |
 | **Git 版本控制** | ❌ | Phase 2 — 每次决策 commit，可审计可回滚 |
 | **Blackboard 黑板** | ❌ | Phase 3 — 多 Agent 共享工作区 |
@@ -83,16 +80,16 @@ Web 面板 (Express + WebSocket)
 
 | # | 任务 | 状态 |
 |---|------|------|
-| 1.1 | 创建 `src/agent/modules/` 目录结构 | 🔜 |
-| 1.2 | 实现 `Memory` 模块（对话历史管理） | 🔜 |
-| 1.3 | 创建 `src/agent/prompts/` 目录 + System Prompt 模板 | 🔜 |
-| 1.4 | 实现 `Planner` 模块（任务分解） | 🔜 |
-| 1.5 | 实现 `Executor` 模块（命令调用 + LLM 决策） | 🔜 |
-| 1.6 | 实现 `Reflector` 模块（反思总结） | 🔜 |
-| 1.7 | 实现 `Brain` 模块（认知循环调度器） | 🔜 |
-| 1.8 | 改造 `agent.js` 集成 Brain | 🔜 |
-| 1.9 | 改造 `agent_manager.js` 添加 LLM 聊天接口 | 🔜 |
-| 1.10 | 改造前端面板，添加 LLM 聊天界面 | 🔜 |
+| 1.1 | 创建 `src/agent/modules/` 目录结构 | ❌ |
+| 1.2 | 实现 `Memory` 模块（对话历史管理） | ❌ |
+| 1.3 | 创建 `src/agent/prompts/` 目录 + System Prompt 模板 | ❌ |
+| 1.4 | 实现 `Planner` 模块（任务分解） | ❌ |
+| 1.5 | 实现 `Executor` 模块（命令调用 + LLM 决策） | ❌ |
+| 1.6 | 实现 `Reflector` 模块（反思总结） | ❌ |
+| 1.7 | 实现 `Brain` 模块（认知循环调度器） | ❌ |
+| 1.8 | 改造 `agent.js` 集成 Brain | ❌ |
+| 1.9 | 改造 `agent_manager.js` 添加 LLM 聊天接口 | ❌ |
+| 1.10 | 改造前端面板，添加 LLM 聊天界面 | ❌ |
 
 > **注：** WebSocket 层和前端已预留 `agent:llm:input` / `agent:llm:output` 事件处理，LLM 聊天界面接入后可直接复用推送通道。
 
@@ -200,18 +197,18 @@ Brain.think(userMessage)
 | **Memory** | `src/agent/modules/memory.js` | 对话历史、状态缓存、文件持久化 | ❌ |
 | **LLM Engine** | `src/llm/deepseek_client.js` | 统一的 LLM 调用接口（✅ 已实现） | 被调用方 |
 
-### 5.4 目录结构规划（🔜 待创建）
+### 5.4 目录结构规划（❌ 待创建）
 
 ```
 src/agent/
 ├── agent.js             # SteveXAgent - 使用 Brain 的入口
-├── brain.js             # Brain - 认知循环调度器（🔜 待实现）
-├── modules/             # 🔜 待创建
+├── brain.js             # ❌ 未实现 - 认知循环调度器
+├── modules/             # ❌ 未创建
 │   ├── memory.js        # Memory - 对话/状态管理
 │   ├── planner.js       # Planner - 任务规划
 │   ├── executor.js      # Executor - 命令执行
 │   └── reflector.js     # Reflector - 反思总结
-└── prompts/             # 🔜 待创建
+└── prompts/             # ❌ 未创建
     ├── planner.md       # Planner 的 system prompt
     ├── executor.md      # Executor 的 system prompt
     └── reflector.md     # Reflector 的 system prompt
@@ -262,38 +259,34 @@ clearinventory  clearslot  flyto  setinventory  startfly  stopfly
 steveX/
 ├── package.json              # 项目配置
 ├── start.bat                 # 启动脚本 (npm start)
-├── benchmarks/               # 🔜 基准测试数据（空）
-├── runs/                     # 🔜 实验运行记录（空）
+├── benchmarks/               # ❌ 基准测试数据（空）
+├── runs/                     # ❌ 实验运行记录（空）
 ├── configs/
 │   └── defaults/
 │       └── app.json          # 默认配置
-├── profiles/                 # LLM 角色配置（预留）
+├── docs/
+│   └── work-status.md        # 本文件
 ├── src/
-│   ├── main.js               # 入口
+│   ├── main.js               # 入口 — 启动 AgentManager + Web 服务器
 │   ├── agent/
-│   │   ├── agent.js          # Agent 核心类
-│   │   ├── brain.js          # 🔜 待实现
-│   │   ├── modules/          # 🔜 待创建
-│   │   └── prompts/          # 🔜 待创建
+│   │   ├── agent.js          # Agent 核心类（mineflayer Bot 封装 + 命令执行）
+│   │   ├── agent_manager.js  # 多 Agent 管理器（启停/命令/事件总线）
+│   │   ├── brain.js          # ❌ 未实现
+│   │   ├── modules/          # ❌ 未创建
+│   │   └── prompts/          # ❌ 未创建
 │   ├── commands/
 │   │   ├── index.js          # 命令自动加载器（actions/queries/creative）
 │   │   ├── actions/          # 57 个动作命令
 │   │   ├── queries/          # 14 个查询命令
 │   │   └── creative/         # 6 个创造模式命令
-│   ├── multiagent/
-│   │   └── agent_manager.js  # 多 Agent 管理器（含事件总线）
 │   ├── llm/
 │   │   └── deepseek_client.js# DeepSeek API 客户端（✅ 已实现）
-│   ├── memory/               # 🔜 记忆系统（空，含 .gitkeep）
-│   ├── blackboard/           # 🔜 黑板系统（空，含 .gitkeep）
-│   ├── capsules/             # 🔜 胶囊系统（空，含 .gitkeep）
-│   ├── benchmarks/           # 🔜 基准测试（空，含 .gitkeep）
-│   ├── connector/
-│   │   └── mineflayer_connector.js
-│   ├── telemetry/
-│   │   └── logger.js
+│   ├── memory/               # ❌ 记忆系统（空，含 .gitkeep）
+│   ├── blackboard/           # ❌ 黑板系统（空，含 .gitkeep）
+│   ├── capsules/             # ❌ 胶囊系统（空，含 .gitkeep）
+│   ├── benchmarks/           # ❌ 基准测试（空，含 .gitkeep）
 │   ├── utils/
-│   │   └── config.js
+│   │   └── config.js         # 配置加载
 │   └── web/
 │       ├── server.js         # HTTP 服务入口
 │       ├── server/
@@ -304,8 +297,6 @@ steveX/
 │           ├── index.html    # Web 面板
 │           ├── app.js        # 前端逻辑（含 LLM 事件预留）
 │           └── style.css     # 样式表
-└── docs/
-    └── work-status.md        # 本文件
 ```
 
 ---
