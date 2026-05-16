@@ -25,11 +25,9 @@ class AgentManager {
   // ── Lifecycle ──
 
   disconnectAll() {
-    for (const [name, agent] of this.agents) {
-      this.eventBus.emit('agent:disconnect', { name })
-      agent.shutdown()
+    for (const name of this.agents.keys()) {
+      this.disconnectAgent(name)
     }
-    this.agents.clear()
   }
 
   reload() {
@@ -40,8 +38,7 @@ class AgentManager {
   connectAgent(name) {
     const cfg = (this.config.agents || []).find(c => c.name === name)
     if (!cfg) return false
-    const existing = this.agents.get(name)
-    if (existing && existing.isOnline()) return true
+    if (this.agents.get(name)?.isOnline()) return true
 
     const agent = new SteveXAgent(cfg, name, this.sharedCommands)
     agent.start()
@@ -91,16 +88,14 @@ class AgentManager {
   // ── Queries ──
 
   getStatus() {
-    const statuses = []
-    for (const cfg of (this.config.agents || [])) {
+    return (this.config.agents || []).map(cfg => {
       const agent = this.agents.get(cfg.name)
-      statuses.push({
+      return {
         name: cfg.name,
         username: agent?.getUsername() ?? cfg.minecraft.username,
         online: agent?.isOnline() ?? false
-      })
-    }
-    return statuses
+      }
+    })
   }
 }
 

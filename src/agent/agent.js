@@ -8,12 +8,12 @@ class SteveXAgent {
    * @param {string} name - agent 名称
    * @param {object} [commands] - 共享命令表 { name -> handler }，由 AgentManager 传入
    */
-  constructor(config, name, commands) {
+  constructor(config, name = 'steveX', commands = {}) {
     this.config = config
-    this.name = name || 'steveX'
+    this.name = name
     this.bot = null
     this.movements = null
-    this.commands = commands || {}
+    this.commands = commands
     this.connected = false
   }
 
@@ -39,14 +39,13 @@ class SteveXAgent {
       this.bot.pathfinder.setMovements(this.movements)
     })
 
-    this.bot.on('end', () => {
+    const onDisconnect = (reason) => {
       this.connected = false
-    })
+      if (reason) console.error(`[error] Bot kicked (${this.name})`, reason)
+    }
 
-    this.bot.on('kicked', (reason) => {
-      this.connected = false
-      console.error(`[error] Bot kicked (${this.name})`, reason)
-    })
+    this.bot.on('end', () => onDisconnect())
+    this.bot.on('kicked', (reason) => onDisconnect(reason))
 
     this.bot.on('error', (error) => {
       // Suppress noisy pathfinder timeouts — they are handled internally
@@ -95,7 +94,7 @@ class SteveXAgent {
 
   /** Whether the bot is connected and spawned. */
   isOnline() {
-    return !!(this.bot && this.connected)
+    return this.bot && this.connected
   }
 
   /** The in-game username, falling back to config. */
