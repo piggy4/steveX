@@ -1,9 +1,10 @@
 const { EventEmitter } = require('events')
-const { SteveXAgent } = require('../agent/agent')
+const { SteveXAgent } = require('./agent')
 
 class AgentManager {
-  constructor(config) {
-    this.config = config
+  constructor(loadConfig) {
+    this.loadConfig = loadConfig
+    this.config = this.loadConfig()
     /**
      * Map of agent entries keyed by agent name.
      * @type {Map<string, { name:string, config:object, agentConfigOverride:object, agent:SteveXAgent|null }>}
@@ -43,9 +44,9 @@ class AgentManager {
     }
   }
 
-  reload(config) {
+  reload() {
     this.disconnectAll()
-    this.config = config
+    this.config = this.loadConfig()
     this.connectAll()
   }
 
@@ -54,7 +55,6 @@ class AgentManager {
     if (!entry) return false
     if (entry.agent && entry.agent.isOnline()) return true
 
-    // fix ⑤ — rebuild config from current global config each time
     const override = entry.agentConfigOverride || {}
     const freshConfig = {
       ...this.config,

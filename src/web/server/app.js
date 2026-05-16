@@ -4,11 +4,10 @@ const { registerRoutes } = require('./routes')
 
 /**
  * Create and configure the Express application.
- * @param {import('../../multiagent/agent_manager').AgentManager} manager
- * @param {Function} loadConfig
+ * @param {import('../../agent/agent_manager').AgentManager} manager
  * @returns {import('express').Express}
  */
-function createApp(manager, loadConfig) {
+function createApp(manager) {
   const app = express()
 
   // JSON body parser
@@ -20,7 +19,7 @@ function createApp(manager, loadConfig) {
   }))
 
   // API routes
-  registerRoutes(app, manager, loadConfig)
+  registerRoutes(app, manager)
 
   return app
 }

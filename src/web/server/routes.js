@@ -2,7 +2,7 @@
  * Register all API routes on the Express app.
  */
 
-function registerRoutes(app, manager, loadConfig) {
+function registerRoutes(app, manager) {
 
   // ---- Status ----
   app.get('/api/status', (req, res) => {
@@ -14,8 +14,7 @@ function registerRoutes(app, manager, loadConfig) {
 
   // ---- Reload config ----
   app.post('/api/reload', (req, res) => {
-    const nextConfig = loadConfig()
-    manager.reload(nextConfig)
+    manager.reload()
     res.json({ ok: true })
   })
 

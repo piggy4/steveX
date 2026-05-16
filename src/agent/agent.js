@@ -1,8 +1,18 @@
-const { createBot } = require('../connector/mineflayer_connector')
+const mineflayer = require('mineflayer')
 const { logInfo, logError } = require('../telemetry/logger')
 const { pathfinder, Movements } = require('mineflayer-pathfinder')
 const mcDataLoader = require('minecraft-data')
 const { loadCommands } = require('../commands')
+
+function createBot(minecraftConfig) {
+  return mineflayer.createBot({
+    host: minecraftConfig.host,
+    port: minecraftConfig.port,
+    username: minecraftConfig.username,
+    auth: minecraftConfig.auth,
+    version: minecraftConfig.version
+  })
+}
 
 class SteveXAgent {
   constructor(config, name) {
@@ -11,12 +21,10 @@ class SteveXAgent {
     this.bot = null
     this.movements = null
     this.commands = {}
-    this.commandList = []
 
     // Load commands from filesystem
-    const { commands, list } = loadCommands()
+    const { commands } = loadCommands()
     this.commands = commands
-    this.commandList = list
   }
 
   getAvailableCommands() {
@@ -24,7 +32,7 @@ class SteveXAgent {
   }
 
   getCommandList() {
-    return this.commandList
+    return Object.values(this.commands)
   }
 
   start() {

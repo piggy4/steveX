@@ -6,7 +6,7 @@ const { logInfo } = require('../../telemetry/logger')
  * Bridges AgentManager eventBus → real-time browser push.
  *
  * @param {import('http').Server} server
- * @param {import('../../multiagent/agent_manager').AgentManager} manager
+ * @param {import('../../agent/agent_manager').AgentManager} manager
  */
 function setupWebSocket(server, manager) {
   const wss = new WebSocketServer({ server })
