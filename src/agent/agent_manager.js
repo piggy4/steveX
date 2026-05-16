@@ -6,20 +6,14 @@ class AgentManager {
   constructor(loadConfig) {
     this.loadConfig = loadConfig
     this.config = this.loadConfig()
-    // Load commands once, share across all agents
     this.sharedCommands = loadCommands().commands
-    /**
-     * Map of connected agent instances keyed by agent name.
-     * @type {Map<string, SteveXAgent>}
-     */
     this.agents = new Map()
-    /**
-     * Event bus bridging to WebSocket layer.
-     * @type {EventEmitter}
-     */
     this.eventBus = new EventEmitter()
-    // Prevent MaxListeners warnings when multiple WebSocket clients connect
     this.eventBus.setMaxListeners(50)
+    // Pre-index agent configs by name for O(1) lookup
+    this.agentConfigs = new Map(
+      (this.config.agents || []).map(cfg => [cfg.name, cfg])
+    )
   }
 
   // ── Lifecycle ──
@@ -33,12 +27,14 @@ class AgentManager {
   reload() {
     this.disconnectAll()
     this.config = this.loadConfig()
+    this.agentConfigs = new Map(
+      (this.config.agents || []).map(cfg => [cfg.name, cfg])
+    )
   }
 
   connectAgent(name) {
-    const cfg = (this.config.agents || []).find(c => c.name === name)
-    if (!cfg) return false
-    if (this.agents.get(name)?.isOnline()) return true
+    const cfg = this.agentConfigs.get(name)
+    if (!cfg || this.agents.get(name)?.isOnline()) return !!cfg
 
     const agent = new SteveXAgent(cfg, name, this.sharedCommands)
     agent.start()
@@ -88,7 +84,7 @@ class AgentManager {
   // ── Queries ──
 
   getStatus() {
-    return (this.config.agents || []).map(cfg => {
+    return [...this.agentConfigs.values()].map(cfg => {
       const agent = this.agents.get(cfg.name)
       return {
         name: cfg.name,

@@ -4,12 +4,12 @@ const { setupWebSocket } = require('./server/ws')
 
 /**
  * Start the Web management panel (Express + WebSocket).
- * @param {import('../agent/agent_manager').AgentManager} manager
  */
+
 function startWebServer(manager) {
-  const webConfig = manager.config.web || {}
-  const host = webConfig.host || 'localhost'
-  const port = webConfig.port || 8090
+  const webConfig = manager.config.web
+  const host = webConfig.host
+  const port = webConfig.port
 
   const app = createApp(manager)
   const server = http.createServer(app)

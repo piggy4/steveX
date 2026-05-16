@@ -39,21 +39,15 @@ class SteveXAgent {
       this.bot.pathfinder.setMovements(this.movements)
     })
 
+    // 统一断连处理：end/kicked 都标记为离线
     const onDisconnect = (reason) => {
       this.connected = false
-      if (reason) console.error(`[error] Bot kicked (${this.name})`, reason)
+      if (reason) console.error(`[error] Bot disconnected (${this.name})`, reason)
     }
 
     this.bot.on('end', () => onDisconnect())
     this.bot.on('kicked', (reason) => onDisconnect(reason))
-
     this.bot.on('error', (error) => {
-      // Suppress noisy pathfinder timeouts — they are handled internally
-      if (error.message && error.message.includes('Took to long to decide path to goal')) {
-        console.log(`[info] Pathfinder timeout (${this.name})`)
-        return
-      }
-      this.connected = false
       console.error(`[error] Bot error (${this.name})`, error)
     })
   }
