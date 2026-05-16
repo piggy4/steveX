@@ -33,7 +33,7 @@ class SteveXAgent {
   registerEvents() {
     this.bot.once('spawn', () => {
       this.connected = true
-      console.log(`[info] Bot spawned (${this.name})`)
+      console.log(`[info](${this.name}) Bot spawned `)
       const mcData = mcDataLoader(this.bot.version)
       this.movements = new Movements(this.bot, mcData)
       this.bot.pathfinder.setMovements(this.movements)
@@ -42,13 +42,13 @@ class SteveXAgent {
     // 统一断连处理：end/kicked 都标记为离线
     const onDisconnect = (reason) => {
       this.connected = false
-      if (reason) console.error(`[error] Bot disconnected (${this.name})`, reason)
+      if (reason) console.error(`[error](${this.name}) Bot disconnected`, reason)
     }
 
     this.bot.on('end', () => onDisconnect())
     this.bot.on('kicked', (reason) => onDisconnect(reason))
     this.bot.on('error', (error) => {
-      console.error(`[error] Bot error (${this.name})`, error)
+      console.error(`[error](${this.name}) Bot error`, error)
     })
   }
 
@@ -81,7 +81,7 @@ class SteveXAgent {
     try {
       return await handler.call(this, this.bot, args)
     } catch (err) {
-      console.error(`[error] Command error (${this.name})`, err)
+      console.error(`[error](${this.name}) Command error`, err)
       return { ok: false, error: err.message || String(err) }
     }
   }
