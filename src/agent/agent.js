@@ -1,7 +1,6 @@
 const mineflayer = require('mineflayer')
 const { pathfinder, Movements } = require('mineflayer-pathfinder')
 const mcDataLoader = require('minecraft-data')
-const { loadCommands } = require('../commands')
 
 function createBot(minecraftConfig) {
   return mineflayer.createBot({
@@ -14,26 +13,23 @@ function createBot(minecraftConfig) {
 }
 
 class SteveXAgent {
-  constructor(config, name) {
+  /**
+   * @param {object} config - agent 配置对象
+   * @param {string} name - agent 名称
+   * @param {object} [commands] - 共享命令表 { name -> handler }，由 AgentManager 传入
+   */
+  constructor(config, name, commands) {
     this.config = config
     this.name = name || 'steveX'
     this.bot = null
     this.movements = null
-    this.commands = {}
+    this.commands = commands || {}
     this.connecting = false
     this.connected = false
-
-    // Load commands from filesystem
-    const { commands } = loadCommands()
-    this.commands = commands
   }
 
   getAvailableCommands() {
     return Object.keys(this.commands).sort()
-  }
-
-  getCommandList() {
-    return Object.values(this.commands)
   }
 
   start() {
@@ -113,10 +109,6 @@ class SteveXAgent {
       console.error(`[error] Command error (${this.name})`, err)
       return { ok: false, error: err.message || String(err) }
     }
-  }
-
-  sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms))
   }
 
   /** Whether the bot is connected and spawned, or is actively connecting. */

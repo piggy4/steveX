@@ -1,13 +1,16 @@
 const { EventEmitter } = require('events')
 const { SteveXAgent } = require('./agent')
+const { loadCommands } = require('../commands')
 
 class AgentManager {
   constructor(loadConfig) {
     this.loadConfig = loadConfig
     this.config = this.loadConfig()
+    // Load commands once, share across all agents
+    this.sharedCommands = loadCommands().commands
     /**
      * Map of agent entries keyed by agent name.
-     * @type {Map<string, { name:string, config:object, agentConfigOverride:object, agent:SteveXAgent|null }>}
+     * @type {Map<string, { name:string, config:object, agent:SteveXAgent|null }>}
      */
     this.agentMap = new Map()
     /**
@@ -19,20 +22,10 @@ class AgentManager {
     this.eventBus.setMaxListeners(50)
 
     // Pre-populate agentMap entries from config (agents not yet connected)
-    this.syncAgentEntries()
-  }
-
-  /**
-   * Sync agentMap entries from config without starting any agents.
-   * Entries will have agent=null (disconnected state).
-   */
-  syncAgentEntries() {
-    const entries = this.normalizeAgents(this.config)
-    this.agentMap.clear()
-    for (const entry of entries) {
+    this.normalizeAgents(this.config).forEach(entry => {
       entry.agent = null
       this.agentMap.set(entry.name, entry)
-    }
+    })
   }
 
   // ── Lifecycle ──
@@ -42,7 +35,7 @@ class AgentManager {
     this.agentMap.clear()
 
     for (const entry of entries) {
-      const agent = new SteveXAgent(entry.config, entry.name)
+      const agent = new SteveXAgent(entry.config, entry.name, this.sharedCommands)
       agent.start()
       entry.agent = agent
       this.agentMap.set(entry.name, entry)
@@ -63,7 +56,11 @@ class AgentManager {
   reload() {
     this.disconnectAll()
     this.config = this.loadConfig()
-    this.syncAgentEntries()
+    this.agentMap.clear()
+    this.normalizeAgents(this.config).forEach(entry => {
+      entry.agent = null
+      this.agentMap.set(entry.name, entry)
+    })
   }
 
   connectAgent(name) {
@@ -71,17 +68,9 @@ class AgentManager {
     if (!entry) return false
     if (entry.agent && entry.agent.isOnline()) return true
 
-    const override = entry.agentConfigOverride || {}
-    const freshConfig = {
-      ...this.config,
-      minecraft: { ...(this.config.minecraft || {}), ...(override.minecraft || {}) },
-      llm: { ...(this.config.llm || {}), ...(override.llm || {}) }
-    }
-
-    const agent = new SteveXAgent(freshConfig, entry.name)
+    const agent = new SteveXAgent(entry.config, entry.name, this.sharedCommands)
     agent.start()
     entry.agent = agent
-    entry.config = freshConfig
     this.eventBus.emit('agent:connect', { name: entry.name })
     return true
   }
@@ -150,13 +139,13 @@ class AgentManager {
     }
 
     return agents.map((agent) => {
-      const mergedMinecraft = agent.minecraft || {}
-      const mergedLlm = agent.llm || {}
-      const name = agent.name || mergedMinecraft.username || 'steveX'
+      const name = agent.name || agent.minecraft?.username || 'steveX'
+      // NOTE: config 直接引用 agent 自身，不做深拷贝/merge。
+      // 每个 agent 的配置在 configs/defaults/app.json 中已是完整独立对象，
+      // 不需要从全局 config 剥离后再覆盖。如无充分理由请勿改为 deepMerge。
       return {
         name,
-        config: { ...config, minecraft: mergedMinecraft, llm: mergedLlm },
-        agentConfigOverride: { minecraft: mergedMinecraft, llm: mergedLlm },
+        config: agent,
         agent: null
       }
     })
