@@ -14,8 +14,8 @@ class SteveXAgent {
     this.bot = null
     this.movements = null
     this.commands = commands || {}
-    this.connecting = false
-    this.connected = false
+    /** @type {'disconnected'|'connecting'|'connected'} */
+    this.status = 'disconnected'
   }
 
   getAvailableCommands() {
@@ -23,8 +23,7 @@ class SteveXAgent {
   }
 
   start() {
-    this.connecting = true
-    this.connected = false
+    this.status = 'connecting'
     const mc = this.config.minecraft
     this.bot = mineflayer.createBot({
       host: mc.host,
@@ -39,12 +38,11 @@ class SteveXAgent {
 
   registerEvents() {
     this.bot.on('login', () => {
-      this.connected = true
+      this.status = 'connected'
     })
 
     this.bot.once('spawn', () => {
-      this.connecting = false
-      this.connected = true
+      this.status = 'connected'
       console.log(`[info] Bot spawned (${this.name})`)
       const mcData = mcDataLoader(this.bot.version)
       this.movements = new Movements(this.bot, mcData)
@@ -52,13 +50,11 @@ class SteveXAgent {
     })
 
     this.bot.on('end', () => {
-      this.connecting = false
-      this.connected = false
+      this.status = 'disconnected'
     })
 
     this.bot.on('kicked', (reason) => {
-      this.connecting = false
-      this.connected = false
+      this.status = 'disconnected'
       console.error(`[error] Bot kicked (${this.name})`, reason)
     })
 
@@ -68,8 +64,7 @@ class SteveXAgent {
         console.log(`[info] Pathfinder timeout (${this.name})`)
         return
       }
-      this.connecting = false
-      this.connected = false
+      this.status = 'disconnected'
       console.error(`[error] Bot error (${this.name})`, error)
     })
   }
@@ -111,9 +106,7 @@ class SteveXAgent {
   /** Whether the bot is connected and spawned, or is actively connecting. */
   isOnline() {
     if (!this.bot) return false
-    if (this.connected) return true
-    if (this.connecting) return true
-    return false
+    return this.status !== 'disconnected'
   }
 
   /** The in-game username, falling back to config. */
@@ -126,8 +119,7 @@ class SteveXAgent {
     if (this.bot && this.bot.end) {
       this.bot.end()
     }
-    this.connecting = false
-    this.connected = false
+    this.status = 'disconnected'
   }
 }
 
