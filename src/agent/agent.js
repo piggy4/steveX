@@ -2,16 +2,6 @@ const mineflayer = require('mineflayer')
 const { pathfinder, Movements } = require('mineflayer-pathfinder')
 const mcDataLoader = require('minecraft-data')
 
-function createBot(minecraftConfig) {
-  return mineflayer.createBot({
-    host: minecraftConfig.host,
-    port: minecraftConfig.port,
-    username: minecraftConfig.username,
-    auth: minecraftConfig.auth,
-    version: minecraftConfig.version
-  })
-}
-
 class SteveXAgent {
   /**
    * @param {object} config - agent 配置对象
@@ -35,7 +25,14 @@ class SteveXAgent {
   start() {
     this.connecting = true
     this.connected = false
-    this.bot = createBot(this.config.minecraft)
+    const mc = this.config.minecraft
+    this.bot = mineflayer.createBot({
+      host: mc.host,
+      port: mc.port,
+      username: mc.username,
+      auth: mc.auth,
+      version: mc.version
+    })
     this.bot.loadPlugin(pathfinder)
     this.registerEvents()
   }
