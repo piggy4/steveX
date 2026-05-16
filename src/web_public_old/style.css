@@ -1,0 +1,251 @@
+:root {
+  --bg: #f4f1ed;
+  --ink: #1f1e1c;
+  --muted: #6b655f;
+  --accent: #d36b2a;
+  --accent-2: #6aa84f;
+  --card: #ffffff;
+  --log-bg: #fafaf8;
+  --log-border: rgba(0, 0, 0, 0.06);
+  --input-bg: #fafaf8;
+  --input-bg-dim: rgba(106, 168, 79, 0.06);
+  --input-bg-err: rgba(211, 107, 42, 0.06);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Space Grotesk", "IBM Plex Sans", "Segoe UI", sans-serif;
+  color: var(--ink);
+  background: radial-gradient(circle at top left, #fff7e8 0%, var(--bg) 55%)
+    no-repeat fixed;
+}
+
+/* ── Header ── */
+
+header {
+  padding: 24px 32px 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+h1 {
+  margin: 0;
+  font-size: 28px;
+  letter-spacing: 0.5px;
+}
+
+.subtitle {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.status {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.ws-status.online {
+  color: #2b4b1f;
+}
+
+.ws-status.offline {
+  color: #7c3b12;
+}
+
+/* ── Grid ── */
+
+main {
+  padding: 20px 32px 40px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+/* ── Card ── */
+
+.card {
+  background: var(--card);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 16px;
+  padding: 16px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.08);
+  display: flex;
+  flex-direction: column;
+  max-height: 520px;
+}
+
+.card h2 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+/* ── Pills ── */
+
+.pill {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: #f7ede6;
+  color: var(--muted);
+  margin-right: 6px;
+}
+
+.pill.online {
+  background: rgba(106, 168, 79, 0.2);
+  color: #2b4b1f;
+}
+
+.pill.offline {
+  background: rgba(211, 107, 42, 0.15);
+  color: #7c3b12;
+}
+
+/* ── Buttons ── */
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+button {
+  border: none;
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--ink);
+  color: white;
+  transition: opacity 0.15s;
+}
+
+button:hover {
+  opacity: 0.85;
+}
+
+button.secondary {
+  background: #dcd6d0;
+  color: #2f2b28;
+}
+
+button.green {
+  background: var(--accent-2);
+}
+
+button.orange {
+  background: var(--accent);
+}
+
+/* ── Command input ── */
+
+.command {
+  margin-top: 10px;
+  display: flex;
+  gap: 6px;
+}
+
+input[type="text"] {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  background: var(--input-bg);
+  font-family: inherit;
+}
+
+.command input {
+  font-family: "Space Grotesk", "IBM Plex Sans", "Segoe UI", monospace;
+  font-size: 12px;
+}
+
+/* ── Log panel ── */
+
+.log-panel {
+  margin-top: 10px;
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid var(--log-border);
+  border-radius: 10px;
+  padding: 6px 8px;
+  background: var(--log-bg);
+  font-size: 12px;
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+  line-height: 1.5;
+  min-height: 120px;
+}
+
+.log-panel:empty::after {
+  content: 'Awaiting events...';
+  color: var(--muted);
+  font-style: italic;
+}
+
+.log-entry {
+  padding: 4px 6px;
+  margin: 2px 0;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log-entry.llm-input {
+  background: var(--input-bg);
+  border-left: 3px solid #6aa84f;
+}
+
+.log-entry.llm-output {
+  background: var(--input-bg);
+  border-left: 3px solid #4a9eff;
+}
+
+.log-entry.cmd-start {
+  background: var(--log-bg);
+  color: var(--muted);
+}
+
+.log-entry.cmd-done {
+  background: var(--input-bg-dim);
+  border-left: 3px solid #6aa84f;
+}
+
+.log-entry.cmd-error {
+  background: var(--input-bg-err);
+  border-left: 3px solid #d36b2a;
+}
+
+.log-entry .log-time {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.log-entry .log-tag {
+  font-weight: 700;
+  margin-right: 4px;
+}
+
+/* ── Responsive ── */
+
+@media (max-width: 600px) {
+  header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  main {
+    padding: 12px 16px 32px;
+    grid-template-columns: 1fr;
+  }
+}
