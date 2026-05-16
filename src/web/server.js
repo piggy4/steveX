@@ -1,5 +1,4 @@
 const http = require('http')
-const { logInfo } = require('../telemetry/logger')
 const { createApp } = require('./server/app')
 const { setupWebSocket } = require('./server/ws')
 
@@ -9,7 +8,7 @@ const { setupWebSocket } = require('./server/ws')
  */
 function startWebServer(manager) {
   const webConfig = manager.config.web || {}
-  const host = webConfig.host || '0.0.0.0'
+  const host = webConfig.host || 'localhost'
   const port = webConfig.port || 8090
 
   const app = createApp(manager)
@@ -18,7 +17,7 @@ function startWebServer(manager) {
   setupWebSocket(server, manager)
 
   server.listen(port, host, () => {
-    logInfo(`Web panel listening on http://${host}:${port}`)
+    console.log(`[info][web] Web panel listening on http://${host}:${port}`)
   })
 }
 

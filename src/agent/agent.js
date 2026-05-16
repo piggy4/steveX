@@ -1,5 +1,4 @@
 const mineflayer = require('mineflayer')
-const { logInfo, logError } = require('../telemetry/logger')
 const { pathfinder, Movements } = require('mineflayer-pathfinder')
 const mcDataLoader = require('minecraft-data')
 const { loadCommands } = require('../commands')
@@ -43,23 +42,23 @@ class SteveXAgent {
 
   registerEvents() {
     this.bot.once('spawn', () => {
-      logInfo(`Bot spawned (${this.name})`)
+      console.log(`[info] Bot spawned (${this.name})`)
       const mcData = mcDataLoader(this.bot.version)
       this.movements = new Movements(this.bot, mcData)
       this.bot.pathfinder.setMovements(this.movements)
     })
 
     this.bot.on('kicked', (reason) => {
-      logError(`Bot kicked (${this.name})`, reason)
+      console.error(`[error] Bot kicked (${this.name})`, reason)
     })
 
     this.bot.on('error', (error) => {
       // Suppress noisy pathfinder timeouts — they are handled internally
       if (error.message && error.message.includes('Took to long to decide path to goal')) {
-        logInfo(`Pathfinder timeout (${this.name})`)
+        console.log(`[info] Pathfinder timeout (${this.name})`)
         return
       }
-      logError(`Bot error (${this.name})`, error)
+      console.error(`[error] Bot error (${this.name})`, error)
     })
   }
 
@@ -92,7 +91,7 @@ class SteveXAgent {
     try {
       return await handler.call(this, this.bot, args)
     } catch (err) {
-      logError(`Command error (${this.name})`, err)
+      console.error(`[error] Command error (${this.name})`, err)
       return { ok: false, error: err.message || String(err) }
     }
   }

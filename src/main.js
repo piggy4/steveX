@@ -1,20 +1,15 @@
 const { loadConfig } = require('./utils/config')
 const { AgentManager } = require('./agent/agent_manager')
 const { startWebServer } = require('./web/server')
-const { logInfo } = require('./telemetry/logger')
 
-function main() {
-  const manager = new AgentManager(loadConfig)
+const manager = new AgentManager(loadConfig)
 
-  logInfo('steveX started')
+console.log('[info][main] Starting SteveX with config:', manager.config)
 
-  startWebServer(manager)
+startWebServer(manager)
 
-  process.on('SIGINT', () => {
-    logInfo('Shutting down')
-    manager.disconnectAll()
-    process.exit(0)
-  })
-}
-
-main()
+process.on('SIGINT', () => {
+  console.log('[info][main] Shutting down')
+  manager.disconnectAll()
+  process.exit(0)
+})

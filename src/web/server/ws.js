@@ -1,5 +1,4 @@
 const { WebSocketServer } = require('ws')
-const { logInfo } = require('../../telemetry/logger')
 
 /**
  * Set up WebSocket server on top of the existing HTTP server.
@@ -12,10 +11,10 @@ function setupWebSocket(server, manager) {
   const wss = new WebSocketServer({ server })
 
   wss.on('connection', (ws) => {
-    logInfo('Web client connected')
+    console.log('[info][ws] Web client connected')
 
     ws.on('close', () => {
-      logInfo('Web client disconnected')
+      console.log('[info][ws] Web client disconnected')
     })
 
     // Send current status snapshot immediately after connect

@@ -17,6 +17,22 @@ class AgentManager {
     this.eventBus = new EventEmitter()
     // Prevent MaxListeners warnings when multiple WebSocket clients connect
     this.eventBus.setMaxListeners(50)
+
+    // Pre-populate agentMap entries from config (agents not yet connected)
+    this.syncAgentEntries()
+  }
+
+  /**
+   * Sync agentMap entries from config without starting any agents.
+   * Entries will have agent=null (disconnected state).
+   */
+  syncAgentEntries() {
+    const entries = this.normalizeAgents(this.config)
+    this.agentMap.clear()
+    for (const entry of entries) {
+      entry.agent = null
+      this.agentMap.set(entry.name, entry)
+    }
   }
 
   // ── Lifecycle ──
@@ -47,7 +63,7 @@ class AgentManager {
   reload() {
     this.disconnectAll()
     this.config = this.loadConfig()
-    this.connectAll()
+    this.syncAgentEntries()
   }
 
   connectAgent(name) {

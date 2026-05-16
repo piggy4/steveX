@@ -15,7 +15,9 @@ function createApp(manager) {
 
   // Static files — serve index.html, style.css, app.js from public/
   app.use(express.static(path.join(__dirname, '..', 'public'), {
-    maxAge: '1h'
+    maxAge: 0,
+    etag: false,
+    lastModified: false
   }))
 
   // API routes

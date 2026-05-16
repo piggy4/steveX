@@ -26,7 +26,7 @@ While the process is running, type `reload` in the terminal and press Enter to a
 Enable in configs/defaults/app.json:
 
 ```json
-"web": { "enabled": true, "host": "0.0.0.0", "port": 8090 }
+"web": { "host": "localhost", "port": 8090 }
 ```
 
 Open http://localhost:8090 to view status and start/stop or send chat commands.
