@@ -15,6 +15,33 @@ const PLACEHOLDER = {
   action: 'Idle'
 }
 
+function toGameModeLabel(mode) {
+  if (mode === 0) return 'Survival'
+  if (mode === 1) return 'Creative'
+  if (mode === 2) return 'Adventure'
+  if (mode === 3) return 'Spectator'
+  return PLACEHOLDER.mode
+}
+
+function formatPosition(pos) {
+  if (!pos || typeof pos !== 'object') {
+    return `x: ${PLACEHOLDER.position.x}, y: ${PLACEHOLDER.position.y}, z: ${PLACEHOLDER.position.z}`
+  }
+  const fmt = (n) => Number.isFinite(n) ? n.toFixed(1) : '~'
+  return `x: ${fmt(pos.x)}, y: ${fmt(pos.y)}, z: ${fmt(pos.z)}`
+}
+
+function getHealthView(agent) {
+  const health = Number.isFinite(agent.health) ? agent.health : PLACEHOLDER.health
+  const maxHealth = Number.isFinite(agent.max_health) ? agent.max_health : PLACEHOLDER.maxHealth
+  const percent = Math.max(0, Math.min(100, Math.round((health / maxHealth) * 100)))
+  return { health, maxHealth, percent }
+}
+
+function getActionView(agent) {
+  return agent.current_action || agent.action_status || PLACEHOLDER.action
+}
+
 // ── Filter / sort ──
 
 function filteredAgents() {
@@ -45,10 +72,11 @@ function filteredAgents() {
 function agentCardHtml(agent) {
   const statusClass = agent.online ? 'online' : 'offline'
   const statusText = agent.online ? 'online' : 'offline'
-  const percent = Math.max(0, Math.min(100, Math.round((PLACEHOLDER.health / PLACEHOLDER.maxHealth) * 100)))
-  const pos = PLACEHOLDER.position
-  const position = `x: ${pos.x}, y: ${pos.y}, z: ${pos.z}`
+  const { health, maxHealth, percent } = getHealthView(agent)
+  const position = formatPosition(agent.position)
   const username = agent.username || '\u2014'
+  const mode = toGameModeLabel(agent.gamemode)
+  const action = getActionView(agent)
 
   return `
     <article class="agent-card" data-agent-name="${escapeHtml(agent.name)}">
@@ -84,15 +112,15 @@ function agentCardHtml(agent) {
               <div class="stat-value">
                 <span data-icon="heart"></span>
                 <span class="health-wrap">
-                  <span class="health-number">${PLACEHOLDER.health} / ${PLACEHOLDER.maxHealth}</span>
-                  <span class="health-bar" aria-label="Health ${percent}%"><span class="health-fill" style="--health:${percent}%"></span></span>
+                  <span class="health-number" data-field="health">${health} / ${maxHealth}</span>
+                  <span class="health-bar" aria-label="Health ${percent}%"><span class="health-fill" data-field="health-fill" style="--health:${percent}%"></span></span>
                 </span>
               </div>
             </div>
 
             <div class="stat-row">
               <div class="stat-label">Game Mode</div>
-              <div class="stat-value"><span data-icon="gamepad"></span>${escapeHtml(PLACEHOLDER.mode)}</div>
+              <div class="stat-value"><span data-icon="gamepad"></span><span data-field="gamemode">${escapeHtml(mode)}</span></div>
             </div>
 
             <div class="stat-row">
@@ -104,12 +132,12 @@ function agentCardHtml(agent) {
           <div class="stats-column">
             <div class="stat-row">
               <div class="stat-label">Position</div>
-              <div class="stat-value"><span data-icon="pin"></span>${escapeHtml(position)}</div>
+              <div class="stat-value"><span data-icon="pin"></span><span data-field="position">${escapeHtml(position)}</span></div>
             </div>
 
             <div class="stat-row">
               <div class="stat-label">Current Action</div>
-              <div class="stat-value"><span data-icon="walk"></span>${escapeHtml(PLACEHOLDER.action)}</div>
+              <div class="stat-value"><span data-icon="walk"></span><span data-field="action">${escapeHtml(action)}</span></div>
             </div>
 
             <div class="stat-row">
@@ -267,6 +295,10 @@ export function renderAgents(container) {
 function updateDynamicFields(card, agent) {
   const statusClass = agent.online ? 'online' : 'offline'
   const statusText = agent.online ? 'online' : 'offline'
+  const { health, maxHealth, percent } = getHealthView(agent)
+  const mode = toGameModeLabel(agent.gamemode)
+  const position = formatPosition(agent.position)
+  const action = getActionView(agent)
 
   // Dot + state label
   const dot = card.querySelector('.agent-id .dot')
@@ -295,6 +327,21 @@ function updateDynamicFields(card, agent) {
   if (usernamePill) {
     usernamePill.textContent = agent.username || '\u2014'
   }
+
+  const healthNumber = card.querySelector('[data-field="health"]')
+  if (healthNumber) healthNumber.textContent = `${health} / ${maxHealth}`
+
+  const healthFill = card.querySelector('[data-field="health-fill"]')
+  if (healthFill) healthFill.style.setProperty('--health', `${percent}%`)
+
+  const modeEl = card.querySelector('[data-field="gamemode"]')
+  if (modeEl) modeEl.textContent = mode
+
+  const posEl = card.querySelector('[data-field="position"]')
+  if (posEl) posEl.textContent = position
+
+  const actionEl = card.querySelector('[data-field="action"]')
+  if (actionEl) actionEl.textContent = action
 }
 
 // ── Event delegation ──

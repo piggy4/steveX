@@ -1,5 +1,6 @@
 const { EventEmitter } = require('events')
 const { SteveXAgent } = require('./agent')
+const { AgentStateStore } = require('../runtime/agent_state_store')
 const { loadCommands } = require('../commands')
 
 class AgentManager {
@@ -10,6 +11,7 @@ class AgentManager {
     this.agents = new Map()
     this.eventBus = new EventEmitter()
     this.eventBus.setMaxListeners(50)
+    this.stateStore = new AgentStateStore()
     // Pre-index agent configs by name for O(1) lookup
     this.agentConfigs = new Map(
       (this.config.agents || []).map(cfg => [cfg.name, cfg])
@@ -36,9 +38,15 @@ class AgentManager {
     const cfg = this.agentConfigs.get(name)
     if (!cfg || this.agents.get(name)?.isOnline()) return !!cfg
 
-    const agent = new SteveXAgent(cfg, name, this.sharedCommands)
+    const agent = new SteveXAgent(cfg, name, this.sharedCommands, this.stateStore)
     agent.start()
     this.agents.set(name, agent)
+    this.stateStore.updateState(name, {
+      online: true,
+      action_status: 'idle',
+      current_action: null,
+      last_seen: Date.now()
+    })
     this.eventBus.emit('agent:connect', { name })
     return true
   }
@@ -50,6 +58,12 @@ class AgentManager {
     this.eventBus.emit('agent:disconnect', { name })
     agent.shutdown()
     this.agents.delete(name)
+    this.stateStore.updateState(name, {
+      online: false,
+      action_status: 'offline',
+      current_action: null,
+      last_seen: Date.now()
+    })
     return true
   }
 
@@ -61,6 +75,12 @@ class AgentManager {
       return { ok: false, error: 'Agent not found or not started' }
     }
 
+    this.stateStore.updateState(name, {
+      action_status: 'running',
+      current_action: command,
+      last_seen: Date.now()
+    })
+
     this.eventBus.emit('agent:command:start', {
       name,
       command,
@@ -68,6 +88,13 @@ class AgentManager {
     })
 
     const result = await agent.executeCommand(command)
+
+    this.stateStore.updateState(name, {
+      action_status: result.ok ? 'idle' : 'error',
+      current_action: null,
+      last_error: result.ok ? null : result.error || 'Unknown error',
+      last_seen: Date.now()
+    })
 
     this.eventBus.emit('agent:command:done', {
       name,
@@ -86,10 +113,13 @@ class AgentManager {
   getStatus() {
     return [...this.agentConfigs.values()].map(cfg => {
       const agent = this.agents.get(cfg.name)
+      const state = this.stateStore.getState(cfg.name) || {}
+      const online = agent?.isOnline() ?? false
       return {
         name: cfg.name,
         username: agent?.getUsername() ?? cfg.minecraft.username,
-        online: agent?.isOnline() ?? false
+        ...state,
+        online
       }
     })
   }

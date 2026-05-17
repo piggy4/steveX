@@ -7,14 +7,17 @@ class SteveXAgent {
    * @param {object} config - agent 配置对象
    * @param {string} name - agent 名称
    * @param {object} [commands] - 共享命令表 { name -> handler }，由 AgentManager 传入
+   * @param {object} [stateStore] - 运行时状态存储，由 AgentManager 传入
    */
-  constructor(config, name = 'steveX', commands = {}) {
+  constructor(config, name = 'steveX', commands = {}, stateStore = null) {
     this.config = config
     this.name = name
     this.bot = null
     this.movements = null
     this.commands = commands
+    this.stateStore = stateStore
     this.connected = false
+    this.lastPositionAt = 0
   }
 
   start() {
@@ -37,11 +40,18 @@ class SteveXAgent {
       const mcData = mcDataLoader(this.bot.version)
       this.movements = new Movements(this.bot, mcData)
       this.bot.pathfinder.setMovements(this.movements)
+      this.updateState(this.buildSnapshot())
     })
 
     // 统一断连处理：end/kicked 都标记为离线
     const onDisconnect = (reason) => {
       this.connected = false
+      this.updateState({
+        online: false,
+        action_status: 'offline',
+        current_action: null,
+        last_seen: Date.now()
+      })
       if (reason) console.error(`[error](${this.name}) Bot disconnected`, reason)
     }
 
@@ -50,6 +60,58 @@ class SteveXAgent {
     this.bot.on('error', (error) => {
       console.error(`[error](${this.name}) Bot error`, error)
     })
+
+    this.bot.on('health', () => {
+      this.updateState({
+        health: this.bot.health,
+        hunger: this.bot.food,
+        last_seen: Date.now()
+      })
+    })
+
+    this.bot.on('game', () => {
+      this.updateState({
+        gamemode: this.bot.game?.gameMode ?? null,
+        last_seen: Date.now()
+      })
+    })
+
+    this.bot.on('move', () => {
+      const now = Date.now()
+      if (now - this.lastPositionAt < 300) return
+      this.lastPositionAt = now
+      const pos = this.bot.entity?.position
+      if (!pos) return
+      this.updateState({
+        position: { x: pos.x, y: pos.y, z: pos.z },
+        last_seen: now
+      })
+    })
+
+    this.bot.inventory?.on('updateSlot', () => {
+      this.updateState({
+        inventory: this.bot.inventory.items(),
+        last_seen: Date.now()
+      })
+    })
+  }
+
+  buildSnapshot() {
+    const pos = this.bot.entity?.position
+    return {
+      online: true,
+      health: this.bot.health,
+      hunger: this.bot.food,
+      gamemode: this.bot.game?.gameMode ?? null,
+      position: pos ? { x: pos.x, y: pos.y, z: pos.z } : null,
+      inventory: this.bot.inventory?.items() || [],
+      last_seen: Date.now()
+    }
+  }
+
+  updateState(patch) {
+    if (!this.stateStore) return
+    this.stateStore.updateState(this.name, patch)
   }
 
   /**
