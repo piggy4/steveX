@@ -95,6 +95,7 @@ fetchStatus().then(() => {
 
 // React to state changes
 subscribe(() => {
+  renderAgents(agentsList)
   updateWsUI()
   updateUptimeUI()
 })
