@@ -4,9 +4,10 @@ class MCDataManager {
     private mc_data = new Map<string, any>();
 
     public get(version: string) {
-        const data = this.mc_data.get(version);
+        let data = this.mc_data.get(version);
         if (data === undefined) {
-            this.mc_data.set(version, MinecraftData(version));
+            data = MinecraftData(version);
+            this.mc_data.set(version, data);
         }
         return data;
     }
