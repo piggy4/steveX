@@ -1,4 +1,4 @@
-const { mcDataManager } = require("../../utils/mc_data")
+const { mcDataManager } = require("../../utils/mc_data.ts");
 
 /**
  * craft <itemName> [count] — craft an item from inventory
