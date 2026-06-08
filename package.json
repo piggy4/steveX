@@ -15,5 +15,9 @@
     "mineflayer-pathfinder": "^2.4.5",
     "express": "^5.2.1",
     "ws": "^8.20.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "typescript": "^6.0.3"
   }
 }
