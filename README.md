@@ -47,6 +47,18 @@ npm start
 
 ---
 
+## 研究探索
+
+Fabric GPU 视觉采集与 MemoryWorld 原型保留在
+[`research/visual-world-model`](https://github.com/piggy4/steveX/tree/research/visual-world-model)
+分支，用于研究部分可观测环境中的视觉世界状态建模。该实验分支不替代当前 Mineflayer
+主线，验证成熟的通用接口将通过独立 PR 合回。
+
+研究范围和主线边界见 [`docs/research/visual-world-model.md`](docs/research/visual-world-model.md)，
+项目贡献者见 [`CONTRIBUTORS.md`](CONTRIBUTORS.md)。
+
+---
+
 ## 多 Agent 配置示例
 
 ```json
