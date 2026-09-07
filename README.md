@@ -4,7 +4,7 @@
 
 一个**自包含**的 Minecraft LLM Agent 系统：单个文件夹内包含全部代码，可在另一台机器重建整条链路（含 Minecraft 客户端）。
 
-底层感知/动作**不再用 mineflayer**，而是透传采集端 mod（`stevex-template-1.21.11`，跑在 Minecraft 客户端内）的 **WebSocket JSON-RPC API（48 个方法，端口 25550）**——"一个客户端 = 一个 agent 的身体 + 眼睛"。
+底层感知/动作**不再用 mineflayer**，而是透传采集端 mod（`stevex-template-1.21.11`，跑在 Minecraft 客户端内）的 **WebSocket JSON-RPC API（50 个方法，端口 25550）**——"一个客户端 = 一个 agent 的身体 + 眼睛"。
 
 ---
 
@@ -12,7 +12,7 @@
 
 ```
 LLM / Web 面板
-   ↓ POST /api/mod/:method（结构化透传 48 方法）
+   ↓ POST /api/mod/:method（结构化透传 50 方法）
 ModWSClient（steveX 侧 WS 客户端）
    ↓ ws://127.0.0.1:25550  {id, method, params} → {id, ok, data | error}
 采集端 mod（真实世界客户端，vendor/stevex-template-1.21.11）
@@ -25,7 +25,7 @@ ModWSClient（steveX 侧 WS 客户端）
 | 进程 | 启动 | 作用 |
 |---|---|---|
 | 采集端（真实世界） | `npm run mc:capture` | 主菜单加载后开启 WS 25550；进入世界后可采集深度/对象并写入 `.nbt` |
-| steveX（脑） | `npm start` | Web 面板 8090，`ModWSClient` 透传 48 方法给 LLM/面板 |
+| steveX（脑） | `npm start` | Web 面板 8090，`ModWSClient` 透传 50 方法给 LLM/面板 |
 | 记忆世界 | `npm run mc:memory` | 读取采集端落盘的 `.nbt`，复现"冻结的瞬间" |
 
 > 记忆世界是**文件驱动、独立进程**，不依赖 steveX；steveX 只是编排者。
@@ -35,7 +35,7 @@ ModWSClient（steveX 侧 WS 客户端）
 ```
 steveX/
   src/                 # steveX 本体（Node）
-    mod/               #   ModWSClient + 48 方法清单（methods.js）
+    mod/               #   ModWSClient + 50 方法清单（methods.js）
     web/               #   Express 8090 + 透传路由 /api/mod/* + WS 广播 + 前端
     agent/             #   AgentManager / SteveXAgent（每 agent = 一条 mod 连接）
   vendor/              # 自包含：两个 Fabric mod（源码 + gradle wrapper，无构建产物）
@@ -94,14 +94,14 @@ npm run mc:memory    # 4) 记忆世界读取上述快照
 
 - 实时显示玩家坐标与连接状态
 - 批量 JSON 调用：每行一条 `{"method":"...","params":{...}}`，支持 `delay:毫秒` 前缀做时序序列
-- 内置 48 方法 API 参考，示例一键复制
+- 内置 50 方法 API 参考，示例一键复制
 - 前提：采集端 mod 已加载（主菜单已有 25550 监听）；`player`、`f3`、`vision/*` 等游戏状态方法需要先进入世界
 - 注：该页是直连 mod 的**遗留调试器**，保留 `delay:` 旧语法，不受下方统一 API 约束。
 
 steveX 透传层（8090）可另用 curl 验证：
 
 ```bash
-curl -s http://localhost:8090/api/mod/status                          # mod 连接状态 + 48 方法
+curl -s http://localhost:8090/api/mod/status                          # mod 连接状态 + 50 方法
 curl -s -X POST http://localhost:8090/api/mod/player -H 'Content-Type: application/json' -d '{}'
 curl -s -X POST http://localhost:8090/api/mod -H 'Content-Type: application/json' -d '{"method":"f3","params":{}}'
 ```
@@ -131,7 +131,7 @@ curl -s -X POST http://localhost:8090/api/mod/batch/<batchId>/stop     # 中止�
 （`stopOnError:true` 可失败即停）；结束/中止时对仍按住的连续键自动补发 `pressed:false`。
 
 每个 agent 卡另带 **Mod API 查询器**（原 "Call Mod Method" 单次 Send 已停用）：搜索 + 按分组下拉选方法，
-下方显示该方法的 step JSON 序列写法与可编辑填参模板（48 方法含中文说明与参数 schema，
+下方显示该方法的 step JSON 序列写法与可编辑填参模板（50 方法含中文说明与参数 schema，
 数据源 `src/mod/methods.js` 的 `paramDefs`）——可「复制」或「追加到 Mod Batch」，**只读参考/助写、不执行**；
 面板内执行统一走 Mod Batch。单次 HTTP 直调仍用上面的 curl（`POST /api/mod/:method`）。
 

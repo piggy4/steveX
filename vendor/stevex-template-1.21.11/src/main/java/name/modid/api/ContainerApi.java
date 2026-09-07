@@ -4,16 +4,23 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import name.modid.AgentWebSocketServer;
 import name.modid.AgentWebSocketServer.WsHandler;
 import name.modid.vision.ContainerMemoryTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.EditBox;
+import net.minecraft.client.gui.screens.inventory.BeaconScreen;
+import net.minecraft.core.Holder;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.protocol.game.ServerboundSetBeaconPacket;
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.effect.MobEffect;
 import net.minecraft.world.inventory.*;
 
 /**
  * 容器 API —— 读取/操作当前打开的容器 GUI。
- * 包含 4 个方法：get / slot / button / close
+ * 包含方法：get / slot / button / close / text / drag / beacon
  */
 public class ContainerApi {
 
@@ -30,6 +37,8 @@ public class ContainerApi {
     public static void register(Map<String, WsHandler> handlers) {
         handlers.put("container/get",    params -> getContainer());
         handlers.put("container/slot",   params -> slotClick(params));
+        handlers.put("container/drag",   params -> drag(params));
+        handlers.put("container/beacon", params -> setBeacon(params));
         handlers.put("container/button", params -> buttonClick(params));
         handlers.put("container/close",  params -> closeContainer());
         handlers.put("container/text",   params -> setText(params));
@@ -154,6 +163,98 @@ public class ContainerApi {
             mc.gameMode.handleInventoryMouseClick(p.containerMenu.containerId, slotId, button, clickType, p);
         });
         return Map.of("status", "ok");
+    }
+
+    // ==================== quickcraft drag ====================
+
+    /**
+     * 发送一个 QuickCraft 拖拽相位包（container/drag）。
+     * 纯相位原语：只发当前相位包，不负责拾取/放回物品——取物是调用方前置动作
+     * （通常先 container/slot PICKUP 源格，或鼠标已遗留携带物）。
+     * phase: 0=begin 1=add 2=finish；type: 0=均分(默认) 1=每格放1 2=创造克隆。
+     * begin/finish 省略 slot（内部发 -999，服务端忽略）；add 必填真实格 index。
+     * 约束（调用方负责）：同一次拖拽 begin→add×N→finish 顺序，期间不得夹其它点击；
+     * 相邻两相位间 ≥1 tick（stateId 需逐帧刷新）。
+     */
+    private static Map<String, Object> drag(Map<String, Object> params) {
+        int phase = AgentWebSocketServer.num(params, "phase", -1);
+        int type  = AgentWebSocketServer.num(params, "type", 0);
+        if (phase < 0 || phase > 2) {
+            return Map.of("status", "error", "message", "invalid phase (0=begin 1=add 2=finish): " + phase);
+        }
+        if (type < 0 || type > 2) {
+            return Map.of("status", "error", "message", "invalid type (0=spread 1=one-per-slot 2=clone): " + type);
+        }
+
+        int slot = AgentWebSocketServer.num(params, "slot", -999);
+        String error = AgentWebSocketServer.runOnClient(1_000, "Container drag", ref -> {
+            var mc = Minecraft.getInstance();
+            var p = mc.player;
+            if (p == null || !(mc.screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) {
+                ref.value = "no container screen open";
+                return;
+            }
+            var menu = p.containerMenu;
+            if (phase == 1 && (slot < 0 || slot >= menu.slots.size())) {
+                ref.value = "add phase requires a real slot index 0.." + (menu.slots.size() - 1) + ", got " + slot;
+                return;
+            }
+            int buttonNum = (type << 2) | phase; // type:0均分 1每格1 2克隆，见 §3.2
+            mc.gameMode.handleInventoryMouseClick(menu.containerId, slot, buttonNum, ClickType.QUICK_CRAFT, p);
+        });
+        return error == null ? Map.of("status", "ok") : Map.of("status", "error", "message", error);
+    }
+
+    // ==================== beacon（信标效果） ====================
+
+    /**
+     * 设置/切换信标效果（container/beacon）。等价 vanilla 信标 GUI 的"点效果图标 + 点√"：
+     * 效果图标点击只改客户端本地字段、不发任何包，只有 √ 才把 primary/secondary 合成
+     * 一个 ServerboundSetBeaconPacket 发出并关界面；此处直接发送该包（纯原语：不负责
+     * 关界面、不放支付物）。
+     * params: primary / secondary = 效果注册 id（如 "minecraft:haste"），缺省或空 = 该槽不设。
+     * 前置（调用方负责）：信标界面已开，且支付物已放入支付槽（menu slot 0）——服务端
+     * BeaconMenu.updateEffects 在支付槽无物时为空操作。1 级信标主效果可选 haste / speed，二级留空。
+     */
+    private static Map<String, Object> setBeacon(Map<String, Object> params) {
+        String error = AgentWebSocketServer.runOnClient(1_000, "Container beacon", ref -> {
+            var mc = Minecraft.getInstance();
+            var p = mc.player;
+            if (p == null || !(mc.screen instanceof BeaconScreen)) {
+                ref.value = "beacon screen not open";
+                return;
+            }
+            var menu = p.containerMenu;
+            if (!(menu instanceof net.minecraft.world.inventory.BeaconMenu)) {
+                ref.value = "not a beacon menu open";
+                return;
+            }
+            var conn = mc.getConnection();
+            if (conn == null) {
+                ref.value = "no connection to server";
+                return;
+            }
+            Optional<Holder<MobEffect>> primary = beaconEffect(params, "primary");
+            Optional<Holder<MobEffect>> secondary = beaconEffect(params, "secondary");
+            if (primary == null || secondary == null) {
+                ref.value = "unknown effect id (use a registry id like 'minecraft:haste')";
+                return;
+            }
+            conn.send(new ServerboundSetBeaconPacket(primary, secondary));
+        });
+        return error == null ? Map.of("status", "ok") : Map.of("status", "error", "message", error);
+    }
+
+    /** 解析效果注册 id → Holder；缺省/空串 = 空 Optional；格式或 id 无效返回 null。 */
+    private static Optional<Holder<MobEffect>> beaconEffect(Map<String, Object> params, String key) {
+        Object raw = params.get(key);
+        String name = raw instanceof String s ? s : "";
+        if (name.isBlank()) return Optional.empty();
+        Identifier id = Identifier.tryParse(name);
+        if (id == null) return null;
+        var holder = BuiltInRegistries.MOB_EFFECT.get(id);
+        if (holder.isEmpty()) return null;
+        return Optional.of(holder.get());
     }
 
     // ==================== button click ====================

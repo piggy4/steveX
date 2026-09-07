@@ -1,7 +1,7 @@
 /**
  * 采集端 mod（stevex-template-1.21.11）WebSocket API 方法清单。
  *
- * 共 48 个方法，分组与参数 schema 已按 mod Java 源码逐条核实
+ * 共 50 个方法，分组与参数 schema 已按 mod Java 源码逐条核实
  * （见 steveX_改进方案.md 附录 §十一；websocket 分发在 AgentWebSocketServer /
  * api\*Api.java 各 handler 内，方法名注册与参数读取是两套并存的 ad hoc 逻辑）。
  * 上层通过 POST /api/mod/:method 原样透传，mod 侧对未知方法会返回
@@ -122,7 +122,7 @@ const METHODS = [
       { name: 'fov', type: 'int', def: 70, hint: '视野（出现才改）', sample: 80 }
     ] },
 
-  // ── 容器（5）──
+  // ── 容器（7）──
   { method: 'container/get', category: 'container', description: 'Get open container contents',
     zh: '读取当前打开的容器：类型/槽位物品/携带物品，及熔炉/附魔台/箱子等专用字段，无参数', paramDefs: [] },
   { method: 'container/slot', category: 'container', description: 'Interact with a container slot',
@@ -140,6 +140,19 @@ const METHODS = [
   { method: 'container/text', category: 'container', description: 'Type into a container text field',
     zh: '向当前聚焦的输入框写入文字（任意界面，含告示牌/书的输入框）；params 填 { text }：要填入的内容',
     paramDefs: [{ name: 'text', type: 'string', def: '', hint: '要填入的文字', sample: 'hello' }] },
+  { method: 'container/drag', category: 'container', description: 'Send one QuickCraft drag phase',
+    zh: '发送一次拖拽的单个相位包（QuickCraft，纯原语不取物）。params 填 { phase, slot?, type? }：phase 0=begin 1=add 2=finish，add 必带 slot=container/get 的真实格 index（begin/finish 省略 slot），type 0=均分(默认) 1=每格放1 2=创造克隆。整段手势=先 container/slot clickType:0 拾取源格→phase 0→对每格 phase:1→phase:2，每条隔≥1 tick(waitMs≥50)，期间不得夹其它点击；返回 {status}',
+    paramDefs: [
+      { name: 'phase', type: 'int', def: 0, hint: '0=begin 1=add 2=finish', sample: 0 },
+      { name: 'slot', type: 'int', def: -999, hint: '目标格真实 index（container/get 的 slot）；仅 add 需要', sample: 9 },
+      { name: 'type', type: 'int', def: 0, hint: '0=均分(默认) 1=每格放1 2=创造克隆', sample: 0 }
+    ] },
+  { method: 'container/beacon', category: 'container', description: 'Set beacon effect & consume payment',
+    zh: '设置/切换信标效果并扣支付物（等价信标 GUI 的点效果图标+点√，直接发 SetBeacon 包）。params 填 { primary?, secondary? }：效果注册 id 如 "minecraft:haste"，缺省/空=该槽不设。前置：信标界面已开，支付物已用 container/slot 放入支付槽（menu slot 0），服务端无支付物时为空操作；1 级信标主效果可选 haste/speed，二级留空',
+    paramDefs: [
+      { name: 'primary', type: 'string', def: '', hint: '主效果注册 id，如 minecraft:haste（缺省/空=不设）', sample: 'minecraft:haste' },
+      { name: 'secondary', type: 'string', def: '', hint: '副效果注册 id（信标≥4 级才可用；缺省/空=不设）', sample: 'minecraft:regeneration' }
+    ] },
 
   // ── 聊天（3）──
   { method: 'chat/text', category: 'chat', description: 'Type into the open chat box (no send)',
