@@ -50,6 +50,7 @@
 >   `entityInside` + `baseTick→handlePortal`，非排程 tick、玩家 tick 又未被停。镜像跟随（v2.32）跨维摆放经
 >   `teleportTo`→`Entity.teleport(TeleportTransition)`，不经 `canUsePortal` → 不受影响。采集端零改动。
 >   同步 §7.9/§7.1/§一/`已实现内容.md`。
+> - **v2.36（半透明方块减量：流体 + 满格透明的 translucent 深度在场判定，§7.12，⏳ 设计待审阅）**：§7.11 减量只删"实心 + 不透明"格（边界①），而 **Fabulous 下水画进 translucent 独立目标、不写 main 深度**——main 深度场对水无"在场/不在场"信号差（水在时记录池底、不在时仍记录同一池底）→ 排干的水成幽灵（§10-13 原样接受）；水若硬塞给不透明判据更会在 Fabulous 下**每帧把活水误判消失**（水不挡 main 射线、恒 `Z_opaque ≥ t_far`）。修正（方向定案）：把消失判据**同构平移到 translucent 深度场**——该目标每像素 = `copyDepthFrom(main)` 后被 TRANSLUCENT 组在前 **LEQUAL** 覆盖（"首个半透明面"，恒 `translucentDepth ≤ mainDepth`，v2.24 已核实），"无半透明在前"被自编码为主深度拷贝（`t == m`）而非独立空值。故对记忆上报的半透明格 C（流体 / 满格透明）用 §7.11 同款几何（8 角投影 bbox + 逐像素 slab + `距离(场值) ≥ t_far − δ`，≥2 像素）判消失：活格必写 `t < t_far` → 保留；被移除 → 原边界像素集体转 `t==m ≥ t_far` → **整片一轮删**；不透明墙挡前读 `t==m==墙 < t_far` → 欠删保护——**镜像场自编码遮挡，单一数值判据天然不误删活水**（与 main 场判据唯一的语义差异：无表面哨兵由"天空 1.0"换成"主深度拷贝"）。判据场随采集通道选：Fabulous 下水/满格透明走 translucent 场；岩浆恒 SOLID 写 main（§10-2）、Fancy/Fast 下水/岩浆/玻璃块都写 main → 走现有 main 场判据，只需放宽 reporter/applier 的 `isSolidOpaque` 门槛到流体 ∪ 满格透明。表层所有权边界：逐格在场证明只对"拥有该像素首个半透明面"的格成立，整片消失一轮删、**部分收缩**残留浅层水时深层格欠删（残水自罩、视觉无害，与不透明判据"被挡欠删"同类）；**满格透明方块（玻璃块/染色玻璃/冰等）与流体同判据、本版一并纳入**（reporter 谓词放宽为"流体 ∪ 满格透明"、applier 相应放行）、**非满形状透明块（玻璃板/栅栏/压力板…）需几何感知采样才可判**、本版欠删（接受）。两端改动：`memory_cells.bin` 升 **version=3**（opaque 段 + 单独 translucent 段：流体 ∪ 满格透明）；采集侧 `fabulous && hasTranslucentDepth()` 时对 cells.translucent 段追加 translucent 场判定；`DeletionApplier` 对"记忆世界里当前仍是流体/满格透明"的删除条目放行 818 置空（非满形状/段外仍拒删）。同步 §7.11/§7.12/§8/§9/§10/§11/§12。
 
 ---
 
@@ -1002,7 +1003,7 @@ for p in 全部像素:
 **语义转变（v2.22 已定，v2.23 使其收敛更快更完整）**：纯累积（只增不删）→ **增删收敛到当前可见状态**。被删 = 被证明不存在的部分，余下仍冻结；未证明的（被遮挡 / 移出视野 / 超出 removalMaxRayDist）保持记忆。
 
 **已知边界（v2.23）**：
-① 只判**实心 + 不透明**格可删（cells 文件只含此类 + 实体占用格）——排干的水/岩浆、被移除的透明/非实心方块（玻璃/栅栏/压力板）仍永不删（v2.22 同，接受）；
+① 只判**实心 + 不透明**格 + **v2.36 的流体/满格透明格**可删（cells version≤2 文件只含前者 + 实体占用格）——被移除的**非满形状**透明/半实心方块（玻璃板/栅栏/压力板/红石线）仍永不删（v2.22 同，接受；未来方向：几何过滤，见 §7.13 设计草案）；排干的水/岩浆及**满格透明方块**（玻璃块/冰）的**半透明减量见 §7.12（v2.36，✅ 已实现 2026-09-08）**——Fabulous 下 translucent 场同构判据、Fancy/Fast 与岩浆走 main 场（放宽 reporter/applier 门槛：translucent 段 = 水 ∪ 满格透明、岩浆归 main 段）；
 ② **`removalMaxRayDist` 默认 96（详解见下）**：逐块判定依赖"深度 vs t_far 距离比较"，深度量化误差 δ 仅 ≤~100 格内可靠（§4.2/§10.5：300 格≈11cm、768 格≈0.7 格）——超出部分保守保留（宁欠勿过）；
 ③ 渲染距离外 / 相机背后 / 从未入镜的格永不证明空 → 永久保留（符合记忆语义）；
 ④ 单快照证据已足够，无需跨帧累积；agent 移动越多、进入判定范围的格越多；
@@ -1037,6 +1038,110 @@ for p in 全部像素:
   - `TerrainData.appliedFingerprint` 纳入 `deletions`。
 - **配置**：`MemoryConfig`：`removalEnabled`（默认 true）/ `removalPixelThreshold`（2）/ `removalMaxRayDist`（96.0）/ `memoryCellsWriteIntervalTicks`（10）。
 
+### 7.12 半透明方块减量（水 + 满格透明）：translucent 深度在场判定（v2.36，✅ 已实现 2026-09-08；待游戏内验证，见 Phase 10）
+
+> **实施记录（v2.36，2026-09-08）**：记忆侧 `BlockStateUtil` 新增 `isWaterFluid`/`isNonWaterFluid`/`isFullTransparentCell`（`isShapeFullBlock && !canOcclude`）/`isDeletableContent`；`MemoryConfig.removalTranslucentEnabled`（默认 true）。`MemoryCellReporter` cells 文件升 **version=3** 两段布局——opaque/main 段 = 实心不透明 ∪ 冻结实体占用格 ∪ **岩浆**（非水流体），translucent 段 = **水 ∪ 满格透明**；opaque 段之后追加 translucent 开关 byte + translucent count + longs。`DeletionApplier` deletion 主循环守卫放宽到 `isDeletableContent`（相机格快路径仍只删实心不透明）。采集侧 `MemoryCellsReader` 解析 version=3 translucent 段（version≤2 旧文件 → 空段，行为等同 v2.23）；`DeletionJudge` 抽出共享判据主循环、新增 `testTranslucent`（逐像素读 translucent 目标，防御性判空集）；`ObjectResolver` 按「Fabulous && hasTranslucentDepth && 开关 → translucent 场 / Fancy-Fast → 并入 main 场 / Fabulous &&（!hasT || !开关）→ 空集」路由 translucent 段，main 段恒走 main 场。**岩浆走 main/opaque 段而非 translucent 段**（Fabulous 下岩浆恒写 main，PBO 降级时仍可由 main 场判删，设计已知边界①）——实现定案为选项 A，下述原文中"流体（水/岩浆）"的统一表述据此修订。
+
+> **背景（§7.11 边界① 的缺口）**：v2.23 减量只对"实心 + 不透明"格成立，判据依赖"存在即截断 main 深度、消失则 main 深度落到远面之后"。而 **Fabulous 下水/满格透明（玻璃块、染色玻璃、冰等写 translucent 渲染层的满格方块）画进 translucent 独立目标、不写 main 深度**（§3.1.1/§5.4）：水在时 main 深度记录的是池底/水后表面、不在时记录的仍是同一池底 → **main 深度场对这类对象不产生任何"在场/不在场"信号差** → 排干的水成幽灵。把它们硬塞给现有不透明判据更糟：Fabulous 下它们不挡 main 射线，活对象恒满足 `Z_opaque ≥ t_far`，**每帧都会被误判消失**。
+>
+> **修正方向（定案）**：把消失判据**从 main 深度场平移到 translucent 深度场**。translucent 目标每像素 = `copyDepthFrom(main)`（v2.24 已核实，§3.3/§5.4/§12）后被 TRANSLUCENT 组在前 **LEQUAL** 覆盖，语义是"**首个半透明面**"，恒 `translucentDepth ≤ mainDepth`；"无半透明在前"被自编码成主深度拷贝（`t == m`）而非独立空值。于是**同一条**逐像素比较（射线穿过格 C 的整格？）即可判 C 表层消失，且**镜像场天然保守、不会误删活水**。
+
+**判定机制（translucent 场上的同构镜像；几何工具全复用 §5.4/§7.11）**：
+
+- 输入：① 本快照 main + translucent 双深度 + 相机/投影（§3.3）；② 记忆侧上报的**translucent 段**清单 = **水 ∪ 满格透明方块**（cells 文件 version=3 新增；岩浆写 main、走 main/opaque 段，见下 reporter 改动）。
+- 对每个 translucent 记忆格 C（水或满格透明；先跳过本次可见集 `currentTerrain`——可见格由 §5.1/§5.4 放置/更新路径处理，不参与减量）：
+  1. 投影 C 的 8 角 → 屏幕 bbox（像素中心约定 §4.1，循环前裁剪到屏幕范围 §5.4）；
+  2. 逐 bbox 像素 p：射线(camPos→p) 与 C 的 AABB 手写 slab 求交（§5.4）得 `t_entry`/`t_far`；读该像素 **translucent 目标**深度还原 `Z_translucent(p)`（欧氏距离，同度量；`t ≥ d_far`（=1.0 天空/远平面，v2.16）→ ∞）；**`Z_translucent(p) ≥ t_far − δ`（δ=0.05）→ 射线穿过了 C 的整格 → 越过计数++**；
+  3. 越过计数 ≥ `removalPixelThreshold`（默认 2）→ C 表层消失 → 进 `deletions` 列表。
+- **读的是 translucent 目标全体像素，不是只读 `t < m` 像素**：`t == m`（主拷贝）同样参与比较——它恰好是"无半透明在前"的编码。判定式与 §7.11 main 场唯一差异只在**哨兵**：不透明场"无表面 = 天空 1.0"，translucent 场"无半透明 = 主深度拷贝"。
+- **为何单一数值判据天然不误删活水 / 不假删被遮挡物**：translucent 目标 = `min(主拷贝, 首个半透明面)`，三类情形已编码进同一个数值——
+
+  | 情形 | translucent 值 t | `t ≥ t_far` 比较 |
+  |---|---|---|
+  | C 仍在（满形状格的自身面 / 更近半透明在前） | 满形状活半透明（水/玻璃块）必写自身面 < C 的 t_far | 不成立 → **保留**（不误删活水/活满格玻璃；非满形状薄物的空余像素见下） |
+  | C 被舀干，背后露天空/坑底 | `t == m` == 天空(1.0)/远处墙 ≥ t_far | 成立 → **gone**（水鬼主场景） |
+  | 不透明墙新挡在 C 前方 | `t == m ==` 墙距离 < t_far | 不成立 → **欠删保留**（墙占位交 §5.1 更新路径） |
+  | C 表层消失、背后另有一片更远的水/玻璃 | `t < m` 但 t ≥ t_far | 成立 → **gone**（远处半透明是独立对象） |
+
+  `copyDepthFrom(main)` 正是让镜像法免于"不透明遮挡被读成消失"假删除的关键——v2.24 为工序 B/C 引入的机制在此被第二次复用。
+
+**表层所有权边界（半透明固有，与不透明判据"被挡欠删"同族）**：
+
+- 逐格在场证明只对**拥有该像素首个半透明面**的格成立：水的顶层、独立玻璃块。**被淹没/被上层罩住的深层格不产生自己的 translucent 片元**（流体面剔除，§5.4 工序 C 区间推进同为"只枚举会写片元的可见格"）→ 整片还在时判保留；
+- **整片水被完全舀干**：原边界像素集体转 `t==m ≥ t_far` → **整片记录的格一轮全删**（含深水柱中间格——它们表层消失由"无半透明在前"同时证明，无需逐格拥有片元）；
+- **部分收缩（残留浅层水）**：残水表面在深层幽灵格 t_far 之前 → 深层欠删。但残水自身半透明、罩住下层视觉无害，且桶舀水的现实终态通常全干/留独立源——主场景（全干）被完整解决。欠删方向无害（宁欠勿过），接受；
+- **满格透明方块（玻璃块/染色玻璃/冰等：`isShapeFullBlock` 且非 opaque）与水同判据，本版一并纳入范围**——它们填满整格，镜像法前提"在场 = 该格沿射线整段被自身近面终结"成立（活玻璃块每颗穿格像素都写自身近面 < t_far，与活水同理）。reporter 的 translucent 段谓词即"水 ∪ 满格透明"（岩浆恒写 main、归 main/opaque 段），判据/几何对二者零改动；applier 对"当前仍是流体（水/岩浆）或满格透明"的删除条目放行。
+- **真正不能进本判据的是非满形状透明块（玻璃板/栅栏/铁栏杆/压力板/红石线/绊线等）**——不是"半透明物体做不到消失判断"，而是判据前提对它们不成立：薄物不填满 1×1×1 格，格内空余部分的像素在物体**活着**时射线就已从薄体旁穿格而过、直达背后/天空（`t ≥ t_far`）→ 一个活玻璃板单快照内就有远超 ≥2 像素投"消失"票 → **活体被误删**（有害方向，违"宁欠勿过"，比它要治的幽灵更糟）。这与不透明判据从一开始就把 opaque 限制在 `isShapeFullBlock` 是**同一原因**——限制项是"**非满形状**"而非"半透明"；薄栅栏/铁栏杆写 main、玻璃板/红石线写 translucent，换场不解决"空余像素"问题。要纳入它们的**旧路线**——把采样从"全格 bbox"换成"物体实际渲染形状 AABB"（cells 携带状态、采集侧重建 shape、只测薄板/柱的投影 + 轮廓与亚像素容差）——属次级工程；§7.13 给出更轻的替代：保留整格 bbox 判据、对越票像素追加「射线∩被记住形状」几何相交过滤（未立项、v2.36 不含）。其余透明方块维持 §7.11 边界①"永成幽灵（接受）"。岩浆见下（走 main 场，范围天然涵盖）。
+
+**判据场选择（渲染配置 + 该格现实写哪张场决定，不得混用，与 §5.4 采集通道同构）**：
+
+- **Fabulous && `hasTranslucentDepth()`**（translucent 目标在场）→ **translucent 段**（水/满格透明）对 **translucent 场**判定（`DeletionJudge.testTranslucent`，逐像素读 translucent 目标）——必要（Fabulous 下它们只写 translucent 目标、不写 main，只在这张场上可证消失）；**main/opaque 段**（实心不透明 ∪ 冻结实体占用格 ∪ 岩浆）仍走 main 场（`DeletionJudge.test`），两段判据并行、删格并入同一 deletions。
+- **Fancy/Fast**（无独立 translucent 目标，水/岩浆/玻璃块都写 main）→ translucent 段并入 **现有 main 场判据**（§7.11 原样，直接对 translucent 格跑 `DeletionJudge.test`），`removalTranslucentEnabled` 不生效；判据代码零新增（只放宽 reporter 段谓词 + applier 守卫）。
+- **Fabulous && !`hasTranslucentDepth()`**（第二路 PBO 软失败，§3.4 降级）→ translucent 场不可用：**任何写 translucent 目标的对象（水/满格透明）绝不可喂 main 场**（Fabulous 下它们不写 main、喂 main 场恒假消失，上文背景），该帧这类格的删除空集（幽灵暂留，优雅降级，PBO 恢复后自愈）；岩浆在 main/opaque 段（写 main）→ 仍可走 main 场判、不受影响。实现按该格现实的采集通道（§5.4 判定它写哪张场）路由。
+
+**反向通道与两端改动（cells 文件 version=2 → version=3）**：
+
+- **记忆侧 `MemoryCellReporter`**：cells 集合并为<b>两段</b>（version=3）——**opaque/main 段** = 现有"实心不透明块 + 冻结实体占用格" + **非水流体（岩浆）**；**translucent 段** = **水 + 满格透明**。对 `TerrainRestorer.appliedBlocks(dim)`（已应用方块表含 blockId）的每格按其记忆世界现状 `BlockState` 判定分段：水（`fluidState.is(WATER)`）→ translucent；非流体 → `isShapeFullBlock(state) && !state.canOcclude()`（玻璃块/染色玻璃/冰/遮光玻璃等满格透明）→ translucent；其余非水流体（岩浆）→ main（恒写 main、归 main 段——避免 Fabulous PBO 降级时被当写 translucent 对象而空判）。段谓词与 §5.4 采集侧"会写自身近面的整格"同口径，薄物/非满形状被挡在段外。同一距离球（≤ `removalMaxRayDist`）过滤。文件布局升 **version=3**：version=2 头（dimension 段）之后 opaque/main 段 long 数组之后追加 **translucent 开关 byte + translucent 段 count + translucent long 数组**，两段并列、各带独立 count；**version≤2 旧文件 → translucent 段空** → 采集侧只按主路径删（岩浆/非 Fabulous 水），行为等同 v2.23，无迁移负担。
+  **为何逐格上报而非整水体/整玻璃**：纯累积记忆只知"自己放过哪些格"、不知对象边界；上报全部 translucent 段格后由采集侧逐格在场判定天然收敛（活格保留、消失的删），语义与不透明格完全对称。
+- **采集侧 `ObjectResolver`**：现有 `DeletionJudge.test`（main 场）管 **main/opaque 段**（实心不透明格 + 冻结实体占用格 + 岩浆）照旧；对 **translucent 段**按当前图形配置路由（上文判据场选择）：`fabulous && hasTranslucentDepth() && cells.translucentEnabled()` → `DeletionJudge.testTranslucent`（translucent 场判定，bbox/slab/δ/阈值全复用，逐像素比较对象换成 translucent 目标）；非 Fabulous（Fancy/Fast，水/满格透明写 main）→ `DeletionJudge.test`（并入 main 场）；Fabulous &&（!`hasTranslucentDepth()` || !`translucentEnabled`）→ translucent 段判据空集（水/满格透明绝不可喂 main 场——恒假消失；PBO 恢复 / 开关重开自愈）。两段删格并入同一 `deletions` 列表（随 terrain.nbt 顶层落盘），记忆侧无需区分来源。判定与 §5.4 采集同度量（同 δ = 0.05）。
+- **记忆侧 `DeletionApplier`**：对 deletion 格**按内容放行**——deletion 主循环守卫从 `isSolidOpaque` 放宽到 `isDeletableContent`（= 实心不透明 ∪ 流体（水/岩浆）∪ 满格透明：`isShapeFullBlock && !canOcclude`），只有记忆世界当前内容属于可删集才执行 818 置空（translucent 段条目与 main 段岩浆条目同规则；被删满格透明格即从记忆世界清除）；**不得**因此对非满形状/段外方块放行（玻璃板/栅栏/压力板/红石线的拒删保持 §7.11 边界①——它们本就进不了段，双保险防误删）。currentTerrain 可见格跳过、相机格快路径（仍只删实心不透明，v2.22 语义）、幂等性同 §7.11。
+- **配置**：复用 `removalEnabled`/`removalPixelThreshold`/`removalMaxRayDist`；新增 `removalTranslucentEnabled`（默认 true，仅 Fabulous 生效）可选开关——随 cells 文件 version=3 头部下发（translucent 开关 byte），Fabulous && `hasTranslucentDepth()` 时采集侧据此路由 translucent 段（false → 判据空集、幽灵暂留）；Fancy/Fast 下不生效（水/满格透明写 main、本就由 main 场判据覆盖）。
+
+**已知边界（v2.36）**：
+
+① translucent 场判据与渲染配置/第二路 PBO 强耦合：非 Fabulous 或 PBO 软失败时写 translucent 目标的对象（水/满格透明）消失判定空集（岩浆写 main、走 main 场不受影响）；② 表层所有权——部分收缩残留浅层水时深层幽灵欠删（残水自罩、视觉无害）；**满格透明方块（玻璃块/冰）本版已纳入**；非满形状透明块（玻璃板/栅栏/压力板等）需几何过滤才可判（§7.13 轻量草案，未立项）——本版仍未纳入、欠删（接受）；③ 深度量化可靠距离仍 ≤ `removalMaxRayDist`=96（δ 仅 ≤~100 格内可靠，§7.11 `removalMaxRayDist` 详解——流体的 t_far 与 main 场同为欧氏距离比较，误差界不变）；④ 记忆侧离线 → 无 cells → 不删（同 §7.11，优雅降级自愈）；⑤ 会话间切换图形配置（Fabulous ↔ Fancy）造成的跨配置陈旧细胞走**当前**配置的场判定，方向保守（欠删不误删）。
+
+**验证清单（待游戏内，Phase 10）**：
+
+- 桶舀水源致整片水消失 → **单次快照内**整片记录的水格（含深水柱中间格）判删、记忆世界水消失；
+- 敲掉/移动独立玻璃块、染色玻璃、冰 → 判删、记忆世界清除；活玻璃块不被误删；被更近墙遮挡的活玻璃欠删保留；
+- 活水池塘/海洋/深湖不被误删（逐像素 `t < t_far`）；水面嵌套/水下玻璃不连带误删；
+- 部分排水（留浅层）→ 深层幽灵欠删但视觉无害；岩浆被舀/流走 → main 场判据删除；
+- Fancy/Fast：水/玻璃块写 main → 放宽 reporter/applier 后走现有判据删除；Fabulous PBO 软失败 → 本帧水/玻璃块跳过、不误删、恢复后自愈；
+- 玻璃板/栅栏/压力板等非满形状透明块仍不删（防误删回归）。
+
+---
+
+### 7.13 非满形状方块减量（几何过滤草案：整格 bbox 预判 + 形状相交过滤，未立项，未来方向）
+
+> **状态**：v2.36（§7.12）把减量范围扩到流体 ∪ 满格透明，**非满形状方块（写 main：栅栏/铁栏杆/门/台阶/活板门/梯子/火把/压力板…；Fabulous 下写 translucent：玻璃板/红石线…）仍整类欠删**，§7.12 末将其归为"需换成实际渲染形状 AABB 采样、属次级工程"。本节记录经论证的**轻量替代**：不必换采样体积——**保留整格 bbox 判据原样，只对"越票"像素追加一个「射线 ∩ 被记住形状」的几何相交过滤**。方向已与用户讨论定稿，**未立项、未实现**（v2.36 之后候选；代码另起须先经本节审阅）。
+
+**根因（为何非满形状不能直接套整格判据）**：整格 bbox 判据的假证据只来自一种像素——**穿过格内空余区域**的射线。非满形状的"在/不在"信号差只存在于**几何区**（薄体实际占的那部分格）；空余区在物体**活着**时射线就不被终止（直达背后/天空，`Z ≥ t_far`），与"物体已消失"在外观上无差别 → 全部计入会让一个活玻璃板单快照内就有远超 ≥2 像素越票 → 误删活体。§7.11/§7.12 因此把谓词钉在 `isShapeFullBlock`——**限制项是"形状是否填满整格"，与透明度、写哪张场无关**。
+
+**两步法（第一步与现判据零改动）**：
+
+1. 对记忆格 C，沿用 §7.11/§7.12 同款整格判定：8 角投影 → 屏幕 bbox → 逐像素射线-AABB slab + 读 C 实际写的场（§5.4 路由）`Z ≥ t_far − δ` → 越票。**这一层的判据、哨兵、几何一律不改**；
+2. 对每张越票 p 追加**形状相交过滤**：用 C 的**被记住 BlockState** 重建实际 VoxelShape（cells 携带状态），判「射线(camPos→p) ∩ 形状 ≠ ∅」。不相交（该射线只穿格内空余区，活着时本就不被终止、无作证价值）→ **作废该票**；相交 → 保留为真消失证据。越过数仍 ≥ `removalPixelThreshold` 才进 deletions。
+
+**为何是 sound（只消原假证据源、不引入新假删）**：
+
+| 像素情形 | 整格预判（Z ≥ t_far − δ 越票） | 形状相交过滤 | 结果 |
+|---|---|---|---|
+| 活体、射线过空余区 | 越票（假象） | 不相交 → 作废 | ✓ 消除唯一假证据源 |
+| 活体、射线过几何区 | 不越票（近面深度 < t_far） | （本就不进过滤） | ✓ 活体安全 |
+| 已消失、射线过几何区 | 越票 | 相交 → 保留 | ✓ 真证据 |
+| 已消失、射线过空余区 | 越票 | 不相交 → 作废 | ✓ 剔除无意义像素 |
+
+**关键推论**：活体穿过几何区的像素在**第一步就被自己的近面深度排除**（近面 < t_far，进不了越票集），过滤阶段见到的"相交越票"只可能是"几何已消失、露出背景"。因此过滤器**只需一个相交谓词**，无需对真实形状做逐像素 t_near/t_far 簿记、也无需改预判参照距离（仍是整格远面 + δ）——这就是它比"采样体积换成实际渲染形状 AABB"轻的地方。**满格方块是本法的退化情形**（几何 = 整格 bbox → 过滤恒真 → 与 §7.11/§7.12 现判据完全一致），可统一取代而非另开一套并行判据。
+
+**实现必要条件**：
+
+- **cells 携带 BlockState（文件再升级）**：`MemoryCellReporter` 把"仍在记忆世界的非满形状格"（opaque ∪ 非满透明）按记忆现状状态序列化——连接形态已编码进状态属性（栅栏/墙/红石线的 `north/east/south/west/up`、门/活板门朝向/开合等），重建形状忠实；采集侧 `DeletionJudge` 用该状态重建 VoxelShape。多数非满方块 VoxelShape ≈ 渲染形状；渲染比碰撞更精细处（红石线等）以"重建形状近似 + 亚像素容差"处理。加入 opaque / translucent 段还是新增"几何段"，未来定夺（不影响判据本体）。
+- **场选择沿用 §7.12 判据场选择 + §5.4 路由，不得混用**：不透明非满 / CUTOUT（栅栏/铁栏杆/门/梯子…）写 main → main 场判定（任意配置）；半透明非满（Fabulous 下的玻璃板/红石线…）写 translucent → **仅 Fabulous && `hasTranslucentDepth()` 时可判**，Fancy/Fast 下它们写 main → 走 main 场。写 translucent 的对象绝不可喂 main 场（Fabulous 下恒假消失，同 §7.12）。
+- **轮廓/亚像素/斜掠是唯一残余脆弱点（工程而非逻辑）**：光栅化中"像素中心射线命中形状"与"该像素存在该形状 fragment"在贴边像素可能不一致。方向可控、**宁丢勿错**——对贴边/斜掠的越票（射线在形状内弦长过短，如 < 数个 δ）降权或作废（grazing 命中本只在轮廓边缘产生 fragment），配合既有 ≥2 多票阈值全消误删。§7.12 已提及的"投影 + 轮廓与亚像素容差"即此。
+- **applier 语义转折**：格由 judge 经几何过滤证明消失后，applier 的"非满形状拒删"双保险须**放开**——改为与 §7.11/§7.12 同构的"记忆世界当前该格仍是同一几何格（内容对得上）才 818"（内容不符 → 跳过、交放置/更新路径）。这是把"整类拉黑"升级为"诚实几何判定"的语义前提，也是本方案唯一的"放宽"点——由几何过滤承担防误删职责。
+
+**仍修不了的部分（与几何过滤正交，保持原边界）**：
+
+- **Fabulous 绊线**：活着时不写任何已读深度场（§10.8），几何过滤反而更糟（重建出形状、测到的是背后表面 → 恒判消失）。它是"信号缺失"类而非形状类——须另读 weather 深度场，或仅 Fancy/Fast 可删；
+- **形状为空的方块**（下界传送门方块）：无体积可交，删不了（可接受）；
+- 被永久遮挡后移除、距离 > `removalMaxRayDist`=96（深度量化超 δ 可靠区）、占屏 <2px（薄物最易触达）→ 依旧欠删不误删（宁欠勿过）；
+- **半满形状 BE 方块（箱/床/旗…）被整体移除**：格本身可判删后，还须配套"格被判删 → 清该格 BE 内容记忆"的路径（BE 现只在原位被无 BE 新方块替换时 `clearStale`，见 §7.2/§7.3）。
+
+**代价**：只作用于距离球内候选格。对活体，越票仅来自空余区像素（bbox 投影的一小部分），过滤把其全部作废 → 恒 0 票；对消失格，过滤只是形状相交判定。量级 O(候选格 × bbox 像素 × 形状相交)，与 §7.11 现判据同阶。
+
+**建议验证（若立项，并入对应 Phase）**：敲掉独立玻璃板/铁栏杆/红石线 → 判删、记忆世界清除；活玻璃板/栅栏（含靠墙、部分遮挡）不被误删；斜视角薄板（真实形状重建）不漏判；Fabulous 下红石线随 translucent 场删、Fancy/Fast 走 main 场删；远距薄物优雅欠删；Fabulous 绊线仍不删（回归预期）。
+
 ---
 
 ## 八、线程模型
@@ -1044,7 +1149,7 @@ for p in 全部像素:
 | 线程 | 职责 |
 |---|---|
 | **API 线程**（WebSocket） | `requestCapture()` 置标志 → `awaitSnapshot(超时)` 取深度快照（含 TAIL 捕获的实体 AABB 列表）→ **读记忆侧 `memory_cells.bin`（mtime 门控，v2.23 反向通道）** → 用捕获的 AABB 建 **SectionPos 桶** → **`Unprojector.visibleBlockHits`**（纯数学，扫描同时产出方块去重点 + 实体候选像素原始点 W）→ 经 `Minecraft.execute` 交集合给渲染线程查询 → 组装 JSON 响应 |
-| **渲染线程** | `tryCapture`（Mixin TAIL）：手写 GL PBO 回读深度 + 快照矩阵/相机；**快照实际被渲染实体列表**（**第二注入点 `extractVisibleEntities` @TAIL** 复刻 L821-826 裁剪谓词，v2.9 定稿；`LevelRenderState.entityRenderStates` 不可用——DTO 缺 AABB/id 且 renderLevel TAIL 前已 reset；`entitiesForRendering()` 原样全收会假阳性）→ `queueFencedTask` 回调置快照并 countDown → **`ObjectResolver.resolve` 四路查询**（方块直查 / 方块实体 NBT / 实体闭区间 contains + 深度排序 + 肢体判别精判 / 半透明·绊线 §5.4——**仅 Fabulous，v2.10/v2.12**）→ **`DeletionJudge` 逐块判定（v2.23：cells → 逐块投影 + 深度判定 → deletions）** → NBT 序列化 → 三 store 落盘 |
+| **渲染线程** | `tryCapture`（Mixin TAIL）：手写 GL PBO 回读深度 + 快照矩阵/相机；**快照实际被渲染实体列表**（**第二注入点 `extractVisibleEntities` @TAIL** 复刻 L821-826 裁剪谓词，v2.9 定稿；`LevelRenderState.entityRenderStates` 不可用——DTO 缺 AABB/id 且 renderLevel TAIL 前已 reset；`entitiesForRendering()` 原样全收会假阳性）→ `queueFencedTask` 回调置快照并 countDown → **`ObjectResolver.resolve` 四路查询**（方块直查 / 方块实体 NBT / 实体闭区间 contains + 深度排序 + 肢体判别精判 / 半透明·绊线 §5.4——**仅 Fabulous，v2.10/v2.12**）→ **`DeletionJudge` 逐块判定（v2.23：cells → 逐块投影 + 深度判定 → deletions；**v2.36**：`fabulous && hasTranslucentDepth()` 时对 cells.translucent 段（流体 ∪ 满格透明）追加 translucent 场判定）** → NBT 序列化 → 三 store 落盘 |
 | **回读回调** | `queueFencedTask` 回调（渲染线程触发），只拷贝深度数组 + 置快照 + countDown，不碰游戏数据 |
 
 - **反投影 / 去重可在 API 线程**：纯矩阵乘 + 哈希去重，快照数据已与游戏解耦，无竞态；
@@ -1087,7 +1192,8 @@ API 线程: requestCapture → awaitSnapshot(5000)（null → 超时错误）
 | 实体判定 | O(实体附近像素 × 桶内实体数)：SectionPos 桶粗过滤 + `AABB.contains` + 射线-AABB + 肢体判别（v2.11，他体/薄方块排除 + 前向扫） | 绝大多数像素 O(1) 桶 miss 跳过，可忽略 |
 | 半透明/绊线通道（§5.4，仅 Fabulous） | **v2.26 区间射线推进**：O(Σ 区间像素 × 射线穿过的透明格数)——仅 `translucentDepth < mainDepth` 像素推进，跨 section 用 `maybeHas(透明)` 整节跳步（非透明节 O(1)）；**总量 = 答案体积**，无候选粗筛、无 8px 合并 | 单层水每像素 ≈1 格、深湖 ≈ 水深；满屏深湖最坏几十 ms（Phase 9 实测）；**v2.26 删除** v2.11 粗筛（10⁵~10⁶ 候选 8 角投影 + 8px 栅格合并）与 v2.24 首层判别；工序 B（v2.24）首层透明面深度 pass = O(全像素) 单趟反投影仍承担首层精确落位；**v2.12**：绊线随推进枚举、开销并入透明格数，可忽略 |
 | 减量判定（v2.23，采集侧 `DeletionJudge`） | O(视锥内记忆块数 × 投影像素)：几千~几万格 × 几~几十 px ≈ 几十万次深度读 + §5.4 式射线-AABB，每快照一次、毫秒级 | 取代 v2.22 记忆侧 DDA 投票（跨帧 K≥2 + 证据门控已删）；**单快照内 ≥2 像素越过即判删**，无跨帧依赖、静态玩家一次快照即可删 |
-| 反向通道（v2.23，cells 文件） | 记忆侧：O(累积块数) 距离过滤 + 原子写（写时，ms）；采集侧：mtime stat + 读（几十 KB） | 记忆侧离线 → 无 cells 文件 → 无删除证据，优雅降级 |
+| 半透明减量（v2.36，流体 + 满格透明，translucent 场判定） | 附加 O(视锥内 translucent 格数 × 投影像素)——translucent 深度与 main 同帧两路 PBO 已读回（§3.4），无新增读回；仅 Fabulous 且 `hasTranslucentDepth()` 时执行 | 判定式/δ/阈值与 §7.11 main 场同款，比较对象换成 translucent 目标（"首个半透明面 ∪ 主拷贝"）；PBO 软失败 → 该帧水/玻璃块跳过、不误删；岩浆/非 Fabulous 水走 main 场无此开销 |
+| 反向通道（v2.23，v2.36 cells 文件） | 记忆侧：O(累积块数) 距离过滤 + 原子写（写时，ms）；采集侧：mtime stat + 读（几十 KB，version=3 增流体段） | 记忆侧离线 → 无 cells 文件 → 无删除证据，优雅降级 |
 | **对比 v1** | 地形遍历从"几十万次 getBlockState"降到"几万次反投影 + 几千次查询" | **更准（只可见）且更省**；代价是新增深度管道 |
 
 ---
@@ -1106,8 +1212,9 @@ API 线程: requestCapture → awaitSnapshot(5000)（null → 超时错误）
 10. **实体盒覆盖缺口（v2.9/v2.10）**：marker 盔甲架（0×0 盒但模型照画）、大堆物品平片 Z 向摊开（~3 格）、带 display block 的矿车纵向延伸——这些像素归属不到 → 漏检。**v2.10 已统一 `inflate(0.5)` 对齐 vanilla 视锥盒**（此前 0.45 的 0.05 壳已消解）；剩余缺口仅 `getBoundingBoxForCulling` 覆盖更大的实体（Sniffer 0.6 / Illusioner 更大，见 §5.3/§12）。**v2.11 补防**：marker 盔甲架 0×0 盒参与 §5.3 **未外扩盒**的 slab 求交属零体积退化——slab 求交对零/负外扩盒**直接返回 null（不判相交）**，防除零/NaN，该实体留给 contains/侧向判定兜底。
 11. **F3 调试 gizmo（v2.9）**：`late_debug` pass 在 TAIL 前把主深度清成 1.0 → 捕获到全天空假深度，须检测跳过该帧。
 12. **resize / 全景截图（v2.9）**：窗口 resize 重建深度纹理、全景截图临时 resize 4096×4096 → 缓冲须动态分配、每帧重取句柄。
-13. **减量边界（v2.23，详见 §7.11）**：只删"实心 + 不透明"格（记忆侧 cells 文件只含此类 + 冻结实体占用格）——排干的水/岩浆、被移除的透明/非实心方块（玻璃/栅栏/压力板）仍永成幽灵（接受）；`removalMaxRayDist=96` 外的格保守保留（深度量化误差超出 δ 可靠区，§4.2/§10.5）；记忆世界离线时无删除证据（优雅降级，恢复后自愈）。
+13. **减量边界（v2.23，v2.36 修订流体 + 满格透明部分，详见 §7.11/§7.12）**：只删"实心 + 不透明"格 + v2.36 的流体/满格透明格（cells version≤2 文件只含前者 + 冻结实体占用格）——被移除的**非满形状**透明/半实心方块（玻璃板/栅栏/压力板）仍永成幽灵（接受；未来方向：几何过滤，见 §7.13 设计草案）；排干的水/岩浆及满格透明减量见 **v2.36（§7.12，✅ 已实现 2026-09-08）**——Fabulous 下 translucent 场同构判据、Fancy/Fast 与岩浆走 main 场（放宽 reporter/applier 门槛：translucent 段 = 水 ∪ 满格透明、岩浆归 main 段）；`removalMaxRayDist=96` 外的格保守保留（深度量化误差超出 δ 可靠区，§4.2/§10.5）；记忆世界离线时无删除证据（优雅降级，恢复后自愈）。
 14. **两深度锚点边界（v2.24，v2.26 修订，见 §5.4）**：工序 B 首层透明面深度 pass 仅在 Fabulous（translucent 目标非空）可用——Fancy/Fast 无独立目标，回退 §5.1 最近表面语义（水面掩盖水底）；嵌套半透明的**精确面**深度给不出——**v2.26 起由工序 C 区间射线推进逐格归属、方块级粒度（水柱中间水格全部枚举）**；绊线（weather 目标）与掉落物（item_entity 目标）不在 translucent 深度内——绊线恒走工序 C 区间推进、掉落物走实体通道（§5.3）；透明/不透明共面边界靠 δ 容差兜底。
+15. **半透明方块减量边界（v2.36，流体 + 满格透明，见 §7.12）**：translucent 场判据只在 Fabulous 且第二路 PBO 成功（`hasTranslucentDepth`）时存在——非 Fabulous 或 PBO 软失败时水/玻璃块的消失判定空集（岩浆写 main 不受影响，仍可删）；表层所有权限制——部分收缩残留浅层水时深层幽灵欠删（残水自罩、视觉无害），玻璃板/栅栏等**非满形状**透明块仍不删（进不了 translucent 段，防误删回归，接受）；判据与采集同度量、深度量化可靠距离上限 `removalMaxRayDist`=96 不变。
 
 ---
 
@@ -1193,6 +1300,14 @@ API 线程: requestCapture → awaitSnapshot(5000)（null → 超时错误）
 - 验证过程：海洋场景 t/m 双深度诊断（t<m=88% 证实深度机制正常、反投影 t 命中率 0% 定位谓词根因）→ 谓词修复后水柱完整上报（用户实测确认）→ 移除 `[TEST-CODE]` 诊断块。
 - 编译：`gradlew compileJava` 通过（BUILD SUCCESSFUL）。
 
+### Phase 10：半透明方块减量（水 + 满格透明）——translucent 深度在场判定（v2.36，✅ 已实现 2026-09-08，待游戏内验证）
+> v2.36 实施（2026-09-08，✅ 已实现；范围定案见 §7.12）：排干的水/岩浆及被移除的满格透明（玻璃块/染色玻璃/冰）因 §7.11 只删实心不透明格而永成幽灵。修正 = 在 translucent 深度场上同构复刻 §7.11 判据（translucent 目标 = 主深度拷贝被 TRANSLUCENT 组在前覆盖，"无半透明"自编码为 `t==m` → 单值比较天然不误删活对象）；cells 分两段——**opaque/main 段**（实心不透明 ∪ 冻结实体占用格 ∪ **岩浆**）+ **translucent 段 = 水 ∪ 满格透明**；判据场随采集通道选（Fabulous 下水/玻璃 → translucent 场；Fancy/Fast 水/玻璃写 main → 现有 main 场 + 放宽 reporter/applier 门槛；岩浆写 main → 恒走 main 段，PBO 降级不受影响）。
+- [x] `memory_cells.bin` version=3：记忆侧 `MemoryCellReporter` 两段布局（opaque/main 段 long 数组 + translucent 开关 byte + translucent 段 count/longs；`appliedBlocks(dim)` 取格 + 现状核验分段：水/满格透明 → translucent、实心不透明/岩浆 → main + 同距离球/指纹/原子写）；version≤2 旧文件 translucent 段空、行为等同 v2.23
+- [x] 采集侧：`DeletionJudge` 增 `testTranslucent` 判定变体（读 cells.translucent 段；复用 bbox/slab/δ；比较 translucent 目标 `Z_translucent ≥ t_far − δ`、≥2 像素，防御性判空集）；`ObjectResolver` 按「Fabulous && hasTranslucentDepth && `translucentEnabled` → translucent 场 / Fancy-Fast → 并入 main 场 / Fabulous &&（!hasT || !开关）→ 空集」路由 translucent 段，删格并入同一 `deletions`
+- [x] 记忆侧 `DeletionApplier`：deletion 主循环守卫放宽到 `isDeletableContent`（实心不透明 ∪ 流体（水/岩浆）∪ 满格透明）；相机格快路径仍只删实心不透明；玻璃板/栅栏等非满形状/段外仍拒删
+- [x] 配置：`removalTranslucentEnabled`（默认 true，仅 Fabulous 生效；随 cells version=3 头下发）
+- [ ] 验证（待游戏内，Phase 10）：桶舀水整片消失一轮删（含深水柱中间格）；敲掉/移动玻璃块、染色玻璃、冰 → 判删、活玻璃不误删、被挡玻璃欠删；活水/活岩浆不误删；部分排水欠删但视觉无害；Fabulous PBO 软失败水/玻璃跳过、Fancy/Fast 走 main 场删除；玻璃板/栅栏等非满形状回归不删
+
 ---
 
 ## 十二、实现期需核实的源码清单
@@ -1230,3 +1345,4 @@ API 线程: requestCapture → awaitSnapshot(5000)（null → 超时错误）
 | **反向通道 cells 文件（v2.23）** | ✅ 已核实：`MemoryCellReporter` 用 `Files.write(tmp, buf)` + `Files.move(ATOMIC_MOVE)`（回退 `REPLACE_EXISTING`）原子写，小端 ByteBuffer 布局（magic SCEL + version + threshold + maxRayDist + count + longs）与采集侧 `MemoryCellsReader` 逐字节对应；采集侧读时 `Files.getLastModifiedTime` mtime 门控、解析失败保留旧 mtime 下轮重试（半截写防护同 §7.4）；`TerrainData.fingerprint()` 已含 `deletions`（§7.4 门控不误跳过） | `MemoryCellReporter` / `MemoryCellsReader` / `Files` |
 | **记忆侧距离球过滤（v2.23）** | ✅ 已核实：`MemoryCellReporter.computeCells` 只做 `|cell−agentPos|² ≤ removalMaxRayDist²` 距离球过滤（球心 = 玩家眼睛 `eyeY`），不缩角度（Over-inclusive 成立）；球外格不进 cells 文件 → 采集侧对它们无像素命中、自然跳过；触发 = mutationVersion 变化 || 每 `memoryCellsWriteIntervalTicks` 兜底 || 内容指纹变化 | `MemoryCellReporter` |
 | **translucent 目标深度可读（v2.24）** | ✅ 已核实：`LevelRenderer.getTranslucentTarget()` 在 Fabulous（`useShaderTransparency()`）下返回独立 translucent RenderTarget、Fancy/Fast 为 null（`ChunkSectionLayerGroup.outputTarget()` L32 引用）；`addMainPass` L705-706 `copyDepthFrom(main)` + L710 TRANSLUCENT 组 LEQUAL 覆盖 ⇒ 其深度 = "首个半透明面"且 `≤ mainDepth`；同投影同尺寸 → 第二路 PBO 可直接读 | `LevelRenderer` L222-234/L705-710 / `ChunkSectionLayerGroup` L28-37 / `RenderTarget.getDepthTexture` L118 |
+| **fluid/透明面剔除对 translucent 逐格在场判定（v2.36）** | ✅ 判据已实现（2026-09-08，§7.12）；渲染面剔除细部仍待游戏内观察：水/岩浆流体的渲染面剔除（淹没/内部面是否写 translucent 片元）与满格透明方块的面剔除，只影响"整片消失单帧全删 vs 多帧收敛"的快慢，不影响判据安全（活对象必在暴露面写片元 → `t < t_far` 保活；消失必 `t==m`） | `FlowingFluid`/`FluidRenderer` / `SectionCompiler` / `GlassBlock` |

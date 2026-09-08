@@ -74,7 +74,8 @@ public final class ObjectResolver {
     /**
      * 执行四路查询 + v2.23 减量判定，并把结果写入三个 store（§6.1）。
      *
-     * @param cells v2.23：记忆侧反向通道上报的待判定记忆格 + 删除阈值（{@code MemoryCellsReader} 读取）
+     * @param cells v2.23/v2.36：记忆侧反向通道上报的待判定记忆格（main 段 + translucent 段两分段，
+     *              §7.12）+ translucent 场开关 + 删除阈值（{@code MemoryCellsReader} 读取）
      * @return 可见对象 + store 统计（供 API 组装 JSON）
      */
     public static ResolveResult resolve(
@@ -145,10 +146,41 @@ public final class ObjectResolver {
         // 优化），不可见格才走逐块判定。记忆侧离线（无 cells）→ 空清单 → 无删除证据 → 只增不删。
         // v2.32：cells 头部带维标签 → 只对「维度与本快照一致」的 cells 做判定；旧 version=1 文件无
         // 维标签（dimension 为空）→ 空清单（宁可不删、不跨维误删；镜像瞬态落后时优雅降级为只增）。
-        final List<BlockPos> deletions = (cells.dimension() == null || cells.dimension().isEmpty()
-                || !cells.dimension().equals(dimensionId))
-                ? List.of()
-                : DeletionJudge.test(snap, unproj, cells.cells(), cells.pixelThreshold(), terrain.keySet());
+        //
+        // v2.36（§7.12）：cells 分两段——main 段（实心不透明 + 冻结实体占用格 + 岩浆）恒走 main 场判；
+        // translucent 段（水 + 满格透明）按「渲染配置 + 该格现实写哪张场」路由（判据场选择，§7.12）：
+        //   Fabulous && hasTranslucentDepth && translucentEnabled → translucent 场判（testTranslucent）；
+        //   Fancy/Fast（无独立 translucent 目标，水/满格透明写 main）→ 并入现有 main 场判据（test）；
+        //   Fabulous && !hasTranslucentDepth（第二路 PBO 软失败）→ translucent 段判据空集（幽灵暂留，
+        //     水/满格透明绝不可喂 main 场——恒假消失，优雅降级、恢复后自愈）；岩浆走 main 段不受影响。
+        final boolean dimensionOk = cells.dimension() != null && !cells.dimension().isEmpty()
+                && cells.dimension().equals(dimensionId);
+        final List<BlockPos> deletions = new ArrayList<>();
+        final List<BlockPos> translucentDeletions = new ArrayList<>();
+        if (dimensionOk) {
+            // main 段 → main 场（§7.11 原样判据）
+            deletions.addAll(DeletionJudge.test(snap, unproj, cells.cells(), cells.pixelThreshold(), terrain.keySet()));
+            // translucent 段 → 按当前图形配置路由（与 §5.4 采集通道同口径，不得混用）
+            if (!cells.translucentCells().isEmpty()) {
+                if (fabulous) {
+                    if (snap.hasTranslucentDepth() && cells.translucentEnabled()) {
+                        translucentDeletions.addAll(DeletionJudge.testTranslucent(
+                                snap, unproj, cells.translucentCells(), cells.pixelThreshold(), terrain.keySet()));
+                    }
+                    // Fabulous && (!hasTranslucentDepth || !translucentEnabled) → translucent 段空集
+                } else {
+                    // Fancy/Fast：水/满格透明写 main → 并入现有 main 场判据
+                    translucentDeletions.addAll(DeletionJudge.test(
+                            snap, unproj, cells.translucentCells(), cells.pixelThreshold(), terrain.keySet()));
+                }
+            }
+            deletions.addAll(translucentDeletions);
+        }
+        // v2.36 诊断：main/translucent 两段各自判删数（读 translucent 场用 testTranslucent 路径时）
+        LOGGER.info("[Vision] deletions: main={}, translucent={} (total={}, fabulous={}, hasTranslucentDepth={}, "
+                        + "translucentEnabled={})",
+                deletions.size() - translucentDeletions.size(), translucentDeletions.size(), deletions.size(),
+                fabulous, snap.hasTranslucentDepth(), cells.translucentEnabled());
 
         // v2.31（生物群系，见 docs/生物群系复原设计方案.md）：在三 store 落盘前为群系通道采样。
         // 候选 = 本帧全部可见方块（此刻 terrain 已含 §5.4 半透明/绊线补采）+ 相机 cell 锚点

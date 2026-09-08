@@ -28,6 +28,8 @@ import org.slf4j.LoggerFactory;
  *   "removalEnabled": true,            // v2.23：减量删除开关（§7.11）；false = 纯累积
  *   "removalPixelThreshold": 2,        // v2.23：采集侧删除判定阈值（像素越过计数≥此值判消失）
  *   "removalMaxRayDist": 96.0,         // v2.23：距离球过滤半径（格）；1/z 深度量化误差限制（§7.11）
+ *   "removalTranslucentEnabled": true, // v2.36：Fabulous 下 translucent 场减量开关（水/满格透明，§7.12）；
+ *                                      //   false = 该配置下暂留幽灵（岩浆走 main 场不受影响；Fancy/Fast 不生效）
  *   "memoryCellsWriteIntervalTicks": 10, // v2.23：cells 文件重算兜底间隔（tick）
  *   "memoryCellsFile": "",             // v2.23：memory_cells.bin 路径；留空自动探测
  *   "containerFile": "",               // v2.28（§5.2.2）：容器内容源 NBT 文件（containers.nbt）；留空自动探测
@@ -59,6 +61,10 @@ public class MemoryConfig {
     /** 距离球过滤半径（格）：只上报 |cell − agentPos| ≤ 此值的格（§7.11：深度 1/z 非线性下 float32
      *  量化误差随距离放大，δ=5cm 只在 ≤~100 格内可靠）。 */
     public double removalMaxRayDist = 96.0;
+    /** v2.36（§7.12）：Fabulous 下 translucent 场减量开关（随 cells 文件头下发给采集侧；默认 true）。
+     *  false = Fabulous 下不透写 translucent 目标的格（水/满格透明）不判删、暂留幽灵（岩浆写 main、走 main
+     *  场不受影响）；Fancy/Fast 下不生效（水/满格透明写 main、本就由 main 场判据覆盖）。 */
+    public boolean removalTranslucentEnabled = true;
     /** cells 文件重算兜底间隔（tick）：世界/姿态未变时也每 N tick 重算一次（§7.11 触发）。 */
     public int memoryCellsWriteIntervalTicks = 10;
     /** memory_cells.bin 自定义路径；留空则自动探测（源 terrain.nbt 同级，采集侧读同一路径）。 */
@@ -106,6 +112,7 @@ public class MemoryConfig {
                 if (json.has("removalEnabled") && json.get("removalEnabled").isJsonPrimitive()) removalEnabled = json.get("removalEnabled").getAsBoolean();
                 if (json.has("removalPixelThreshold") && json.get("removalPixelThreshold").isJsonPrimitive()) removalPixelThreshold = json.get("removalPixelThreshold").getAsInt();
                 if (json.has("removalMaxRayDist") && json.get("removalMaxRayDist").isJsonPrimitive()) removalMaxRayDist = json.get("removalMaxRayDist").getAsDouble();
+                if (json.has("removalTranslucentEnabled") && json.get("removalTranslucentEnabled").isJsonPrimitive()) removalTranslucentEnabled = json.get("removalTranslucentEnabled").getAsBoolean();
                 if (json.has("memoryCellsWriteIntervalTicks") && json.get("memoryCellsWriteIntervalTicks").isJsonPrimitive()) memoryCellsWriteIntervalTicks = json.get("memoryCellsWriteIntervalTicks").getAsInt();
                 if (json.has("memoryCellsFile") && json.get("memoryCellsFile").isJsonPrimitive()) memoryCellsFile = json.get("memoryCellsFile").getAsString();
                 if (json.has("containerFile") && json.get("containerFile").isJsonPrimitive()) containerFile = json.get("containerFile").getAsString();
@@ -143,6 +150,7 @@ public class MemoryConfig {
             json.addProperty("removalEnabled", removalEnabled);
             json.addProperty("removalPixelThreshold", removalPixelThreshold);
             json.addProperty("removalMaxRayDist", removalMaxRayDist);
+            json.addProperty("removalTranslucentEnabled", removalTranslucentEnabled);
             json.addProperty("memoryCellsWriteIntervalTicks", memoryCellsWriteIntervalTicks);
             json.addProperty("memoryCellsFile", memoryCellsFile);
             json.addProperty("containerFile", containerFile);

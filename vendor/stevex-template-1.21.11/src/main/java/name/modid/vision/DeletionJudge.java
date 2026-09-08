@@ -34,6 +34,10 @@ import net.minecraft.world.phys.Vec3;
  *
  * <p>阈值来自 cells 文件头（记忆侧 {@code MemoryConfig.removalPixelThreshold} 随通道下发，单一来源）；
  * 解析失败用 {@link MemoryCellsReader#DEFAULT_PIXEL_THRESHOLD}。
+ *
+ * <p>v2.36（§7.12）{@link #testTranslucent}：main 场判据的<b>同构镜像</b>，逐像素深度换读 translucent
+ * 目标（"首个半透明面"，主拷贝 = 无半透明在前）。只判记忆侧 translucent 段（水 / 满格透明）；
+ * 由 {@code ObjectResolver} 按图形配置路由（Fabulous && hasTranslucentDepth 时调用）。
  */
 public final class DeletionJudge {
 
@@ -44,7 +48,7 @@ public final class DeletionJudge {
     }
 
     /**
-     * 对记忆格清单做逐块判定，产出被证明消失的格列表。
+     * 对记忆格清单做逐块判定，产出被证明消失的格列表（v2.23 main 场，§7.11）。
      *
      * @param snap 本次深度快照（depth / cameraPos）
      * @param unproj 本快照的反投影器（pixelRay / unprojectPixel / projectToScreen / dFar）
@@ -60,6 +64,50 @@ public final class DeletionJudge {
             final int pixelThreshold,
             final Set<BlockPos> currentTerrain
     ) {
+        return judge(snap, unproj, memoryCells, pixelThreshold, currentTerrain, false);
+    }
+
+    /**
+     * v2.36（§7.12）translucent 场判定变体 —— 与 {@link #test} 唯一差异是把逐像素深度读换成
+     * <b>translucent 目标</b>（{@code translucentDepthAt}），bbox/slab/δ/阈值全复用。
+     *
+     * <p>语义（§7.12）：translucent 目标每像素 = main 拷贝（copyDepthFrom(main)）后被 TRANSLUCENT 组
+     * 在前 LEQUAL 覆盖 → "首个半透明面"；"无半透明在前"被编码成主拷贝（{@code t == m}）而非独立空值。
+     * 因此读<b>全体像素</b>（含 t==m）同式比较 {@code Z_translucent ≥ t_far − δ} 即可判该格表层消失——
+     * 与 main 场判据唯一差异只在哨兵：不透明场"无表面 = 天空 1.0"，translucent 场"无半透明 = 主拷贝"
+     * （主拷贝本身在远处时也是 1.0/dFar → ∞，代码路径相同）。
+     *
+     * <p>调用前提：仅 Fabulous 且 {@code snap.hasTranslucentDepth()}（第二路 PBO 回读成功）。
+     * 无 translucent 目标（Fancy/Fast / PBO 降级）不可调用——水/满格透明不喂 main 场判据（§7.12
+     * 判据场选择），此处防御性直接判空集（调用方 {@code ObjectResolver} 已按配置路由）。
+     *
+     * @param snap 本次深度快照（须含 translucentDepth，见 {@link DepthCapture.DepthSnapshot#hasTranslucentDepth()}）
+     * @param unproj 本快照的反投影器（pixelRay / unprojectPixel / projectToScreen / dFar）
+     * @param memoryCells translucent 段待判定格（水 / 满格透明，已按距离球过滤）
+     * @param pixelThreshold 越过像素阈值（默认 2）
+     * @param currentTerrain 本次可见方块集（这些格绝不判删，双保险）
+     * @return 被证明表层消失的格列表（可为空）
+     */
+    public static List<BlockPos> testTranslucent(
+            final DepthCapture.DepthSnapshot snap,
+            final Unprojector unproj,
+            final List<BlockPos> memoryCells,
+            final int pixelThreshold,
+            final Set<BlockPos> currentTerrain
+    ) {
+        if (!snap.hasTranslucentDepth()) return List.of(); // 防御：无 translucent 目标 → 不可判（宁欠勿删）
+        return judge(snap, unproj, memoryCells, pixelThreshold, currentTerrain, true);
+    }
+
+    /** 共享判定主循环；{@code translucentField} 决定逐像素读 main 场还是 translucent 场。 */
+    private static List<BlockPos> judge(
+            final DepthCapture.DepthSnapshot snap,
+            final Unprojector unproj,
+            final List<BlockPos> memoryCells,
+            final int pixelThreshold,
+            final Set<BlockPos> currentTerrain,
+            final boolean translucentField
+    ) {
         if (memoryCells.isEmpty()) return List.of();
 
         final Vec3 cam = snap.cameraPos();
@@ -73,13 +121,13 @@ public final class DeletionJudge {
         for (BlockPos pos : memoryCells) {
             // 可见格由 §5.1 放置/更新路径处理，不参与减量（§7.11 双保险 + 优化）
             if (currentTerrain.contains(pos)) continue;
-            // 相机在格内 → 格必然存在（正常游玩不可能站在实心块内；防御性跳过）
+            // 相机在格内 → 格必然存在（游泳/站在格内；防御性跳过）
             if (pos.getX() <= camX && camX <= pos.getX() + 1.0
                     && pos.getY() <= camY && camY <= pos.getY() + 1.0
                     && pos.getZ() <= camZ && camZ <= pos.getZ() + 1.0) {
                 continue;
             }
-            if (provenGone(snap, unproj, cam, width, height, dFar, pos, thr)) {
+            if (provenGone(snap, unproj, cam, width, height, dFar, pos, thr, translucentField)) {
                 deletions.add(pos);
             }
         }
@@ -95,7 +143,8 @@ public final class DeletionJudge {
             final int height,
             final float dFar,
             final BlockPos pos,
-            final int threshold
+            final int threshold,
+            final boolean translucentField
     ) {
         final double minX = pos.getX(), minY = pos.getY(), minZ = pos.getZ();
         final double maxX = minX + 1.0, maxY = minY + 1.0, maxZ = minZ + 1.0;
@@ -131,7 +180,9 @@ public final class DeletionJudge {
                 if (interval == null) continue; // 射线不穿 B 的整格（bbox 超集 → continue 防误判）
                 final double tFar = interval[1];
 
-                final float d = snap.depthAt(px, py);
+                // v2.36：按判据场选读 —— main 场 depthAt（§7.11）或 translucent 场 translucentDepthAt
+                //（§7.12：主拷贝在远处时同样落 dFar → ∞，哨兵差异见 testTranslucent javadoc）
+                final float d = translucentField ? snap.translucentDepthAt(px, py) : snap.depthAt(px, py);
                 final double zOpaque;
                 if (d >= dFar) {
                     zOpaque = Double.POSITIVE_INFINITY; // 该像素背后是天空 → 射线穿过 B 到远平面

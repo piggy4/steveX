@@ -15,6 +15,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
@@ -43,17 +44,33 @@ import org.slf4j.LoggerFactory;
  * 活动维的 ServerLevel），采集侧只对 {@code dimension == 本快照维} 的 cells 做删除判定；镜像落后时
  * cells 仍标上一维 → 采集侧宁缺勿滥、绝不跨维误删。
  *
- * <p>文件格式（小端，与采集侧 {@code MemoryCellsReader} 对应；version = 2 起带 UTF-8 维 id）：
+ * <p>v2.36（§7.12）：格式升 <b>version = 3</b>，cells 集合按<b>判据场分段</b>上报，与采集侧 §5.4
+ * "该格现实写哪张场"路由同口径：
+ * <ul>
+ *   <li><b>opaque/main 段</b> = 实心不透明块 + 冻结实体占用格 + <b>写 main 深度的流体（岩浆）</b>
+ *       —— 一律在采集侧 <b>main 深度场</b>上判定（岩浆恒写 main、任意配置可判）；</li>
+ *   <li><b>translucent 段</b> = <b>水</b>（写 translucent 目标）+ <b>满格透明方块</b>
+ *       （玻璃块/染色玻璃/冰/遮光玻璃等：{@code isShapeFullBlock && !canOcclude}）—— 在采集侧按当前
+ *       图形配置路由：Fabulous 且 translucent 目标在场 → translucent 深度场判定；Fancy/Fast（写 main）
+ *       → 并入 main 场判据。段内不含岩浆（岩浆走 main 段，保证 Fabulous 第二路 PBO 软失败时仍可删）；
+ *       不含玻璃板/栅栏/压力板等非满形状透明块（须 §7.13 几何过滤，v2.36 不纳入、欠删）。</li>
+ * </ul>
+ *
+ * <p>文件格式（小端，与采集侧 {@code MemoryCellsReader} 对应；version = 3）：
  * <pre>{@code
  *   [0..3]   magic "SCEL"
- *   [4]      version = 2
+ *   [4]      version = 3
  *   [5..8]   int 维 id 字节长度 L（UTF-8）
  *   [9..9+L) UTF-8 dimensionId（活动维）
  *   [..]     int removalPixelThreshold   （采集侧删除判定阈值，随通道下发，单一来源）
  *   [..]     double removalMaxRayDist    （信息性：距离球过滤半径）
- *   [..]     int count
- *   [..]     count × long（BlockPos.asLong）
+ *   [..]     int opaqueCount
+ *   [..]     opaqueCount × long（BlockPos.asLong；实心不透明 + 冻结实体占用格 + 岩浆）
+ *   [..]     byte removalTranslucentEnabled（v2.36 translucent 场开关，采集侧据此路由）
+ *   [..]     int translucentCount
+ *   [..]     translucentCount × long（BlockPos.asLong；水 + 满格透明）
  * }</pre>
+ * <p>version ≤ 2 旧文件：无 translucent 段 → 采集侧只按 opaque/main 段删，行为等同 v2.23（无迁移负担）。
  *
  * <p>文件路径 = 源 terrain.nbt 所在目录的 {@code memory_cells.bin}（采集侧读同一路径）。
  * 记忆侧离线不写 → 采集侧无删除证据 → 只增不删（优雅降级）。
@@ -62,8 +79,12 @@ public final class MemoryCellReporter {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("stevex-test/memory");
     private static final byte[] MAGIC = {'S', 'C', 'E', 'L'};
-    /** v2.32：格式版本升到 2（头部在 version 之后追加 UTF-8 维 id 段；version=1 旧文件无维标签）。 */
-    private static final int VERSION = 2;
+    /** v2.32：格式版本升到 2（头部在 version 之后追加 UTF-8 维 id 段；version=1 旧文件无维标签）。
+     *  v2.36（§7.12）：版本升到 3（opaque/main longs 之后追加 translucent 开关 byte + translucent 段）。 */
+    private static final int VERSION = 3;
+
+    /** 一次上报的两段集合（main/opaque 段与 translucent 段，见类 javadoc §7.12 分段）。 */
+    private record Segments(Set<Long> main, Set<Long> translucent) {}
 
     private final TerrainRestorer terrain;
     private final EntityRestorer entities;
@@ -71,18 +92,22 @@ public final class MemoryCellReporter {
     private final MemoryConfig config = MemoryConfig.get();
     private int ticks;
     private int lastMutationVersion = -1;
-    private Set<Long> lastCells = Set.of();
+    private Segments lastSegments = emptySegments();
 
     public MemoryCellReporter(final TerrainRestorer terrain, final EntityRestorer entities) {
         this.terrain = terrain;
         this.entities = entities;
     }
 
+    private static Segments emptySegments() {
+        return new Segments(Set.of(), Set.of());
+    }
+
     /** 服务器（世界）启动 / 切换时调用，清空指纹与版本。 */
     public void onServerStart() {
         ticks = 0;
         lastMutationVersion = -1;
-        lastCells = Set.of();
+        lastSegments = emptySegments();
         LOGGER.info("[MemoryWorld] Cell reporter ready");
     }
 
@@ -102,15 +127,22 @@ public final class MemoryCellReporter {
         }
         lastMutationVersion = version;
 
-        final Set<Long> cells = computeCells(level, dimension);
-        if (cells.equals(lastCells)) return; // 内容指纹门控：内容未变不重写
+        final Segments segments = computeCells(level, dimension);
+        // 内容指纹门控：两段集合都未变才不重写（含 translucent 开关随写入内容一起指纹化）
+        if (segments.main().equals(lastSegments.main())
+                && segments.translucent().equals(lastSegments.translucent())) {
+            return;
+        }
 
         final Path file = config.resolveMemoryCellsFile();
         if (file == null) return;
-        if (writeAtomic(file, dimension, cells, config.removalPixelThreshold, config.removalMaxRayDist)) {
-            lastCells = cells;
-            LOGGER.info("[MemoryWorld] Wrote {} memory cells [{}] to {} (threshold={}, maxDist={})",
-                    cells.size(), dimension, file, config.removalPixelThreshold, config.removalMaxRayDist);
+        if (writeAtomic(file, dimension, segments, config.removalPixelThreshold,
+                config.removalMaxRayDist, config.removalTranslucentEnabled)) {
+            lastSegments = segments;
+            LOGGER.info("[MemoryWorld] Wrote {} main + {} translucent memory cells [{}] to {} (threshold={}, "
+                    + "maxDist={}, translucentEnabled={})",
+                    segments.main().size(), segments.translucent().size(), dimension, file,
+                    config.removalPixelThreshold, config.removalMaxRayDist, config.removalTranslucentEnabled);
         }
     }
 
@@ -125,27 +157,40 @@ public final class MemoryCellReporter {
     }
 
     /**
-     * 重算待上报格集（§7.11 / v2.32）：指定维的实心不透明块（距离过滤 + 世界状态判定）+ 冻结实体
-     * 占用格（距离过滤）。Over-inclusive：只缩距离，不做视锥。
+     * 重算待上报两段格集（§7.11 / v2.32 / v2.36）：按"该格现实写哪张深度场"分类（与采集侧路由同口径，
+     * 见类 javadoc）。Over-inclusive：只缩距离，不做视锥。
+     * <ul>
+     *   <li><b>main 段</b>：实心不透明块 + 冻结实体占用格 + 非水流体（岩浆，恒写 main）；</li>
+     *   <li><b>translucent 段</b>：水 + 满格透明方块（玻璃块/冰等，Fabulous 写 translucent 目标）。</li>
+     * </ul>
      */
-    private Set<Long> computeCells(final ServerLevel level, final String dimension) {
+    private Segments computeCells(final ServerLevel level, final String dimension) {
         final Vec3 agent = agentPos(level);
-        if (agent == null) return Set.of();
+        if (agent == null) return emptySegments();
         final double r2 = config.removalMaxRayDist * config.removalMaxRayDist;
-        final Set<Long> cells = new HashSet<>();
+        final Set<Long> main = new HashSet<>();
+        final Set<Long> translucent = new HashSet<>();
 
-        // ① 实心不透明块：先距离过滤（便宜），再读世界判定（只对球内格读）。只取该维已应用方块。
+        // ① 方块：先距离过滤（便宜），再读一次世界状态判定分段。只取该维已应用方块。
         for (BlockPos pos : terrain.appliedBlocks(dimension)) {
             final double dx = pos.getX() + 0.5 - agent.x;
             final double dy = pos.getY() + 0.5 - agent.y;
             final double dz = pos.getZ() + 0.5 - agent.z;
             if (dx * dx + dy * dy + dz * dz > r2) continue;
-            if (BlockStateUtil.isSolidOpaque(level, pos, level.getBlockState(pos))) {
-                cells.add(pos.asLong());
+            final BlockState state = level.getBlockState(pos);
+            if (BlockStateUtil.isSolidOpaque(level, pos, state)) {
+                main.add(pos.asLong());            // 实心不透明 → main
+            } else if (BlockStateUtil.isNonWaterFluid(state)) {
+                main.add(pos.asLong());            // 岩浆等非水流体 → main（恒写 main，任意配置可判）
+            } else if (BlockStateUtil.isWaterFluid(state)) {
+                translucent.add(pos.asLong());     // 水 → translucent
+            } else if (BlockStateUtil.isFullTransparentCell(level, pos, state)) {
+                translucent.add(pos.asLong());     // 满格透明（玻璃块/冰）→ translucent
             }
+            // 非满形状透明（玻璃板/栅栏/压力板/薄物）与空气：不纳入任何段（欠删无害，§7.12 边界①）
         }
 
-        // ② 冻结实体占用格（AABB 覆盖的所有格，距离过滤）。只取该维已放置实体。
+        // ② 冻结实体占用格（AABB 覆盖的所有格，距离过滤）→ 一律 main（实体写 main，见 §7.11）。只取该维已放置实体。
         for (Entity e : entities.entities(dimension)) {
             if (e.isRemoved()) continue;
             final AABB box = e.getBoundingBox();
@@ -159,35 +204,47 @@ public final class MemoryCellReporter {
                         final double dy = y + 0.5 - agent.y;
                         final double dz = z + 0.5 - agent.z;
                         if (dx * dx + dy * dy + dz * dz > r2) continue;
-                        cells.add(BlockPos.asLong(x, y, z));
+                        main.add(BlockPos.asLong(x, y, z));
                     }
                 }
             }
         }
-        return cells;
+        return new Segments(main, translucent);
     }
 
     // ==================== 原子写 ====================
 
     /** 原子写（临时文件 + rename，半截写防护同 §7.4）。失败返回 false（调用方不推进指纹）。
+     *  <p>v2.36 布局（见类 javadoc）：version=3 起在 opaque 段后追加 translucentEnabled byte 与
+     *  translucent 段；两段用 {@link Set} 无序语义，集合相等即内容相等（指纹门控只比集合）。
      *  字节序与采集侧 {@code MemoryCellsReader} 一致：{@link ByteOrder#LITTLE_ENDIAN}。 */
-    private static boolean writeAtomic(final Path target, final String dimension, final Set<Long> cells,
-                                       final int threshold, final double maxRayDist) {
+    private static boolean writeAtomic(final Path target, final String dimension, final Segments segments,
+                                       final int threshold, final double maxRayDist,
+                                       final boolean translucentEnabled) {
         try {
             Files.createDirectories(target.getParent());
             final Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
             final byte[] dimBytes = dimension == null ? new byte[0] : dimension.getBytes(StandardCharsets.UTF_8);
-            // 布局：[0..3] magic + [4] ver + [5..8] L + [9..9+L) dim + 16（threshold/maxRayDist/count）+ count×8
-            final ByteBuffer buf = ByteBuffer.allocate(25 + dimBytes.length + cells.size() * 8)
-                    .order(ByteOrder.LITTLE_ENDIAN);
+            // 布局：magic(4) + ver(1) + dimLen(4) + dim + 16（threshold/maxRayDist）+ opaqueCount(4)
+            //       + opaque×8 + translucentEnabled(1) + translucentCount(4) + translucent×8
+            final int opaque = segments.main().size();
+            final int translucent = segments.translucent().size();
+            final ByteBuffer buf = ByteBuffer.allocate(
+                    30 + dimBytes.length + (opaque + translucent) * 8
+            ).order(ByteOrder.LITTLE_ENDIAN);
             buf.put(MAGIC);                    // [0..3]
             buf.put((byte) VERSION);           // [4]
             buf.putInt(dimBytes.length);       // [5..8]
             buf.put(dimBytes);                 // [9..9+L)
             buf.putInt(threshold);             // threshold
             buf.putDouble(maxRayDist);         // maxRayDist
-            buf.putInt(cells.size());          // count
-            for (long c : cells) {             // count × long
+            buf.putInt(opaque);                // opaqueCount
+            for (long c : segments.main()) {   // opaque × long
+                buf.putLong(c);
+            }
+            buf.put((byte) (translucentEnabled ? 1 : 0)); // translucentEnabled
+            buf.putInt(translucent);           // translucentCount
+            for (long c : segments.translucent()) {       // translucent × long
                 buf.putLong(c);
             }
             Files.write(tmp, buf.array());
