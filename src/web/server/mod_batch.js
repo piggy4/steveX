@@ -57,6 +57,7 @@ function startBatch(manager, body) {
     steps: norm.steps,
     activePressed: new Set(),          // 当前按住中的连续键方法名
     releasedKeys: [],                  // 结束/中止时兜底松开成功的键
+    releaseErrors: [],
     stopRequested: false,
     _stopWaitFns: []
   }
@@ -156,7 +157,7 @@ async function runLoop(manager, run) {
       run.activePressed.add(step.method)
     }
     const res = await client.call(step.method, step.params || {})
-    if (isPressableMethod(step.method) && step.params.pressed === false) {
+    if (res.ok && isPressableMethod(step.method) && step.params.pressed === false) {
       run.activePressed.delete(step.method)
     }
 
@@ -205,33 +206,48 @@ function waitStopable(run, ms) {
 
 /**
  * 终态收尾（唯一入口，runLoop 的所有 return 都经它，await 保证 releasedKeys 先于
- * finishedAt 就绪）：置 status → 兜底松开仍按住的连续键 → 置 finishedAt → 定时清理。
+ * finishedAt 就绪）：兜底松开仍按住的连续键 → 发布终态 → 定时清理。
  */
 async function finish(manager, run, status) {
   if (run.finishedAt != null) return
-  run.status = status
 
   const client = manager.getModClient ? manager.getModClient() : null
   const held = [...run.activePressed]
-  run.activePressed.clear()
-  if (held.length && client && client.isConnected()) {
-    // 并发补发松开，尽力而为（失败不阻塞收尾，只少记一条 released）
+  if (held.length) {
+    // Keep the execution slot until every release settles.
     const results = await Promise.all(
       held.map(async (method) => {
-        const r = await client.call(method, { pressed: false })
-        return { method, ok: r.ok }
+        try {
+          const r = client && client.isConnected()
+            ? await client.call(method, { pressed: false })
+            : { ok: false, error: 'Mod not connected' }
+          return { method, ok: r.ok, error: r.error }
+        } catch (err) {
+          return { method, ok: false, error: err.message || String(err) }
+        }
       })
     )
-    for (const { method, ok } of results) {
-      if (ok) run.releasedKeys.push(method)
+    for (const { method, ok, error } of results) {
+      if (ok) {
+        run.releasedKeys.push(method)
+        run.activePressed.delete(method)
+      } else {
+        run.releaseErrors.push({ method, error: error || 'release failed' })
+      }
     }
   }
 
+  run.status = run.releaseErrors.length || status === 'failed'
+    ? 'failed'
+    : run.stopRequested ? 'stopped' : status
   run.finishedAt = Date.now()
   run._pruneTimer = setTimeout(() => runs.delete(run.id), RETENTION_MS)
   run._pruneTimer.unref?.()
   if (manager.eventBus) {
-    manager.eventBus.emit('batch:done', { batchId: run.id, status, releasedKeys: run.releasedKeys })
+    manager.eventBus.emit('batch:done', {
+      batchId: run.id, status: run.status,
+      releasedKeys: run.releasedKeys, releaseErrors: run.releaseErrors
+    })
   }
 }
 
@@ -271,6 +287,7 @@ function serializeRun(run) {
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
     releasedKeys: run.releasedKeys,
+    releaseErrors: run.releaseErrors,
     steps: run.steps.map((s) => ({
       index: s.index,
       waitMs: s.waitMs,

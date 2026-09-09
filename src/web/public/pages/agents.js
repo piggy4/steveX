@@ -856,6 +856,9 @@ function renderBatchProgress(resultEl, batch) {
     if (Array.isArray(batch.releasedKeys) && batch.releasedKeys.length) {
       lines.push(`released ${batch.releasedKeys.join(', ')}`)
     }
+    for (const failure of batch.releaseErrors || []) {
+      lines.push(`failed to release ${failure.method}: ${failure.error}`)
+    }
   }
 
   resultEl.className = batch.status === 'done'

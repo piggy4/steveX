@@ -25,6 +25,7 @@ import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.ChestBlock;
+import net.minecraft.world.level.block.ShulkerBoxBlock;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.ChestType;
@@ -141,7 +142,7 @@ public final class ContainerMemoryTracker {
         BlockPos pos = bhr.getBlockPos();
         BlockState state = mc.level.getBlockState(pos);
         String blockId = VisionCollector.blockId(state);
-        if (!CONTAINER_FAMILY.contains(blockId)) return;
+        if (!CONTAINER_FAMILY.contains(blockId) && !(state.getBlock() instanceof ShulkerBoxBlock)) return;
         // v2.32：会话维度在绑定瞬间取定（菜单打开期间不可能跨维；commit 时以它分桶）。
         String dimension = mc.level.dimension().identifier().toString();
         session = new BoundSession(pos, blockId, blockId.equals("minecraft:ender_chest"), dimension, screen);

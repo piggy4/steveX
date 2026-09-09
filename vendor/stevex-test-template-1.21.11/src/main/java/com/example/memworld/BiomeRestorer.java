@@ -73,6 +73,8 @@ public class BiomeRestorer {
 
     /** v2.13 mtime 门控（§7.4）：最近一次成功读取的源文件 mtime；未变 → 不读不解压。 */
     private FileTime lastMtime;
+    /** Latest file buckets awaiting their own dimension's tick, even if mtime stays unchanged. */
+    private Map<String, Map<String, String>> pendingIdsByDim = new HashMap<>();
     /** 每次成功读取时递增的版本号（诊断日志用）。 */
     private int readVersion;
 
@@ -89,6 +91,7 @@ public class BiomeRestorer {
         pendingByDim.clear();
         warnedMissing.clear();
         lastMtime = null;
+        pendingIdsByDim.clear();
         readVersion = 0;
         ticks = 0;
         LOGGER.info("[MemoryWorld] Biome restorer ready");
@@ -101,7 +104,7 @@ public class BiomeRestorer {
     }
 
     /**
-     * 驱动一次轮询：① 源文件 mtime 变化时读取并 diff 出<b>当前活动维</b>的新 cell → 归组进本维
+     * 驱动一次轮询：① 源文件 mtime 变化时缓存全部维度，各维首次被驱动时 diff 新 cell → 归组进本维
      * pending；② 无论是否读到新文件，都扫 pendingByDim[活动维] 对已加载块 apply（补填）。
      * 每 tick 只处理 {@code level.dimension()} 对应维——活动维之外的维桶不 diff / 不写区块。
      */
@@ -137,11 +140,12 @@ public class BiomeRestorer {
             Map<String, Map<String, String>> idsByDim = readFile(source);
             if (idsByDim != null) {
                 lastMtime = mtime; // 只在成功读取后才推进
-                // 只 diff 当前活动维的桶（该维新增 cell 在上一帧已由该维快照累积，见类注释）
-                Map<String, String> newIds = idsByDim.get(dimension);
-                applyDiff(level, dimension, newIds == null ? Map.of() : newIds);
+                pendingIdsByDim = new HashMap<>(idsByDim);
             }
         }
+        // A dimension switch can happen a tick after the file was read.
+        Map<String, String> newIds = pendingIdsByDim.remove(dimension);
+        if (newIds != null) applyDiff(level, dimension, newIds);
         drainPending(level, dimension);
     }
 

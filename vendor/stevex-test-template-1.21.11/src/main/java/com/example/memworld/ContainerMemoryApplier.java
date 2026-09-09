@@ -192,6 +192,18 @@ public class ContainerMemoryApplier {
      */
     private void applyPos(final ServerLevel level, final String dimension, final BlockPos pos, final PosRecord rec,
                           final boolean warnConflicts) {
+        BlockState worldState = level.getBlockState(pos);
+        if (!worldState.isAir()) {
+            String worldId = BuiltInRegistries.BLOCK.getKey(worldState.getBlock()).toString();
+            if (!worldId.equals(rec.blockId())) {
+                if (warnConflicts) {
+                    warnOnce("conflict@" + dimension + "/" + pos,
+                            "[MemoryWorld] Pos {} [{}]: world block {} != recorded {}; skip (terrain visual wins)",
+                            pos, dimension, worldId, rec.blockId());
+                }
+                return;
+            }
+        }
         BlockEntity be = level.getBlockEntity(pos);
         if (be instanceof Container c) {
             fill(c, rec.items(), dimension + "@" + pos);
@@ -199,16 +211,8 @@ public class ContainerMemoryApplier {
         }
         if (be != null) return; // 非容器 BE 占位（如末影箱）：不可按块填充，外壳已由视觉放置
 
-        BlockState worldState = level.getBlockState(pos);
         if (!worldState.isAir()) {
-            String worldId = BuiltInRegistries.BLOCK.getKey(worldState.getBlock()).toString();
-            if (worldId.equals(rec.blockId())) {
-                attach(level, dimension, pos, worldState, rec);
-            } else if (warnConflicts) {
-                warnOnce("conflict@" + dimension + "/" + pos,
-                        "[MemoryWorld] Pos {} [{}]: world block {} ≠ recorded {}; skip (terrain visual wins)",
-                        pos, dimension, worldId, rec.blockId());
-            }
+            attach(level, dimension, pos, worldState, rec);
             return;
         }
 
