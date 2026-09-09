@@ -39,6 +39,21 @@ import org.slf4j.LoggerFactory;
  * </ul>
  *
  * <p>{@code applied} 是纯累积的：已放置的方块在后续扫描中一直保留在表内，永不因"本次没看到"而移除。
+ *
+ * <p>v2.32（世界类型区分，见 docs/世界类型区分与镜像复原设计方案.md §5）：
+ * <ul>
+ *   <li><b>文件按维分桶</b>：顶层 {@code { currentDimension, worlds:{<dim>:<正文>} }}（旧版单维文件
+ *       由 {@link WorldsFile} 自动回退 overworld 桶）。已应用状态、内容指纹<b>按维隔离</b>——下界同
+ *       坐标方块永不与主世界互相覆盖；</li>
+ *   <li><b>只 apply 活动维桶</b>：每 tick 只对 {@code level.dimension()} 对应桶做差异/放置，其它维桶
+ *       不动（内容留在文件，镜像切回该维时再 apply）；</li>
+ *   <li><b>镜像权威源</b>：文件顶层 {@code currentDimension}（agent 当前维，每快照必写）缓存在本类，
+ *       经 {@link #activeDimensionId()} 暴露给 {@link MemoryWorldManager} 路由玩家到对应 ServerLevel。
+ *       {appliedByDim} 的已放置方块是"该维世界内存放过的方块"（纯累积），删除判定仍按世界状态过滤；</li>
+ *   <li><b>内容一次性交付</b>：同一代际（一次文件读取）内、同一维的数据只向调用方交付一次
+ *       （{@link DeletionApplier} 拿到即删，重复交付无意义）。换维时即使文件 mtime 未变，首次驱动
+ *       新维也会把上次读取缓存的该维桶交付出来（镜像切换不丢内容）。</li>
+ * </ul>
  */
 public class TerrainRestorer {
 
@@ -52,14 +67,27 @@ public class TerrainRestorer {
     /** v2.22（§7.11）采集时相机（眼睛）位置 —— 相机格快路径 + 距离球参考（DeletionApplier 用）。 */
     private static final String KEY_AGENT_POS = "agentPos";
 
-    /** 已应用的世界状态：方块坐标 -> 内容指纹（block+state）。累积，永不因"本次没看到"而移除。 */
-    private final Map<BlockPos, String> applied = new LinkedHashMap<>();
+    /** v2.32：已应用的世界状态按维隔离：维度 → 方块坐标 → 内容指纹（block+state）。累积，永不因"本次没看到"而移除。 */
+    private final Map<String, Map<BlockPos, String>> appliedByDim = new LinkedHashMap<>();
 
     /** 方块实体通道：v2.10 失效 BE 的清除由本类驱动。 */
     private final MemoryRestorer beRestorer;
 
-    /** 已应用版本的源文件内容指纹；为 null 表示需要重新读取。 */
-    private String appliedFingerprint = null;
+    /** v2.32：已应用版本的源文件内容指纹按维；为 null（未出现该维）表示该维需要重新读取 / 应用。 */
+    private final Map<String, String> appliedFingerprintByDim = new LinkedHashMap<>();
+
+    /**
+     * v2.32：镜像权威源 = 文件顶层 currentDimension（最近一次成功读取的文件记录的 agent 当前维）。
+     * 文件缺失 / 未变时返回上次值；首 tick 文件缺失 → overworld 占位（与旧版单维行为一致）。
+     */
+    private String activeDimension = WorldsFile.LEGACY_DIMENSION;
+
+    /** v2.32：最近一次成功读取解析出的各维桶（维度 → 该维 TerrainData），跨 tick 缓存——换维后即使
+     *  mtime 未变也能从缓存把该维数据交付给首次驱动它的 tick。 */
+    private Map<String, TerrainData> parsedBuckets = Map.of();
+
+    /** v2.32：一次读取代际（{@code parsedBuckets} 对应文件内容）内已向调用方交付过数据的维集合。 */
+    private final Set<String> servedThisRead = new HashSet<>();
 
     /** v2.13 mtime 门控（§7.4）：最近一次成功读取的源文件 mtime；未变 → 不读不解压。 */
     private FileTime lastMtime;
@@ -80,17 +108,29 @@ public class TerrainRestorer {
     }
 
     /**
-     * v2.23：已应用方块坐标集快照副本。MemoryCellReporter 据此做距离球过滤 + 世界状态判定
-     * （§7.11 ① 实心不透明块）。纯累积：已删块仍在此表内，但上报前用世界状态过滤掉。
+     * v2.32：镜像权威源（§5.1）。{@link MemoryWorldManager} 据此判定记忆玩家应处的维。
+     * 文件缺失 / 未变时返回上次值；从未读过文件 → overworld 占位。
      */
-    public Set<BlockPos> appliedBlocks() {
-        return new HashSet<>(applied.keySet());
+    public String activeDimensionId() {
+        return activeDimension;
+    }
+
+    /**
+     * v2.23：指定维已应用方块坐标集快照副本。MemoryCellReporter 据此做距离球过滤 + 世界状态判定
+     * （§7.11 ① 实心不透明块），必须传它正在上报的 level 对应维，避免把别的维方块算进本维 cells。
+     */
+    public Set<BlockPos> appliedBlocks(final String dimension) {
+        Map<BlockPos, String> applied = appliedByDim.get(dimension);
+        return new HashSet<>(applied == null ? Set.of() : applied.keySet());
     }
 
     /** 服务器（世界）启动 / 切换时调用，清空已应用状态。 */
     public void onServerStart() {
-        applied.clear();
-        appliedFingerprint = null;
+        appliedByDim.clear();
+        appliedFingerprintByDim.clear();
+        parsedBuckets = Map.of();
+        servedThisRead.clear();
+        activeDimension = WorldsFile.LEGACY_DIMENSION;
         lastMtime = null;
         mutationVersion = 0;
         ticks = 0;
@@ -99,16 +139,16 @@ public class TerrainRestorer {
 
     /** 命令触发：强制重新读取源文件。须同时清 mtime 门控，否则 mtime 相同会被提前拦下。 */
     public void forceRefresh() {
-        appliedFingerprint = null;
+        appliedFingerprintByDim.clear();
+        parsedBuckets = Map.of();
+        servedThisRead.clear();
         lastMtime = null;
     }
 
     /**
-     * 驱动一次轮询：源文件 mtime 变化时读取并按需同步地形。
-     *
-     * <p>v2.23（§7.11）：返回值供 {@link DeletionApplier} 减量——即使方块内容未变化，只要
-     * deletions 变化也返回本次读取的数据（内容未变化时返回 null 不成立：mtime 变化即读取）。
-     * 返回 null 表示本轮无新数据（文件缺失 / mtime 未变 / 读取失败）。
+     * 驱动一次轮询：源文件 mtime 变化时读取（解析全文件各维桶）；之后只对<b>当前 level 维</b>的桶
+     * 做差异应用并交付一次数据。返回该维的 {@link TerrainData} 供 {@link DeletionApplier} 减量——
+     * 同一文件内容、同一维只交付一次；文件缺失 / mtime 未变且本代际该维已交付 → null。
      */
     public TerrainData tick(final ServerLevel level) {
         MemoryConfig config = MemoryConfig.get();
@@ -120,8 +160,10 @@ public class TerrainRestorer {
                 LOGGER.warn("[MemoryWorld] Terrain source file missing, terrain updates paused (gameDir={}).",
                         config.gameDirectory());
             }
-            appliedFingerprint = null;
-            lastMtime = null; // 文件重新出现后自然触发首次读取
+            // 文件重现后该维内容按指纹重新对比即可；activeDimension 保持上次值（设计 §5.1：缺失不切维）
+            lastMtime = null;
+            servedThisRead.clear();
+            appliedFingerprintByDim.clear();
             return null;
         }
         missingSourceCounter = 0;
@@ -135,25 +177,36 @@ public class TerrainRestorer {
             LOGGER.warn("[MemoryWorld] Failed to stat terrain file {}: {}", source, e.getMessage());
             return null;
         }
-        if (mtime.equals(lastMtime)) return null;
-
-        TerrainData current = readFile(source);
-        if (current == null) return null; // 写入半截等 → 保留旧 mtime，下轮重试
-
-        lastMtime = mtime; // 只在成功读取后才推进
-        String fp = current.fingerprint();
-        if (!fp.equals(appliedFingerprint)) {
-            appliedFingerprint = fp;
-            mutationVersion++; // v2.23：源内容变化（含 deletions 变化）→ 通知 MemoryCellReporter
-            sync(level, current);
+        if (!mtime.equals(lastMtime)) {
+            TerrainFile tf = readFile(source);
+            if (tf == null) return null; // 写入半截等 → 保留旧 mtime，下轮重试
+            lastMtime = mtime; // 只在成功读取后才推进
+            activeDimension = tf.currentDimension();
+            parsedBuckets = tf.buckets();
+            servedThisRead.clear(); // 新代际：所有维都尚未交付
         }
-        return current;
+
+        // 只处理当前驱动的 level 对应维（绝不把别的维桶内容写进本 level）
+        final String dim = level.dimension().identifier().toString();
+        final TerrainData data = parsedBuckets.get(dim);
+        if (data == null) return null; // 该维还没有数据（本代际或文件里都没有）
+        if (servedThisRead.contains(dim)) return null; // 本代际已交付过 → 无新删除工作
+        servedThisRead.add(dim);
+
+        String fp = data.fingerprint();
+        if (!fp.equals(appliedFingerprintByDim.get(dim))) {
+            appliedFingerprintByDim.put(dim, fp);
+            mutationVersion++; // v2.23：源内容变化（含 deletions 变化）→ 通知 MemoryCellReporter
+            sync(level, dim, data);
+        }
+        return data;
     }
 
     // ==================== 差异计算与应用 ====================
 
-    private void sync(final ServerLevel level, final TerrainData current) {
+    private void sync(final ServerLevel level, final String dimension, final TerrainData current) {
         if (current.blocks.isEmpty()) return;
+        Map<BlockPos, String> applied = appliedByDim.computeIfAbsent(dimension, k -> new LinkedHashMap<>());
 
         // 累积已应用表：本次文件里的方块直接登记（无论是否变化）
         Map<BlockPos, String> nextApplied = new LinkedHashMap<>(applied);
@@ -178,14 +231,14 @@ public class TerrainRestorer {
             // setBlock 已移除世界内旧 BE；这里再让 MemoryRestorer 忘掉它，防止后续按增量文件重放。
             // clearStale 对不存在的记录是廉价 no-op，因此即使方块类型未实际变化也不造成问题。
             if (!BlockStateUtil.fromSaved(tb.blockId(), tb.state()).hasBlockEntity()) {
-                beRestorer.clearStale(pos);
+                beRestorer.clearStale(dimension, pos);
             }
         }
 
         applied.clear();
         applied.putAll(nextApplied);
 
-        LOGGER.info("[MemoryWorld] Terrain sync: +{} placed, total {} blocks", placed, applied.size());
+        LOGGER.info("[MemoryWorld] Terrain sync [{}]: +{} placed, total {} blocks", dimension, placed, applied.size());
     }
 
     private boolean place(final ServerLevel level, final BlockPos pos, final TerrainBlock tb) {
@@ -206,35 +259,49 @@ public class TerrainRestorer {
 
     // ==================== 读取源文件 ====================
 
-    private TerrainData readFile(final Path source) {
+    /**
+     * 读取整份文件 → (currentDimension, 各维 TerrainData)。旧版单维文件经 {@link WorldsFile#read}
+     * 自动包成 overworld 桶 → 行为与旧版一致。
+     */
+    private TerrainFile readFile(final Path source) {
         try {
             CompoundTag root = NbtIo.readCompressed(source, NbtAccounter.unlimitedHeap());
-            if (root == null) return new TerrainData(Map.of(), List.of(), null);
+            if (root == null) return new TerrainFile(WorldsFile.LEGACY_DIMENSION, Map.of());
 
-            Map<BlockPos, TerrainBlock> blocks = new LinkedHashMap<>();
-            CompoundTag blocksTag = root.getCompoundOrEmpty(KEY_BLOCKS);
-            for (String key : blocksTag.keySet()) {
-                BlockPos pos = parsePos(key);
-                if (pos == null) continue;
-                CompoundTag entry = blocksTag.getCompoundOrEmpty(key);
-                String blockId = entry.getStringOr(KEY_BLOCK, "");
-                Map<String, String> state = readState(entry.getCompoundOrEmpty(KEY_STATE));
-                blocks.put(pos, new TerrainBlock(blockId, state));
+            WorldsFile.Result r = WorldsFile.read(root);
+            Map<String, TerrainData> buckets = new LinkedHashMap<>();
+            for (Map.Entry<String, CompoundTag> e : r.worlds().entrySet()) {
+                buckets.put(e.getKey(), parseBucket(e.getValue()));
             }
-            // v2.23：采集侧 DeletionJudge 逐块证明消失的格（LongArrayTag）。旧文件无该键 → 空列表，兼容
-            List<BlockPos> deletions = new ArrayList<>();
-            if (root.get(KEY_DELETIONS) instanceof LongArrayTag deletionsTag) {
-                for (long packed : deletionsTag.getAsLongArray()) {
-                    deletions.add(BlockPos.of(packed));
-                }
-            }
-            // 相机位置（DeletionApplier 相机格快路径用）。旧文件无该键 → null，兼容
-            Vec3 cameraPos = parseVec3(root.getStringOr(KEY_AGENT_POS, ""));
-            return new TerrainData(blocks, deletions, cameraPos);
+            return new TerrainFile(r.currentDimension(), buckets);
         } catch (IOException e) {
             LOGGER.warn("[MemoryWorld] Failed to read terrain file {}: {}", source, e.getMessage());
             return null;
         }
+    }
+
+    /** 解析一个维桶（正文形态与旧版文件顶层逐字一致）：blocks + deletions + cameraPos。 */
+    private static TerrainData parseBucket(final CompoundTag bucket) {
+        Map<BlockPos, TerrainBlock> blocks = new LinkedHashMap<>();
+        CompoundTag blocksTag = bucket.getCompoundOrEmpty(KEY_BLOCKS);
+        for (String key : blocksTag.keySet()) {
+            BlockPos pos = parsePos(key);
+            if (pos == null) continue;
+            CompoundTag entry = blocksTag.getCompoundOrEmpty(key);
+            String blockId = entry.getStringOr(KEY_BLOCK, "");
+            Map<String, String> state = readState(entry.getCompoundOrEmpty(KEY_STATE));
+            blocks.put(pos, new TerrainBlock(blockId, state));
+        }
+        // v2.23：采集侧 DeletionJudge 逐块证明消失的格（LongArrayTag）。旧文件无该键 → 空列表，兼容
+        List<BlockPos> deletions = new ArrayList<>();
+        if (bucket.get(KEY_DELETIONS) instanceof LongArrayTag deletionsTag) {
+            for (long packed : deletionsTag.getAsLongArray()) {
+                deletions.add(BlockPos.of(packed));
+            }
+        }
+        // 相机位置（DeletionApplier 相机格快路径用）。旧文件无该键 → null，兼容
+        Vec3 cameraPos = parseVec3(bucket.getStringOr(KEY_AGENT_POS, ""));
+        return new TerrainData(blocks, deletions, cameraPos);
     }
 
     private static Map<String, String> readState(final CompoundTag stateTag) {
@@ -303,4 +370,7 @@ public class TerrainRestorer {
             return blocks.toString() + "|" + deletions.toString();
         }
     }
+
+    /** v2.32：一次文件读取结果：镜像权威维 + 各维 TerrainData。 */
+    private record TerrainFile(String currentDimension, Map<String, TerrainData> buckets) {}
 }

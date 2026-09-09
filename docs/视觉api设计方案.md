@@ -29,6 +29,28 @@
 > - **v2.24（两深度锚点：translucent 目标深度 + 首层透明面深度 pass）**：Fabulous 下 translucent 独立目标自身持有深度（先 `copyDepthFrom(main)`、再由 TRANSLUCENT 组在前 LEQUAL 覆盖），与 main 深度组成"首个半透明面 / 首个不透明面"双锚点（逐像素 `translucentDepth ≤ mainDepth`），逐像素产出"水面→水底"完整可见范围。§5.4 新增工序 B（`translucentDepth < mainDepth` 像素反投影精确落位首层半透明，O(像素)、无射线-AABB）+ 工序 C 残留瘦身（首层候选整跳过，残留射线-AABB 只作用于嵌套半透明与绊线）。读取时机经源码核查修正：translucent 深度定稿于 main pass 内 `renderGroup(TRANSLUCENT)`（`ChunkSectionsToRenderMixin.renderGroup` @TAIL 排第二路 PBO），`targets.clear()`/`frame.execute()` 后目标已释放不可读。同步 §3.3/§5.4/§11 Phase 7。
 > - **v2.25（半透明掉落物正向归属：工序 D，§5.3.1）**：Fabulous 下玻璃/药水类掉落物画进独立 item_entity 目标、不写 main 深度（§3.1.1），§5.3 深度归属拿不到它们（W 永远落不到其盒上）。但它们已在 `extractVisibleEntities` 实体快照中（含 partialTick 插值 AABB）。修正：新增**工序 D**——对快照中未被 §5.3 报告的 ItemEntity，复用 §5.4 统一判定式 `Z_opaque ≥ t_entry − δ` 正向枚举盒覆盖的全部像素判定可见性（三况统一：背景有不透明面/贴天空/被不透明遮挡），复用 §5.3 盒/slab 求交与 §5.4 bbox 投影几何；**无需新增深度目标/PBO**。Fancy/Fast 下掉落物写 main 深度、§5.3 已覆盖，本工序跳过（与 §5.4 配置分支同构）。剩余：物品 glint 光效层本身仍无深度（不影响物品本体采集）、大堆物品平片摊开 ~3 格超出盒、亚像素掉落物漏（均 §10 已知限制）。同步 §一/§3.1.1/§5.3/§5.3.1/§10/§11 Phase 8。
 > - **v2.26（工序 C 重写：双锚点区间射线推进，取代"候选枚举 + 8px 栅格合并"）**：v2.24 工序 C 的候选粗筛含**完整性漏洞**——8px 屏幕栅格合并（同格只留最近，v2.11）把嵌套半透明候选（深水柱中间水格、多层玻璃里层）在精筛**之前**丢弃，违反 §5.4"三者并集 = 全部可见物体"论证，深湖/海洋无法完整复现水柱。修正：**弃用候选集，改为逐像素正向归属**（借 §5.3 实体同构的结构，但核心测试须换——实体法的 W-in-box 依赖"实体写深度、W 落身上"，透明方块不成立，改为区间推进 + 统一判定式）——仅对 `translucentDepth < mainDepth`（存在透明区间）的像素，沿射线体素推进到首个不透明面（Z_opaque），跨 section 用 `maybeHas(透明)` 整节跳步、逐格按统一判定式 `t_entry ≤ Z_opaque − δ` 上报射线实际穿过的**每一个**透明格（含全部嵌套层）。删除粗筛 8 角投影 / 8px 合并 / 首层跳过逻辑；工序 B（首层精确落位 + Z_translucent 锚点）保留。成本从"有损上限 ≈6400 候选"变为"有界推进 = 答案体积"。同步 §一/§3.1.1/§5.4/§5.3.1/§9/§10/§11 Phase 9。
+> - **v2.27（方块实体可采集字段分层：严格观察边界，§5.2.1）**：§5.2"方块可见即存 BE 全量 NBT"未区分「外观/状态」与「内容/内部」——现实中箱子/熔炉内部、讲台书本、蜂巢住户等须**交互**才可见，视觉快照不应在无交互时采到。经对 1.21.11 全部 **49 个注册方块实体**逐类源码审计：**客户端 BE 副本只含 `getUpdateTag`/`getUpdatePacket` 同步写入的字段**（区块包 `ClientboundLevelChunkPacketData.BlockEntityInfo.create` L153-158、刷新包 `ClientboundBlockEntityDataPacket.create` L37-39），而容器家族（箱子/陷阱箱/木桶/发射器/投掷器/漏斗/潜影盒/合成器/酿造台/熔炉系/末影箱）**无 update 覆写 → 客户端副本恒空**，内部 Items 仅服务端持久化——"无交互不采内部"此前**靠机制巧合成立、未成契约**（设计审查结论）。修正：§5.2.1 把 BE 字段固化为 **L0 结构 / L1 可观察 / L2 交互内部** 三层，产出前按 **typeId 白名单**过滤；判别主准则＝「该字段信息是否被方块自身渲染/方块状态在**无交互**下呈现」。结论面：**绝大多数类型整类放行**（视觉/配置/机制型无交互内部，白名单=客户端可达全部键）；真正要特殊处理的只有**表 B 两个隐藏内容字段**（`decorated_pot.item` 罐内隐藏单格物、`brushable_block.item` 刷扫揭示前隐藏物，剥离）与**表 D 真实奖励/配置**（vault/trial_spawner 仅服务端、不可达）；campfire/shelf/vault `display_item`/spawner 预览等**世界内可见陈列**照采。未登记 typeId **默认拒采（fail-closed）**，防未来版本某容器把 Items 暴露进 getUpdateTag 即静默越权。实施待审阅（代码步另起，见 §5.2.1 末尾）。同步 §5.2/§6.2。
+> - **v2.28（交互内容记忆：L2 独立通道 → 容器内容记录与复现，§5.2.2）**：vision 复现的容器是**空壳**（§5.2.1 剥 Items），agent 在真实世界开过的容器其内部也应成为可读记忆——把"每次交互会话结束（open 绑定 + commit 提交）时的**最终内容**"按坐标写入**独立文件 `containers.nbt`**（定案：独立。不并入 L1 `block_entities.nbt`：高频视觉写者与低频交互写者同文件必竞态丢记录，且 L1 含 Items 违 §5.2.1 纯度），记忆侧新增**容器内容通道**（mtime 门控 + 指纹 + 放置钩子/文件变化/重启重放 + 每轮询对账回填）把记录灌进记忆世界服务端容器 BE——**打开记忆容器 = vanilla 读回 agent 对该容器最近一次所见**。范围含**大箱子整 54 格**（末影箱排除：内容=玩家 EnderInventory、非世界态）：经 1.21.11 源码核实，double 菜单 = `CompoundContainer(RIGHT 半, LEFT 半)`、与点击哪半无关（`ChestBlock.getBlockType`：RIGHT→FIRST / LEFT→SECOND，`DoubleBlockCombiner` 点击 SECOND 半时自动把邻居归为 first）→ 54 格 = [RIGHT 0-26][LEFT 27-53]，采集侧按各半自身方块状态 `TYPE` 拆成**两条 per-pos 记录**，记忆侧填法不变、无合成容器/几何复刻负担。定案：每次提交**覆写该容器所覆盖的全部键**（single↔double 迁移删旧键），记忆侧对账保证"记忆 = 最近一次提交" → 已录容器在记忆世界为**只读参照**（探索者搬动会被下轮对账回卷，v1 不放宽取物）。未交互容器保持空壳——与"无交互不采内部"一致。同步 §5.2/§5.2.1。
+> - **v2.29（末影箱纳入：玩家态末影箱记忆，玩家态记忆首例，§5.2.2）**：v2.28 因"末影箱内容＝玩家 `EnderInventory`（玩家态非世界态）"而排除——本版以**并入**方案纳入。机制事实（服务端源码核实）：`EnderChestBlock.openScreen` 对**任意**末影箱都开 `player.getEnderChestInventory()` + `ChestMenu.threeRows`，`EnderChestBlockEntity` 仅 `implements LidBlockEntity`（无容器/无槽）→ **方块零内容，复现只能写记忆世界本地玩家的末影箱**，故打开任意一块存在的末影箱都读到该记忆内容；采集端以 **open 绑定格 block id=`minecraft:ender_chest`** 判定会话（27 格菜单与单箱/木桶/潜影盒同型，菜单本身不可分辨）。记录并入 `containers.nbt` **顶层 `enderInventory` 键**（与 per-pos 条目同一 commit 写者、同一 CONTAINER 通道 poll，无第二写者）；记忆侧在记录存在时把 27 格写入本地 server player 末影箱并随容器对账回填 → **全局 + 只读**（探索者搬动即回填、不能用记忆末影箱存自己的东西，已接受）。玩家态记忆族 v1 种子：待该族（主物品栏/护甲/经验等）扩到第二个成员时拆为独立 `player_state.nbt`/通道（并入为临时落位）。同步 §5.2/§5.2.1/§5.2.2。
+> - **v2.30（采集侧会话化落地：容器/末影箱内容提交机制，stevex-template，§5.2.2 末）**：v2.28/29 定下文件契约与拆分规则，本版把**采集侧会话化机制**落定并实现（§5.2.2 末「采集侧会话化机制（v2.30）」块）。机制 = 客户端 tick **open 绑定**（END_CLIENT_TICK 屏幕迁移检测；首个容器屏幕 tick 用当时准星命中块绑定并校验∈持物容器家族/末影箱）+ **commit 触发**（`container/close` WS 点在关箱前**同步读最终内容**提交；tick 兜底在探测到未走 WS 的关屏时以缓存的最近内容提交）+ **内容来源＝打开的菜单容器区**（客户端 `containerMenu.slots` 前导、`slot.container ≠ 玩家物品栏` 的槽 = 方块容器区；区序/槽号与服务端 `CompoundContainer` 同构）+ **double 拆分**（区 54 格按各半实际 `state.type`：RIGHT 半←[0,27)、LEFT 半←[27,54)，邻居半经四邻扫描同 block+同 facing+互补 type 定位；区 27 格 = 本半 + 删伙伴旧键）+ **末影分流**（绑定格 block id=`minecraft:ender_chest` → 覆写顶层 `enderInventory` 27 格 + 该格 `items=[]` per-pos 出现记录）+ **物品序列化** `ItemStack.CODEC`（= `{id,count?,components?}`，与记忆侧解析对称；1.21.11 无 `save(registryAccess)` 便捷法）。残留边界更新：commit 只发生在受控关箱点（WS `container/close`，主路径；agent 自动流恒走此），Esc 等非受控关屏依赖 tick 兜底缓存（内容可能落后 ≤1 帧，极小窗口）。同步 §5.2/§5.2.1/§5.2.2。
+> - **v2.31（生物群系全链路记录与复原：独立 biomes.nbt 逐 cell 通道，见 `生物群系复原设计方案.md`）**：视觉链路此前**无任何群系采集**（唯一 biome 取样是 `f3` 的玩家脚下单点，与视觉链路无关），而复原端 `createVoidWorldDimensions` 给每维度**钉死单一群系**（主世界 plains / 下界 nether_wastes / 末地 the_end）→ 在雪原/沼泽/丛林拍的场景复原后一律按平原渲染草/树叶色偏、天空/雾、降水——"方块都在，肤色错了"，是唯一一类"看到了却还原不了"的环境信息。修正（全链路，用户定案）：**采集侧新增群系通道**——群系存在区块里、以 **4×4×4 quart cell** 单值存储（`LevelChunkSection.biomes`，私有只读），故新增 `VisionBiomeStore`（union 单调累积，独立 `stevex/vision/biomes.nbt`，格式 `{timestamp, cells:{"qx,qy,qz": biomeId}}`，cell key=quart 坐标）**逐 cell 写、绝不逐方块写**（同 cell 所有方块 `getBiome` 必然相同＝存储保证，非比较判断）；采样源 = `ObjectResolver.resolve` 末尾的本帧可见方块集 + **相机 cell 锚点**（零额外扫描，terrain 已含 §5.4 透明补采）；只对不在 union 的 cell 解析（O(新增)），新增>0 才整体覆盖写。`snapshot` 的 `storeStats` 增 `"biomes":{cells,added}`。**记忆端新增 `BiomeRestorer`**：mtime 门控 + `prevIds` 快照 diff 出新 cell → 归组 chunk（`qx>>2,qz>>2`）入 `pendingChunks` → 每 tick `drainPending` 对**已加载**块 apply（限量 64/tick，未加载留待补填）。写入完全复用 vanilla `/fillbiome` 公开范式：`chunk.fillBiomesFromNoise(resolver, randomState().sampler())`（resolver 对记录 cell 返回记录 holder、未记录返回 `chunk.getNoiseBiome` 现状 → 只覆盖不污染）+ `markUnsaved()`（落盘持久）+ `chunkMap.resendBiomesForChunks`（→ `ClientboundChunksBiomesPacket` 客户端即时重着色），**零 Mixin / 零新包**。`MemoryWorldManager` 静态 `BIOME` + `onServerStart` 链 + tick 插在 `CONTAINER` 后 `DELETION` 前（BIOME 不改变方块，与减量无耦合）+ `forceRefresh`；`MemoryConfig` 增 `biomeFile`/`resolveBiomeFile`；**`StevexTest.java` 零改动**（补填偏差：tick-scan 取代 CHUNK_LOAD 事件，块随传送加载、≤1 tick 补填）。仅主世界、只覆盖可见 cell、注册表须与采集端共享（解析失败 WARN 跳过）。同步 §4.3/§5.4/§一/`生物群系复原设计方案.md`。
+> - **v2.32（世界类型区分：视觉链路携带维度 + 记忆世界按维分桶镜像复原，见 `世界类型区分与镜像复原设计方案.md`）**：此前视觉链路全部数据**不含维度信息**——agent 在下界/末地（或任一 mod 维）采集的内容以主世界坐标放进记忆主世界（下界岩浆池悬主世界天上；累积 union 文件 `block_entities.nbt`/`biomes.nbt` 的裸 `"x,y,z"`/`"qx,qy,qz"` 键与主世界同坐标必然互相覆盖）。修正（全链路，用户定案：**通用维度 id 全记录 + 单文件分维度桶 + 镜像跟随复原**）：**采集端**各视觉 store 写盘统一为顶层 `{ "currentDimension": <dimId>, "worlds": { <dimId>: <本维正文> } }`（两端各一份 `WorldsFile.wrap/read` 助手）——快照型（terrain/entities）只覆写当前维桶、其余维桶原样保留（换维不再清掉上一维"最后可见快照"），累积型（block_entities/biomes）外层按维、union 在各自维桶内做，`containers` 的 per-pos 记录分桶而**末影箱 `enderInventory`（玩家态）保持顶层全局**（真实 MC 末影箱跨维同一）；`ObjectResolver` 把 `level.dimension()` 透传到各 store；`snapshot` 响应顶层补 `"dimension"`；反向通道 `memory_cells.bin` 格式升 **version=2**（头部在 version 之后带 UTF-8 维 id 段，`MemoryCellsReader.CellsData` 增 `dimension`），`DeletionJudge`/调用方只对 `cells.dimension() == 本快照维` 判删（镜像落后时宁缺勿滥、绝不跨维误删；version=1 旧文件无维标签 → 删除证据置空）。**记忆端**：`MemoryWorldManager` 每 tick 以 terrain.nbt 顶层 `currentDimension`（`TerrainRestorer.activeDimensionId()`）为活动维权威源，白名单直取 vanilla 三维 ServerLevel 驱动、未知自定义维 300-tick 节流告警 + 降级（数据保留不崩）；各复原器（terrain/entity/BE/biome/container）**状态按维隔离**、只 apply `level.dimension()` 自己的维桶（坐标永不跨维碰撞；读取代际 × 每维一次交付，换维过渡 tick 也不错写）；减量/反向通道同限活动维；**镜像跟随**把记忆玩家按该维桶 agent 姿态在管线底部 `teleportToPose(player, 活动维 level, pose)` 跨维传送（`TeleportTransition` changeDimension 公开路径，无新 Mixin），门控 = **跨维 ‖ 姿态变化**（同姿态数值跨维也须换）。兼容：读侧无 `worlds` 键 → 旧文件整份视为 overworld 桶，旧存档无迁移。同步 §5.2.2/§6.1/§7.1/§7.11/§一/`已实现内容.md`。
+> - **v2.33（记忆世界传送门冻结：传送门=纯装饰，见 `传送门冻结设计方案.md`）**：记忆世界复现了 agent
+>   看到的下界/末地传送门方块，但探索者站入后 vanilla 会真传送——目标虚空维（v2.30 `voidNetherEnd`）没有现成
+>   出口门 → `NetherPortalBlock.getExitPortal` 走 `PortalForcer.createPortal` 就地**新建 obsidian 门**污染镜像；
+>   末地门 `EndPortalBlock.getPortalDestination` 会 `EndPlatformFeature.createEndPlatform` 铺平台、在末地侧还会弹
+>   End credits。修正（记忆端，用户定案：**完全冻结**）：1.21.11 传送门旅行是纯实体驱动——方块 `entityInside`
+>   先查 `Entity.canUsePortal(false)` 才 `setAsInsidePortal` 登记 `PortalProcessor` 累积，满时限后
+>   `Entity.handlePortal`（baseTick:503）以 `canUsePortal(false)` 放行旅行 → `getPortalDestination`（门创建/平台在
+>   此）→ `teleport`。该布尔是下界门/末地门/末地折跃门/跨维珍珠 owner 判定的**统一闸门**，故新增单个 Mixin
+>   `com.example.mixin.PortalTravelMixin` 在**基类** `Entity.canUsePortal(boolean)` HEAD 强制返回 false（记忆世界
+>   `ServerLevel` 判定；LivingEntity/Creaking 覆写均 `&& super` → 必生效）→ 整条链第一步短路：不登记、不累积、
+>   不旅行、永不创建目的地门/平台/credits；客户端 `animateTick` 粒子声音照常 → 门变装饰、可自由穿过。
+>   为什么 v2.21 全局冻结（§7.9 排程 tick/冻结实体 tick 分发）没覆盖：传送门使用走玩家自身移动碰撞
+>   `entityInside` + `baseTick→handlePortal`，非排程 tick、玩家 tick 又未被停。镜像跟随（v2.32）跨维摆放经
+>   `teleportTo`→`Entity.teleport(TeleportTransition)`，不经 `canUsePortal` → 不受影响。采集端零改动。
+>   同步 §7.9/§7.1/§一/`已实现内容.md`。
+> - **v2.36（半透明方块减量：流体 + 满格透明的 translucent 深度在场判定，§7.12，⏳ 设计待审阅）**：§7.11 减量只删"实心 + 不透明"格（边界①），而 **Fabulous 下水画进 translucent 独立目标、不写 main 深度**——main 深度场对水无"在场/不在场"信号差（水在时记录池底、不在时仍记录同一池底）→ 排干的水成幽灵（§10-13 原样接受）；水若硬塞给不透明判据更会在 Fabulous 下**每帧把活水误判消失**（水不挡 main 射线、恒 `Z_opaque ≥ t_far`）。修正（方向定案）：把消失判据**同构平移到 translucent 深度场**——该目标每像素 = `copyDepthFrom(main)` 后被 TRANSLUCENT 组在前 **LEQUAL** 覆盖（"首个半透明面"，恒 `translucentDepth ≤ mainDepth`，v2.24 已核实），"无半透明在前"被自编码为主深度拷贝（`t == m`）而非独立空值。故对记忆上报的半透明格 C（流体 / 满格透明）用 §7.11 同款几何（8 角投影 bbox + 逐像素 slab + `距离(场值) ≥ t_far − δ`，≥2 像素）判消失：活格必写 `t < t_far` → 保留；被移除 → 原边界像素集体转 `t==m ≥ t_far` → **整片一轮删**；不透明墙挡前读 `t==m==墙 < t_far` → 欠删保护——**镜像场自编码遮挡，单一数值判据天然不误删活水**（与 main 场判据唯一的语义差异：无表面哨兵由"天空 1.0"换成"主深度拷贝"）。判据场随采集通道选：Fabulous 下水/满格透明走 translucent 场；岩浆恒 SOLID 写 main（§10-2）、Fancy/Fast 下水/岩浆/玻璃块都写 main → 走现有 main 场判据，只需放宽 reporter/applier 的 `isSolidOpaque` 门槛到流体 ∪ 满格透明。表层所有权边界：逐格在场证明只对"拥有该像素首个半透明面"的格成立，整片消失一轮删、**部分收缩**残留浅层水时深层格欠删（残水自罩、视觉无害，与不透明判据"被挡欠删"同类）；**满格透明方块（玻璃块/染色玻璃/冰等）与流体同判据、本版一并纳入**（reporter 谓词放宽为"流体 ∪ 满格透明"、applier 相应放行）、**非满形状透明块（玻璃板/栅栏/压力板…）需几何感知采样才可判**、本版欠删（接受）。两端改动：`memory_cells.bin` 升 **version=3**（opaque 段 + 单独 translucent 段：流体 ∪ 满格透明）；采集侧 `fabulous && hasTranslucentDepth()` 时对 cells.translucent 段追加 translucent 场判定；`DeletionApplier` 对"记忆世界里当前仍是流体/满格透明"的删除条目放行 818 置空（非满形状/段外仍拒删）。同步 §7.11/§7.12/§8/§9/§10/§11/§12。
 
 ---
 
@@ -304,11 +326,221 @@
 - 只对**可见方块**序列化，天然比 v1（section 内全部方块实体）更省；
 - **壁挂朝向过滤（v2.10，v2.14 收紧作用范围）**：方块可见 ≠ 方块实体可见——**仅壁挂式 BE**（墙挂告示牌 / 墙挂悬挂告示牌 / 墙挂横额 / 墙挂头颅，即 `WallSignBlock` / `WallHangingSignBlock` / `WallBannerBlock` / `WallSkullBlock`，四者均以 `HorizontalDirectionalBlock.FACING`（=`BlockStateProperties.HORIZONTAL_FACING`，同一单例引用）为朝向）在渲染面背对相机且无其他可视反射时，跳过序列化（方块背面可见、BE 正面被挡的假阳性）；判定复用 §5.4 同一投影/深度手段或简化为朝向·视线点积。⚠️ **不得对所有带 `HORIZONTAL_FACING` 的方块实体套用**——箱子/熔炉/木桶/漏斗/发射器/潜影盒等同样带该属性，但内容与朝向无关，方块可见即应序列化（v2.14）；
 - 产出：`BlockEntitySnapshot(pos, typeId, blockId, stateProps, nbt, timestamp)`。
+- **字段分层（v2.27，§5.2.1）**：上述 `saveWithFullMetadata` 序列化的是**客户端 BE 副本**（天然只含 `getUpdateTag`/`getUpdatePacket` 同步字段，容器内部从不进来），产出前再按 **typeId 白名单**过滤——容器家族 NBT 恒空、`decorated_pot.item`/`brushable_block.item` 等隐藏内容剥离；白名单外的键/未登记 typeId 一律拒采。规则与逐类字段清单见 §5.2.1。
 
 > 边界情况：物品展示框、盔甲架、画在 MC 里是**实体不是方块实体**，走的 §5.3。
 
-### 5.3 实体（正向像素归属 + SectionPos 桶粗过滤 + 渲染实体列表快照 v2.9）
+### 5.2.1 方块实体可采集字段分层（严格观察边界，v2.27）
 
+**背景**：§5.2 的"方块可见 → 存 BE 全量 NBT"把**外观/状态**与**内容/内部**混为一谈。现实约束是——箱子/熔炉里的物品、讲台上的书、蜂巢的住户、可疑沙里埋的宝物，**不与之交互（开 GUI / 持键操作 / 刷扫 / 挖掘破坏）就拿不到**；纯视觉观察只能得到外观。对"只靠眼睛"的 vision/snapshot，必须**逐字段**规定什么可采集，否则要么把隐藏内容越权采下，要么把可见展示误删。
+
+**机制事实（客户端副本为何天然是"可达边界"）**：
+- 客户端 BE 副本的数据源 = 区块包/刷新包里的 `getUpdateTag`（`ClientboundLevelChunkPacketData.BlockEntityInfo.create` L153-158；`ClientboundBlockEntityDataPacket.create` L37-39 委托 `BlockEntity.getUpdateTag`），应用走 `loadWithComponents`（`ClientPacketListener.handleBlockEntityData` L1460-1467）——**客户端副本只含有 `getUpdateTag`/`getUpdatePacket` 覆写写入的字段**；
+- `saveCustomOnly = saveAdditional`（`BlockEntity` L147-149）、`saveWithoutMetadata = saveAdditional + components`（L134-137）、`saveWithFullMetadata` = 前者 + id/x/y/z（L108-119）；base `getUpdateTag` 返回空（L215-217）；
+- **例外（不进普通同步面）**：命令方块 GUI 由 `ServerPlayer.openCommandBlock` 用 `saveCustomOnly` 作 saver **单独发包**（`ServerPlayer` L1394-1395）。
+- 采集在**客户端**执行 → `saveWithFullMetadata` 只能拿到"客户端副本 = 同步面"。**服务端副本**（`saveAdditional` 全字段，含容器 Items）在采集进程内根本不存在——这是本方案"无交互不采内部"的**结构性保证**（设计审查结论，Q-B）。
+
+**分层定义**（对 §5.2 产出的 nbt 内部做分层；L0 不走 nbt，在 record 顶层）：
+
+| 层 | 含义 | 采集 |
+|---|---|---|
+| **L0 结构** | pos / typeId / blockId / stateProps（record 顶层字段，非 nbt） | 恒采（面向/液位/占用位等**可见方块状态**都在 stateProps） |
+| **L1 可观察** | 客户端可达 **且** 语义上无交互即由渲染/方块状态呈现的字段 | 采入 nbt（typeId 白名单） |
+| **L2 交互内部** | 须开菜单/持键交互/刷扫/破坏才可见的内容；只存服务端持久化或独立通道 | **视觉快照禁采**；交互后经 container/*、sign/*、book/* 等端点查（§6.2） |
+| （运行时瞬态） | 不落盘的 tick/动画字段（开合动画、isActive 推导、beamSections、刷扫进度…） | 客户端副本本就没有，不采也不管 |
+
+**判别主准则（逐字段）**：字段所描述的信息**是否被方块实体自身的渲染/方块状态在无交互下呈现给观察者**。是 → L1；否（内容物隐藏、须交互或破坏才揭示）→ L2。推论即用户的观察：**绝大多数方块实体根本没有"交互才能得的内部信息"**——视觉/配置/机制/装饰字段全部无交互可见，可整类放行；有 L2 的只集中在"**内容容器** + **内容承载**"两类。
+
+**审计决策清单（1.21.11 全部 49 个注册方块实体，`decompiled_src_vf/client` 逐类核实）**：
+
+**表 A 容器家族——客户端恒空，NBT=∅（白名单=∅，只存 L0）**。判别依据：无 `getUpdateTag`/`getUpdatePacket` 覆写 → 客户端副本继承 base 空 tag；Items 仅存服务端 `saveAdditional`（`DataComponents.CONTAINER` + LootTable 机制）。
+
+| typeId | 中文名 | 客户端可达 | 服务端内部 / 交互口 | 视觉快照 |
+|---|---|---|---|---|
+| `chest`（含 10 铜质变体）、`trapped_chest` | 箱子（含铜质变体）、陷阱箱 | ∅ | 容器 27 格、LootTable；开 ChestMenu | NBT=∅ |
+| `barrel` | 木桶 | ∅ | 27 格；BarrelMenu | NBT=∅ |
+| `dispenser` / `dropper` | 发射器 / 投掷器 | ∅ | 9 格；DispenserMenu | NBT=∅ |
+| `hopper` | 漏斗 | ∅ | 5 格、`TransferCooldown`；HopperMenu | NBT=∅ |
+| `shulker_box`（16 色） | 潜影盒 | ∅ | 27 格；开合动画=triggerEvent 瞬态；ShulkerBoxMenu | NBT=∅ |
+| `crafter` | 合成器 | ∅ | 9 格、`crafting_ticks_remaining`、`disabled_slots`、`triggered`；CrafterMenu | NBT=∅ |
+| `brewing_stand` | 酿造台 | ∅ | 5 格、`BrewTime`、`Fuel`；BrewingStandMenu（进度/燃料条） | NBT=∅ |
+| `furnace` / `smoker` / `blast_furnace` | 熔炉 / 烟熏炉 / 高炉 | ∅ | 3 格、cooking 进度、lit 燃料、`RecipesUsed`；FurnaceMenu（进度/燃料条）；`LIT` 点燃位=blockstate | NBT=∅ |
+| `ender_chest` | 末影箱 | ∅ | **BE 无任何字段**——内容=玩家末影箱 `EnderInventory`（服务端玩家侧）；EnderChestMenu | NBT=∅ |
+
+**表 B 内容承载（非容器）——客户端部分可达，逐字段判 L1/L2**：
+
+| typeId | 中文名 | 客户端可达字段 | 服务端内部字段 | 判定（白名单） |
+|---|---|---|---|---|
+| `jukebox` | 唱片机 | ∅ | `RecordItem`、`ticks_since_song_started`（唱片不进同步面） | NBT=∅；`HAS_RECORD`=stateProps；唱片内容=交互（换/退/破坏） |
+| `lectern` | 讲台 | ∅ | `Book`、`Page`（仅 LecternMenu 打开经容器同步） | NBT=∅；`HAS_BOOK`=stateProps；书本=L2 经 book/* 端点 |
+| `chiseled_bookshelf` | 雕纹书架 | ∅ | 6 格书、`last_interacted_slot` | NBT=∅；`slot_0..5_occupied`=stateProps（可视占用）；书=L2 |
+| `beehive` | 蜂巢 / 蜂箱（蜜脾容器） | ∅ | Occupant 蜜蜂列表、`flower_pos` | NBT=∅；`HONEY_LEVEL`=stateProps；住户=L2 |
+| `campfire` | 营火（含灵魂营火） | 食物物品 ×4（**渲染于篝火顶的烧烤物，无交互即见**） | `CookingTimes`/`CookingTotalTimes`（进度不同步） | L1=食物照采；进度字段不可达；`lit`=stateProps |
+| `shelf` | 搁架 / 陈列架 | 陈列物品 ×3、`align_items_to_bottom`（**架上陈列渲染可见**） | — | L1 全采（世界内即见陈列物） |
+| `decorated_pot` | 饰纹陶罐 | `sherds`（可见纹样）+ **`item`**（TAG_ITEM/`DataComponents.CONTAINER` 罐内隐藏单格物） | LootTable/Seed（未定物时） | L1=`sherds`；**剥 `item`**（隐藏，破坏才揭示） |
+| `brushable_block` | 可疑的沙子/沙砾 | `item` + `hit_direction` | LootTable/Seed（未定物时）；刷扫进度=运行时 | L1=`hit_direction`；**剥 `item`**（揭示前隐藏，且揭示进度不同步、无法忠实复现） |
+
+**表 C 无交互内部型——整类放行（白名单=客户端可达全部键）**。这些类型正是"可据此排除的大量方块"：无任何须交互才得的隐藏内容，客户端可达字段=观察者所见。
+
+| typeId | 中文名 | 客户端可达字段（=白名单） | 备注 |
+|---|---|---|---|
+| `sign` / `hanging_sign` | 告示牌 / 悬挂告示牌 | `front_text`、`back_text`（SignText.DIRECT_CODEC=文字+颜色+可点击命令）、`is_waxed` | 文字无交互即见；`playerWhoMayEdit` 运行时、不序列化 |
+| `banner` | 旗帜（16 色） | `patterns`、`CustomName`（saveWithoutMetadata 含组件） | 图案为装饰数据，直接可见 |
+| `skull` | 头颅（骷髅头/僵尸/苦力怕/龙首等系列） | `profile`、`note_block_sound`、`custom_name` | 头颅皮肤可见 |
+| `conduit` | 潮涌核心 | `Target`（攻击目标 EntityReference，渲染用） | isActive/effectBlocks 客户端 tick 自算，非 NBT |
+| `beacon` | 信标 | `primary_effect`/`secondary_effect`、`Levels`、`CustomName`、`lock` | BeaconMenu 只用于"改"，字段本身同步即可见（光柱色/层数） |
+| `mob_spawner` | 刷怪笼 | `SpawnData`（即将生成实体 NBT）+ 延迟/调参键 | 方块迷你旋转预览即渲染该怪；`SpawnPotentials`（轮换候选表）仅服务端=L2 不可达 |
+| `creaking_heart` | 吱吱怪之心（树心，生成苍白花园木灵） | `creaking`(UUID) | 无内容 |
+| `end_gateway` | 末地折跃门 | `Age`、`exit_portal`、`ExactTeleport` | 无内容 |
+| `structure_block` | 结构方块 | name/author/metadata/pos/size/rotation/mirror/mode/ignoreEntities/strict/powered/showair/showboundingbox/integrity/seed | 配置本就在同步面，无隐藏内容 |
+| `jigsaw` | 拼图方块 | name/target/pool/final_state/joint/placement_priority/selection_priority | 同上 |
+| `command_block`（含 chain/repeat） | 命令方块（+连锁/循环命令方块） | **∅**（无 update 覆写） | 命令/`LastOutput` 等仅服务端；仅 GUI 打开时 openCommandBlock 单独发包（`ServerPlayer` L1394-1395）=L2 → NBT=∅ |
+| `test_block` | 测试方块 | `mode`、`message`、`powered` | `triggered` 运行时 |
+| `test_instance_block` | 测试实例方块 | `data`(test/size/rotation/ignore_entities/status/error_message) + `errorMarkers` | — |
+| `copper_golem_statue` | 铜傀儡雕像（含氧化变体） | **∅**（getUpdateTag 未覆写） | 自定义名仅 `CUSTOM_NAME` 组件、不同步 → NBT=∅ |
+| 无 NBT 机制型：`end_portal`、`bed`、`daylight_detector`、`comparator`、`bell`、`enchanting_table`、`sculk_sensor`、`calibrated_sculk_sensor`、`sculk_catalyst`、`sculk_shrieker` | 末地传送门（方块）、床、阳光传感器、红石比较器、钟、附魔台、幽匿感测体、校定幽匿感测体、幽匿催发体、幽匿尖啸体 | **∅** | L0 仅结构；`bed` 颜色=blockstate、`comparator` 的 `OutputSignal` 仅 saveAdditional（信号经邻近更新传达非 BE）、bell/附魔台=纯动画 tick 不序列化、sculk 系 saveAdditional 仅运行时（`last_vibration_frequency`+listener）无内容 |
+| `moving_piston`（`piston`） | 移动中的活塞（活塞推进时的方块实体） | 瞬态：存储方块+进度（渲染用） | 仅活塞动画 1~2 tick 存在、随后被普通方块替换，正常快照几乎采不到；采到也无内容，L1 |
+
+**表 D 展示与真实状态分离（vault / trial_spawner）**：二者把"给玩家看的展示"与"服务端真实进度/奖励"分开存——展示走同步面（L1），真实状态仅服务端（L2 不可达）。
+
+| typeId | 中文名 | 客户端可达字段 | 服务端内部（saveAdditional / CODEC） | 判定 |
+|---|---|---|---|---|
+| `vault` | 宝库（试炼密室） | `shared_data`：`display_item`（**旋转展示的样例奖励物，可见**）、`connected_players`、`connected_particles_range` | `config`（loot_table/key_item/activation/deactivation_range/…）、`server_data`（`items_to_eject` 真实奖励队列、`rewarded_players`、`state_updating_resumes_at`） | L1 采 `shared_data`（display_item=外观）；真实奖励/已奖励态=L2，经开锁交互后掉落，不进 BE 快照 |
+| `trial_spawner` | 试炼刷怪笼 | `spawn_data` + `next_mob_spawns_at`（仅 ACTIVE；即将生成的怪以旋转预览呈现） | StateData.Packed 其余（registered_players/current_mobs/cooldown_ends_at/total_mobs_spawned/ejecting_loot_table）+ FullConfig | L1 采 `spawn_data`；配置/玩家表=L2；`ominous`=blockstate |
+
+**"排除大量方块"的数量结论**：49 个注册项中——表 A 容器家族 13 类 + 表 C 中 `command_block`/`copper_golem_statue`/无 NBT 机制型/`moving_piston` 等，客户端可达即空或全可见，**白名单即"整类放行或恒空"**，无逐字段裁剪负担；真正需要"白名单里剥字段"的仅两处（`decorated_pot.item`、`brushable_block.item`）与两处"只采展示子集"（vault `shared_data`、trial `spawn_data`）。特殊处理面积极小。
+
+**实现契约（§5.2 `recordBlock` 目标形态；代码步待审阅后另起）**：
+- 仍在**客户端** BE 上 `saveWithFullMetadata`（服务端副本含 L2，任何路径不得触碰）；产物按 `typeId → 允许键集合` 过滤，键集合 = 上表"客户端可达字段"列**减**去标"剥"/"L2"者，未知键剥除；
+- 过滤后可为空（表 A 及若干 ∅ 行）→ 允许空 NBT，L0 照存；记忆世界按 `hasBlockEntity` 复原对空 BE 无害（§7.2/§7.3）；
+- **未登记 typeId（新版本/模组方块）→ fail-closed**：只存 L0 + 空 NBT 并告警，进"待归类"清单，由人工按上表复跑后再放行；**禁止**以"同步面全部键"作通配兜底——否则未来某容器一旦把 Items 暴露进 `getUpdateTag` 即静默越权；
+- 升级版本须重跑本审计（重点核对容器家族是否新增 update 覆写、表 B/D 是否新增可达内容字段）；
+- 观察边界与 §7 纯累积外观冻结一致：BE 内部内容缺失不影响"冻结所看到的外观"；L2 信息在 agent 实际交互后经既有 mod 端点（`container/*`、`sign/*`、`book/*` 等，§6.2）查询，不经 vision/snapshot。
+
+#### 5.2.2 交互内容记忆：容器 / 末影箱（L2 独立通道；世界态 per-pos 容器 + 玩家态末影箱首例，v2.28 → v2.29）
+
+**目标场景**：agent 在真实世界打开过一个容器并取放物品 → 把该容器**内部**记成一条"交互记忆"，写入一个**独立文件**；记忆世界复现到该容器时按记忆**填好内容**。此后无论是人还是另一个 agent 探索记忆世界，**打开那个容器就等于读回 agent 对该容器的记忆**（所见内容一致，vanilla 菜单即可，无需任何自定义读法）。
+
+> 注意定位：这与 §5.2/§5.2.1 的采集侧"记录/快照"不是同一条通道——§5.2.1 把 L2 从**视觉快照**里剥掉（L1 文件永不含 Items）；本节把同一份 L2 内容在**获得许可时点**（agent 真实开箱后）经**独立文件**存下来，供记忆侧灌入。二者不冲突：一个"禁录于无交互"，一个"显式记于交互后"。
+
+**定案（已按用户选择落定）**：**A = 独立文件** `containers.nbt`；**B = 大箱子采录完整 54 格**（见下，源码核实可行且记忆侧无额外负担）；**C = 每次获取（会话提交）即覆写记忆，记忆侧对账保证同步**；**D = 末影箱纳入、并入 `containers.nbt`（v2.29，玩家态首例，见下「末影箱：玩家态末影箱记忆」）**。
+
+**为什么独立文件 `containers.nbt`，不并入 L1 `block_entities.nbt`（定案 A）**：
+- **单写者性**：`containers.nbt` 只有**交互提交路径**一个写者、低频（事件驱动），整文件 read-modify-write 无竞态；`block_entities.nbt` 由 `VisionBlockEntityStore` **每帧视觉快照**整文件覆盖写（纯累积合并，快照节奏）。若合并存储，交互记录须在每次视觉落盘时被反复合并回去——高频写者踩低频写者，竞态/丢记录，且两个指纹系统纠缠。
+- **L1 纯度（§5.2.1）不被打破**：`block_entities.nbt` 语义＝"无交互可观察外观"，混入 Items 违反契约、污染 §7 外观指纹语义。L2 内容**只**经"交互 → `containers.nbt` → 记忆侧灌容器"这条显式通道进入记忆世界。
+- （备选"同一文件顶层加 `containers` 键"可行但需视觉写者并入交互合并逻辑，弃用。）
+
+**范围（记忆内容＝容器 BE 的持物 + 末影箱玩家态内容；大箱子整 54 格）**：
+- 采录对象：持物容器 BE，即打开为 vanilla 容器菜单、内容落在**其自身槽位**者：chest（含铜质变体同 typeId）/ trapped_chest / barrel / dispenser / dropper / hopper / shulker_box / crafter / brewing_stand / furnace / smoker / blast_furnace。其中只有 **chest 家族**（chest/铜 chest/trapped_chest）能两两合成**大箱子**。
+- **末影箱（`ender_chest`）＝玩家态特例（v2.29 纳入，详见下「末影箱：玩家态末影箱记忆」）**：内容不存于 BE、存于**玩家 `EnderInventory`**（玩家态，非世界态），方块本身零内容 → 复现只能写记忆世界**本地玩家的末影箱**、不是某块方块的槽。v2.28 因"玩家态无法按块复现"而排除；v2.29 改为把"agent 末影箱内容"按**玩家态记忆**纳入（并入方案，见下）。
+- **大箱子（double）采录完整 54 格**——机制事实（1.21.11 服务端源码核实，见本节末）：
+  1. 成 double 时两半各自方块状态带 `TYPE ∈ {LEFT, RIGHT}`；`ChestBlock.getBlockType`：RIGHT→`FIRST`、LEFT→`SECOND`；
+  2. `ChestBlockEntity` 用 `DoubleBlockCombiner.combineWithNeigbour` 组容器，`first = isFirst ? 本半 : 邻居`——**点击 RIGHT 半 → first=RIGHT 本半；点击 LEFT 半 → first=邻居 RIGHT 半**。结论：**无论点哪一半，`first=RIGHT 半`、`second=LEFT 半`，纯由方块状态决定、与点击无关**；
+  3. 服务端菜单容器 = `CompoundContainer(first, second)`，54 格按 `first.getContainerSize()`=27 切分 → **菜单槽 0-26 = RIGHT 半、槽 27-53 = LEFT 半**；客户端菜单槽序与服务端同构（`ChestMenu.sixRows` 双侧一致，`container/get` 读的即此序）。
+  - 推论：**54 格可精确拆回两块，只依赖各半自身方块状态的 `TYPE`**——无需读服务端 BE、无需复刻几何邻接序。RIGHT 半（`TYPE=RIGHT` 的那块，可能是点击块也可能是邻居）← 槽 0-26；LEFT 半 ← 槽 27-53；各自本地格号 0-26。
+  - 因此**采集侧无需区分单/双记录格式**：double 一次提交拆成**两条 per-pos 记录**（schema 与单块完全相同），记忆侧填法不变、无合成容器概念。
+- 非槽位内容承载（讲台书 / 雕纹书架 / 唱片机 / 蜂巢等）走既有端点各自通道（§5.2.1 表 B），与本节"容器持物复现"不重叠，不在此列。
+
+**文件契约（`containers.nbt`；采集侧写，记忆侧读）**：
+```
+{ version: 1,
+  containers: {                                    // 键 = "x,y,z"（真实世界坐标，与 L1 文件同系）
+    "x,y,z": {                                     // double 拆两键（RIGHT 半一键、LEFT 半一键），各半独立
+      "typeId": "minecraft:chest",                 // 校验/告警用（BE 类型注册 id）
+      "block":  "minecraft:chest",                 // 方块 id：BE/块缺失时记忆侧自足建块用
+      "state":  {"facing":"north","type":"right"}, // 可省：方块状态属性。double 半件必带 type 使两侧配对一致
+      "items":  [ {"slot": 0, "item": <ItemStack 序列化 tag>}, … ]   // 仅非空格；slot = 该 BE 本地槽号
+    }, … },
+  enderInventory: { "items": [ {"slot": 0, "item": <ItemStack 序列化 tag>}, … ] }
+      // v2.29：agent 末影箱 27 格快照。非 pos 顶层键（玩家态），槽序 0-26 = EnderInventory 固定槽序
+}
+```
+- `item` tag = 采集侧 `ItemStack.save(registryAccess)`（1.21.11 组件式 `id/count/components`；客户端副本即完整玩家可见数据，往返无信息损失）。**语义＝提交时刻最终内容**（agent 取放之后的结果，非 get 中途态）。
+- **提交规则（定案 C：每次会话提交 = 覆写该容器全部键，latest-wins）**：
+  - 粒度取**会话结束**（open 绑定 → 读 → close/commit），而非 `container/get` 每 peek：get 途中是编辑中间态，提交点才稳定；如改为每 peek 覆写会产生中途态回卷噪声（不采纳）。
+  - 一次提交涉及的键 = 该容器当前覆盖的两半（single=1 键；double=RIGHT+LEFT 两键同批 upsert）。**double↔single 迁移**：本次提交为 27 格（邻半被挡/移除使菜单回 27）→ 除写本半外**删除伙伴旧键**，避免残留半旧半新；若上次 single 本次变 double → 新增伙伴键。
+  - 只触碰本容器键；`containers.nbt` 单写者低频 → 每次提交整文件 read-modify-write 安全。
+  - **末影会话路由（v2.29）**：commit 先按绑定格 block id 分流——`minecraft:ender_chest` → 覆写**顶层 `enderInventory` 键**（27 格，latest-wins，非 pos）**并**为该格写一条 `items=[]` 的 per-pos 出现记录（保证记忆世界有可开的末影箱块，即使它从未进视觉快照）；其余容器 → 按上两行 pos upsert。
+
+**记忆侧新通道 `ContainerMemoryApplier`**（镜像既有结构：mtime 门控 + 内容指纹 + 每通道一个类）：
+- **接入点**：`MemoryWorldManager` 静态单例；`onServerTick` 顺序 …RESTORER → **CONTAINER** → DELETION → CELLS（放 RESTORER 之后：先确保容器 BE 已由 `MemoryRestorer.place` 放好）。`forceRestore()` 一并 `forceRefresh()`。
+- **读取**：mtime 门控轮询 `containers.nbt`（`MemoryConfig` 增 `containerFile`，探测链仿既有源文件：`stevex/vision/containers.nbt` → 各回退路径）；变化才 readFile，按指纹比对 `applied` 表。
+- **应用/对账时机**（任一触发 `tryFill(pos)`）：
+  1. **放置钩子**：`MemoryRestorer.place()` 放了某 `instanceof Container` 的 BE → 回调 `tryFill(pos)`（解决"记录已在、BE 后到"的正序）；
+  2. **文件变化**：`containers.nbt` 变化 → 逐变化 pos `tryFill`；BE 尚不存在 → 进 **pending 集**每轮重试；
+  3. **重启 / forceRefresh 重放**：全量过一遍（pending 中目标 BE 已被删则丢弃）；
+  4. **每轮询对账（定案 C 的"保证同步"）**：对**文件内现存键**比对 BE 当前内容与记录，不一致即回填。成本＝遍历文件内键、每键比对其 BE 槽，容器数量级小、可忽略。
+- **`tryFill(pos)`**：
+  1. `be = level.getBlockEntity(pos)`。为 `null` 时读世界格：
+     - 世界格=**空气** 且记录带 `block/state` → 静默建块 + 建 BE（`loadStatic(pos, state, {id,x,y,z}, registryAccess)` 最小 NBT），使该容器**自足出现**（"开过箱但该格从未被视觉见过"时唯一复现途径；若 TERRAIN 后续同格有数据则以 TERRAIN 为准、先行块被覆盖——外观记忆优先）；
+     - 世界格=**同 block 容器但缺 BE** → 仅补挂 BE（正常不触发：容器家族 nbt 恒非空、必建 BE）；
+     - 世界格=**别的方块**（与记忆冲突）→ 跳过 + 告警（不覆盖已复现外观）。
+  2. `be instanceof Container c` → 逐 `(slot, itemTag)`：`ItemStack.parse(registryAccess, tag)` 成功且非空 → `c.setItem(slot, stack)`；解析失败/未知模组物品 → 该格置空 + 每 tag 一次告警（**fail-safe**，一格坏不崩整个容器）；越界 slot 忽略。double 的两键各自命中自己那半的 BE，本地槽 0-26。
+  3. 填完一次 `setChanged()`。
+- 填的是**服务端 BE = 探索者 vanilla 菜单直读的容器**；容器 BE 本不 tick、记忆世界又冻结 BE tick（§7.9）→ 内容静止（熔炉不烧、漏斗不吸），恰是"冻结的记忆"。
+
+**末影箱：玩家态末影箱记忆（v2.29 并入方案）**：
+- **机制事实（服务端源码核实）**：`EnderChestBlock.openScreen` 对**任意**末影箱都取 `container = player.getEnderChestInventory()` 并开 `ChestMenu.threeRows(containerId, inv, container)`（与开哪块无关）；`EnderChestBlockEntity extends BlockEntity implements LidBlockEntity`——**无 Container / 无槽 / 无 `saveAdditional`**，方块零内容。
+- **两条推论**：① 复现**只能写记忆世界本地玩家的末影箱**（方块无槽可填）→ 打开**任意一块存在的末影箱**都读到该记忆内容（无法、也无意义按块区分）；② 末影菜单与单箱 / 木桶 / 潜影盒同为 `ChestMenu.threeRows`（27 格），**采集端无法靠菜单分辨末影箱** → 用 open 绑定格 block id = `minecraft:ender_chest` 判定会话（分流见上「提交规则」）。
+- **记忆侧应用**（同一 `ContainerMemoryApplier` tick，不新增文件 / 通道）：文件变化 / 重启重放 / 每轮询对账任一触发、且 `enderInventory` 记录存在 → 把 27 格写入**本地 server player `getEnderChestInventory()`**（`ItemStack.parse` 逐格，fail-safe 同容器：坏格置空 + 每 tag 一次告警）；随后每轮询以记录为权威对账，本地改动即回填。
+- **后果（全局 + 只读，P1 已接受）**：记录存在期间，本地玩家自己的末影箱被记录覆盖、搬动即回填——探索者**不能用记忆世界的末影箱存取自己的东西**；无记录（agent 从未开过末影箱）→ 不写、保持本地原样（新世界为空）。
+- **可开性**：依赖记忆世界里有可开的末影箱块——由视觉快照（agent 开箱时该块在准星下→视野内→必被快照）或该格的 `items=[]` per-pos 出现记录（见「提交规则」）保证。
+- **玩家态记忆族定位**：末影箱是首例**玩家态记忆**（内容挂 agent 玩家、非世界方块），是"agent 玩家态快照"族的 v1 种子。**并入 `containers.nbt` 为临时落位**：该族扩到第二个成员（主物品栏 / 护甲 / 手持 / 经验等，触发时机与容器不同）时拆为独立 `player_state.nbt` + 独立通道，把 `enderInventory` 迁出——采集侧 commit 分流点与记忆侧"写玩家末影箱"的隔离方法两处预留，使届时拆解为**搬迁而非重构**。`containers.nbt` 文件名语义自此变宽＝"agent 交互内容记忆（世界态 per-pos 容器 + 玩家态末影箱）"。
+
+**行为与边界**：
+- **已录容器在记忆世界 = 只读参照（定案 C 的直接推论）**：任何本地改动（搬入/搬出）都会在下一轮对账被**回填覆盖**——探索者**无法从已录容器取走物品**（取走即回卷）。这是"记忆恒等于最近一次提交"的代价；若日后要支持"从记忆取物/消耗"，需对该键放宽对账（关回填/一次性语义），v1 不放开、记档为已知取舍。
+- **double 读取一致性**：探索者无论点哪半，服务端都按同一 `(RIGHT, LEFT)` 组序 → 与采集时的拆分自洽；两半以各自 `state.type` 重建（或自足创建）后顺序必然一致。
+- **未交互的容器**在记忆世界仍是空壳（无记录）——与"无交互不采内部"一致；视觉外观照常复现（§5.2.1 空 NBT 的 BE 照建）。
+- **时序同态**：先开（真实世界）后看见 → RESTORER 放空壳 BE → CONTAINER 填；先看见后开 → 记录晚到 → 文件变化分支重填同格。殊途同归。
+- 一致性：BE 类型与记录不符（被换成别的容器）→ 按"implements Container + 世界格校验"容忍（类型差异不影响内容语义）。
+- **性能**：填/对账只在触发时机触碰目标 BE，不做无目标全图扫描。
+
+**机制事实（1.21.11 服务端源码核实，供审计）**：`ChestBlock.getBlockType`（RIGHT→`DoubleBlockCombiner.BlockType.FIRST`，LEFT→`SECOND`）；`DoubleBlockCombiner.combineWithNeigbour`（`first = isFirst ? 本半 : 邻居`，故点击 LEFT 半时邻居 RIGHT 半仍为 first）；`CompoundContainer.getItem/setItem`（以 `container1.getContainerSize()` 切分，两 chest 半各 27）；服务端菜单 `ChestMenu.sixRows(containerId, inv, new CompoundContainer(first, second))`。
+
+**配置新增**（记忆侧）：`containerFile`；`containerReconcileOnPoll`（默认 **true**，定案 C）；`containerPollIntervalTicks`（可省，默认同既有轮询节奏）。
+
+**残留边界（不再是待定）**：
+- 已录容器只读（回填覆盖），"从记忆取物" v1 不支持，见上；
+- 末影箱（玩家态）已纳入：全局 + 只读（本地玩家末影箱被记录覆盖、搬动回填），且须世界存在可开块（视觉快照 / 出现记录保证）；
+- 非容器内容承载走各自通道，不在此；
+- 采集侧**会话化提交点**机制已定稿并实现，见本节末「采集侧会话化机制（v2.30）」块。
+
+---
+
+#### 5.2.3 采集侧会话化机制（v2.30，实现于 stevex-template；记忆侧已实现 §5.2.2「记忆侧新通道」）
+
+采集侧是 **WS 事件驱动**（无常驻采集循环）：agent 用 `key/use-once`（`KeyMapping.click(use)`）开箱、经 `container/get/slot/button` 编辑、`container/close` 关箱；开箱后视觉通道 `block_entities.nbt` 照常把容器当 L1 空壳采集。本节把「open 绑定 + 提交触发 + double 拆分 + 末影分流 + 物品序列化」落地为具体机制：
+
+**模块**（均新，`stevex-template`）：
+- `vision/ContainerMemoryStore`：`containers.nbt` 持久化（镜像 `VisionBlockEntityStore` 的 load/整文件 save 模式；**事件驱动**低频写，非每帧）；内存镜像启动时 load，commit 时整文件 read-modify-write。
+- `vision/ContainerMemoryTracker`：会话状态机 + 每 tick open/close 探测 + region 读取 + commit 组装。
+- `SteveXClient`：注册 `END_CLIENT_TICK` 调 tracker；`ContainerApi.closeContainer`：关箱前先 `ContainerMemoryTracker.commitFromClose(mc)`（同步读最终内容提交）再 `closeContainer()`。
+
+**① open 绑定**（tick 探测，非 use 调用点——`key/use-once` 只是异步按键，无法同步取到结果块）：
+- `END_CLIENT_TICK` 比较 `mc.screen` 迁移：当**进入** `AbstractContainerScreen`（且 `containerMenu` 非 `InventoryMenu`）时，用**当帧准星命中块**绑定。可靠性依据：容器开箱须准星对块，而 brain 在开箱后必须先 poll `container/get` 才知已开、期间不会转头 → 首个容器屏幕 tick 的准星命中 = 被开的块。
+- 校验命中块 `blockId ∈` **持物容器家族 ∪ {ender_chest}**（家族名单＝视觉 §5.2.1 `BlockEntityFieldPolicy.STRIP` 的容器行，单一来源）。命中块不合家族（如合成台/附魔台）→ 会话=null（本屏不再尝试绑定，防每 tick 重绑）。绑定格为命中块**当时**的 `block/state/typeId`（typeId：优先 `level.getBlockEntity(pos).getType()`，缺则 BE 注册表 `isValid(state)` 反查）。
+- 会话记录：`{pos, blockId, stateProps, typeId, isEnder}` + 每 tick 缓存最近一次 region 内容（指针拷贝，兜底用）。
+
+**② 内容来源 = 打开的菜单容器区**（读**菜单**不读客户端 BE——1.21.11 客户端容器 BE 副本恒空、内容只在开着的菜单里）：
+- region = `containerMenu.slots` 前导、`slot.container != 玩家 Inventory` 的槽序列（持物容器菜单只有「方块容器区 + 玩家物品栏」两个容器对象）；区槽 `slot.index` = 服务端容器槽号（菜单槽序与服务端 `ChestMenu`/`CompoundContainer` 同构）。
+- 区域长度由区槽数得：chest 家族 double=54 / 其余单容器=自身尺寸（27/15/… 区槽数即真值，无需按块猜）。
+
+**③ 提交触发**（定案 C：**会话结束**才覆写，避免 get/click 中途态）：
+- 主路径 = `container/close`（agent 自动流恒走此）：WS 处理器在**关箱前同一主线程任务**里 `commitFromClose`——此时先于本任务入队的全部 `container/slot` 已在主线程 FIFO 执行完，读到的即最终内容。**先读后关**，关箱后 `containerMenu` 已被重置、无法再读。
+- 兜底路径 = tick 探测到**未走 WS 的关屏**（Esc 等）：以缓存内容提交（可能落后 ≤1 帧；非自动流、极小窗口，记录为残留）。`container/close` 已提交则标记，tick 关屏不再重复提交。
+
+**④ double 拆分**（§5.2.2 契约的机制实现）：
+- region 54：四邻扫描找伙伴半（同 block + 同 `facing` + 互补 `TYPE` RIGHT↔LEFT）。按各半**实际** `state.type` 分配：`TYPE=RIGHT` 半 ← region [0,27)（本地槽 0-26）；`TYPE=LEFT` 半 ← [27,54)。两条 per-pos 记录同批 upsert（键=各半 pos）。
+- region 27 且绑定 `TYPE ∈ {LEFT,RIGHT}`（邻半被挡/移除致菜单回 27）：只写本半 region [0,27)，并按连接方向（LEFT→facing 顺时针 / RIGHT→facing 逆时针）**删除伙伴旧键**——double↔single 迁移。
+- region 54 但四邻找不到伙伴（理论不发生）：跳过 + 告警，防错写。
+
+**⑤ 末影分流**（v2.29 契约）：绑定格 `blockId = minecraft:ender_chest` → 27 格 region **全部写顶层 `enderInventory`**（latest-wins，槽=region 槽号），并**为该格**写一条 `items=[]` 的 per-pos 出现记录（保证记忆世界有可开的末影箱块）。
+
+**⑥ 物品序列化**：`ItemStack.CODEC.encodeStart(registryAccess.createSerializationContext(NbtOps.INSTANCE), stack)`（1.21.11 组件式，产 `{id,count?,components?}`；无 `ItemStack.save(registryAccess)` 便捷法，与记忆侧 `parse` 同一路径对称）。仅非空格。
+
+**⑦ 覆盖范围与性能**：commit 只触碰本会话覆盖的键（同批 upsert + 迁移删除），`containers.nbt` 无第二写者 → 每次提交整文件 read-modify-write 安全；tick 探测只比较屏幕实例 + 每开箱一次取准星，零热路径成本。
+
+### 5.3 实体（正向像素归属 + SectionPos 桶粗过滤 + 渲染实体列表快照 v2.9）
 **为什么正向而非反向（v2.4 定稿）**：深度缓冲每像素只有深度标量、**没有"这个像素属于哪个实体"的 ID**；反投影出的表面点 W 落在实体身上时，所在格是空气。要回答"这是哪只牛"，必须把 W 匹配到候选实体——实体没有网格地址，只能测"点在谁的盒内"。
 
 **反向方案（v2.2）的缺陷**：对每个候选实体投影盒中心/8 角共 9 个锚点，查锚点像素的最近表面是否落在盒内。便宜但**锚点不完整**——薄/扁/部分被挡实体的可见像素往往不落在 9 条固定射线上 → 漏检。v2.4 改为**正向**：每个非天空像素的表面点都有机会被归属，像素完整，天然覆盖薄/扁/部分被挡（只要占屏 ≥1px）。
@@ -574,7 +806,7 @@ for p in 全部像素:
 `vision/snapshot`（Phase 2+ 目标，v2.2 定稿）：
 - 保留 Phase-1 元信息：`width`/`height`/`depthMin`/`depthMax`/`nonSkyPixels`/`cameraPos`/`timestamp`（min/max/nonSky 在 `visibleBlockHits` 顺带统计，不二次扫描）；
 - `visibleBlockCount` / `blockEntityCount` / `entityCount`：可见对象数（`visibleBlockCount` 含半透明/绊线方块：Fabulous 经 §5.4、Fancy/Fast 经 §5.1，v2.10/v2.12）；
-- `blockEntities[]`：可见方块实体（含全量 NBT，`{pos, typeId, block, state, nbt}`，复用 `nbtToJson`）；
+- `blockEntities[]`：可见方块实体（`{pos, typeId, block, state, nbt}`，复用 `nbtToJson`）——**nbt 为 §5.2.1 分层白名单过滤后字段**：容器家族等客户端恒空类型 nbt=∅、`decorated_pot.item`/`brushable_block.item` 等隐藏内容已剥除，仅含 L1 可观察字段；
 - `entities[]`：可见实体（Tier-1 轻量：id/uuid/type/pos/rotation/motion/onGround/health）；
 - `storeStats`：`{terrain:{blocks}, blockEntities:{new,updated,skipped}, entities:{entities}}`；
 - 完整可见方块表**默认不入 JSON**（进 `terrain.nbt`）；是否提供 `includeBlocks` 参数**待定**（审阅时决策）。
@@ -695,7 +927,7 @@ for p in 全部像素:
 | ⑤ | 随机方块 tick（作物/冰/雪/藤蔓/岩浆点火…） | `ServerChunkCache.tick` → `ServerLevel.tickChunk`（`tickSpeed=random_tick_speed`） | **gamerule `random_tick_speed=0`** |
 | ⑥ | 方块实体 tick（熔炉/漏斗/刷怪笼/活塞动画…） | `Level.tickBlockEntities` → `TickingBlockEntity.tick` | **`tickBlockEntities` @HEAD cancellable** |
 | ⑦ | 昼夜 / 天气推进 | `ServerLevel.tickTime`（`ADVANCE_TIME`）/ `advanceWeatherState`（`ADVANCE_WEATHER`） | **gamerule `advance_time=false`、`advance_weather=false`** |
-| ⑧ | 自然刷怪 / 自定义刷怪 | `ServerChunkCache.tick` 自然刷怪 + `tickCustomSpawners` | 虚空和平世界实际无怪；可选 `spawn_mobs=false` 兜底（暂不设） |
+| ⑧ | 自然刷怪 / 自定义刷怪 | `ServerChunkCache.tick` 自然刷怪 + `tickCustomSpawners` | **gamerule `spawn_mobs=false`**（v2.30，建档随 LevelSettings 写入 + 首次进入再设兜底） |
 
 **全局冻结实现（两个 Mixin，四个注入点）**：
 
@@ -711,7 +943,8 @@ for p in 全部像素:
 
 - `random_tick_speed=0`（`GameRules.RANDOM_TICK_SPEED`，默认 3）：`ServerChunkCache.tick` 读它作 `tickSpeed`（`ServerChunkCache.java:379`）并传 `ServerLevel.tickChunk(chunk, tickSpeed)`；`tickChunk` 里 `tickSpeed>0` 分支整体跳过（`ServerLevel.java:505`）→ 作物生长、冰/雪融化、藤蔓蔓延、岩浆 `randomTick` 点火（§7.8 已知遗留）**全部停止**。
 - `advance_time=false`（`GameRules.ADVANCE_TIME`）+ `advance_weather=false`（`GameRules.ADVANCE_WEATHER`）：`tickTime` 里 `ADVANCE_TIME` 门控 `setDayTime`（`ServerLevel.java:466`）、天气推进受 `ADVANCE_WEATHER` 门控 → 昼夜/天气不再推进（时间对齐由 §7.10 `setDayTime` 单独设值，不冲突）。
-- 设置时机：`MemoryWorldManager.onServerTick` 的 `playerReady` 一次性块（进入记忆世界后设一次）。gamerule 是世界级状态、随记忆世界存档持久化，只影响记忆世界。
+- `spawn_mobs=false`（`GameRules.SPAWN_MOBS`，v2.30）：`ServerChunkCache.tick` 读它作 `doMobSpawning`（`ServerChunkCache.java:378`）——false 时 `spawningCategories` 置空（:381-385）且跳过 `tickCustomSpawners`（:406-409）→ **自然刷怪 + 自定义刷怪（⑧）全停**。双落点：新建世界建档时随 LevelSettings 的 GameRules 写入（`PrimaryLevelData.getGameRules() = settings.gameRules()`，从 tick 0 起生效并持久化）；首次进入记忆世界 `applyFreezeGameRules` 再设一次，兜底改版前创建的旧记忆世界。注：`EntityRestorer` 放置的实体走 `addFreshEntity`、不经自然刷怪路径，不受此开关影响。
+- 设置时机：`MemoryWorldManager.onServerTick` 的 `playerReady` 一次性块（进入记忆世界后设一次）。`spawn_mobs=false` 另在建档时随 LevelSettings 一并写入（v2.30，见上）。gamerule 是世界级状态、随记忆世界存档持久化，只影响记忆世界。
 - 本版本 gamerule 已 snake_case 改名，实现一律以 `GameRules` 常量字段为准（`RANDOM_TICK_SPEED` / `ADVANCE_TIME` / `ADVANCE_WEATHER` / `SPAWN_MOBS`…），勿用 vanilla 的 `randomTickSpeed`/`doDaylightCycle` 字符串。
 
 **三个"非 tick"陷阱（v2.21 已解决，分发层冻结覆盖不到）**：
@@ -731,7 +964,7 @@ for p in 全部像素:
 - **采集侧**：`DepthSnapshot` 新增 `dayTime`（`level.getDayTime()`，long，游戏时间单位），`ObjectResolver` 把 `dayTime` 一并写入三个源文件顶层（`dayTime` 字段）。`VisionBlockEntityStore` 增量脏标记：`dayTime` 变化时标记 dirty 才刷新文件；
 - **记忆侧**：`MemoryRestorer` 读 `dayTime`（旧文件无该字段 → 哨兵 `-1`），在 mtime 门控放行后、与 pose/fingerprint 解耦独立判断——`dayTime >= 0 && dayTime != lastDayTime` 时 `level.setDayTime(dayTime)` 并推进 `lastDayTime`（agent 站桩不动时，时间照常随每次采集对齐）。`onServerStart()` 重置 `lastDayTime`；
 - **与冻结不冲突**：`advance_time=false` 只阻止 `tickTime` 自增，`setDayTime` 直接设值仍然生效 → 世界时间冻结在采集值，太阳/月亮/天光与采集一致；
-- **已知限制（未同步）**：天气（晴/雨/雷）未落盘——记忆世界沿用本地天气；`advance_weather=false` 后本地天气保持进入时状态，可能与采集时刻不一致（如需严格一致须另行落盘 `raining`/`thundering` 并在进入时 `resetWeatherCycle`+设置，待定）。刷怪（⑧）依赖 `dayTime`/光照，记忆世界虚空和平实际无怪，不处理。
+- **已知限制（未同步）**：天气（晴/雨/雷）未落盘——记忆世界沿用本地天气；`advance_weather=false` 后本地天气保持进入时状态，可能与采集时刻不一致（如需严格一致须另行落盘 `raining`/`thundering` 并在进入时 `resetWeatherCycle`+设置，待定）。刷怪（⑧）经 `spawn_mobs=false`（建档 + 首次进入，v2.30）全停，不依赖 `dayTime`/光照。
 
 ### 7.11 减量：反向通道 + 采集侧逐块深度判定（v2.23，✅ 已实现 2026-08-25）
 
@@ -770,7 +1003,7 @@ for p in 全部像素:
 **语义转变（v2.22 已定，v2.23 使其收敛更快更完整）**：纯累积（只增不删）→ **增删收敛到当前可见状态**。被删 = 被证明不存在的部分，余下仍冻结；未证明的（被遮挡 / 移出视野 / 超出 removalMaxRayDist）保持记忆。
 
 **已知边界（v2.23）**：
-① 只判**实心 + 不透明**格可删（cells 文件只含此类 + 实体占用格）——排干的水/岩浆、被移除的透明/非实心方块（玻璃/栅栏/压力板）仍永不删（v2.22 同，接受）；
+① 只判**实心 + 不透明**格 + **v2.36 的流体/满格透明格**可删（cells version≤2 文件只含前者 + 实体占用格）——被移除的**非满形状**透明/半实心方块（玻璃板/栅栏/压力板/红石线）仍永不删（v2.22 同，接受；未来方向：几何过滤，见 §7.13 设计草案）；排干的水/岩浆及**满格透明方块**（玻璃块/冰）的**半透明减量见 §7.12（v2.36，✅ 已实现 2026-09-08）**——Fabulous 下 translucent 场同构判据、Fancy/Fast 与岩浆走 main 场（放宽 reporter/applier 门槛：translucent 段 = 水 ∪ 满格透明、岩浆归 main 段）；
 ② **`removalMaxRayDist` 默认 96（详解见下）**：逐块判定依赖"深度 vs t_far 距离比较"，深度量化误差 δ 仅 ≤~100 格内可靠（§4.2/§10.5：300 格≈11cm、768 格≈0.7 格）——超出部分保守保留（宁欠勿过）；
 ③ 渲染距离外 / 相机背后 / 从未入镜的格永不证明空 → 永久保留（符合记忆语义）；
 ④ 单快照证据已足够，无需跨帧累积；agent 移动越多、进入判定范围的格越多；
@@ -805,6 +1038,110 @@ for p in 全部像素:
   - `TerrainData.appliedFingerprint` 纳入 `deletions`。
 - **配置**：`MemoryConfig`：`removalEnabled`（默认 true）/ `removalPixelThreshold`（2）/ `removalMaxRayDist`（96.0）/ `memoryCellsWriteIntervalTicks`（10）。
 
+### 7.12 半透明方块减量（水 + 满格透明）：translucent 深度在场判定（v2.36，✅ 已实现 2026-09-08；待游戏内验证，见 Phase 10）
+
+> **实施记录（v2.36，2026-09-08）**：记忆侧 `BlockStateUtil` 新增 `isWaterFluid`/`isNonWaterFluid`/`isFullTransparentCell`（`isShapeFullBlock && !canOcclude`）/`isDeletableContent`；`MemoryConfig.removalTranslucentEnabled`（默认 true）。`MemoryCellReporter` cells 文件升 **version=3** 两段布局——opaque/main 段 = 实心不透明 ∪ 冻结实体占用格 ∪ **岩浆**（非水流体），translucent 段 = **水 ∪ 满格透明**；opaque 段之后追加 translucent 开关 byte + translucent count + longs。`DeletionApplier` deletion 主循环守卫放宽到 `isDeletableContent`（相机格快路径仍只删实心不透明）。采集侧 `MemoryCellsReader` 解析 version=3 translucent 段（version≤2 旧文件 → 空段，行为等同 v2.23）；`DeletionJudge` 抽出共享判据主循环、新增 `testTranslucent`（逐像素读 translucent 目标，防御性判空集）；`ObjectResolver` 按「Fabulous && hasTranslucentDepth && 开关 → translucent 场 / Fancy-Fast → 并入 main 场 / Fabulous &&（!hasT || !开关）→ 空集」路由 translucent 段，main 段恒走 main 场。**岩浆走 main/opaque 段而非 translucent 段**（Fabulous 下岩浆恒写 main，PBO 降级时仍可由 main 场判删，设计已知边界①）——实现定案为选项 A，下述原文中"流体（水/岩浆）"的统一表述据此修订。
+
+> **背景（§7.11 边界① 的缺口）**：v2.23 减量只对"实心 + 不透明"格成立，判据依赖"存在即截断 main 深度、消失则 main 深度落到远面之后"。而 **Fabulous 下水/满格透明（玻璃块、染色玻璃、冰等写 translucent 渲染层的满格方块）画进 translucent 独立目标、不写 main 深度**（§3.1.1/§5.4）：水在时 main 深度记录的是池底/水后表面、不在时记录的仍是同一池底 → **main 深度场对这类对象不产生任何"在场/不在场"信号差** → 排干的水成幽灵。把它们硬塞给现有不透明判据更糟：Fabulous 下它们不挡 main 射线，活对象恒满足 `Z_opaque ≥ t_far`，**每帧都会被误判消失**。
+>
+> **修正方向（定案）**：把消失判据**从 main 深度场平移到 translucent 深度场**。translucent 目标每像素 = `copyDepthFrom(main)`（v2.24 已核实，§3.3/§5.4/§12）后被 TRANSLUCENT 组在前 **LEQUAL** 覆盖，语义是"**首个半透明面**"，恒 `translucentDepth ≤ mainDepth`；"无半透明在前"被自编码成主深度拷贝（`t == m`）而非独立空值。于是**同一条**逐像素比较（射线穿过格 C 的整格？）即可判 C 表层消失，且**镜像场天然保守、不会误删活水**。
+
+**判定机制（translucent 场上的同构镜像；几何工具全复用 §5.4/§7.11）**：
+
+- 输入：① 本快照 main + translucent 双深度 + 相机/投影（§3.3）；② 记忆侧上报的**translucent 段**清单 = **水 ∪ 满格透明方块**（cells 文件 version=3 新增；岩浆写 main、走 main/opaque 段，见下 reporter 改动）。
+- 对每个 translucent 记忆格 C（水或满格透明；先跳过本次可见集 `currentTerrain`——可见格由 §5.1/§5.4 放置/更新路径处理，不参与减量）：
+  1. 投影 C 的 8 角 → 屏幕 bbox（像素中心约定 §4.1，循环前裁剪到屏幕范围 §5.4）；
+  2. 逐 bbox 像素 p：射线(camPos→p) 与 C 的 AABB 手写 slab 求交（§5.4）得 `t_entry`/`t_far`；读该像素 **translucent 目标**深度还原 `Z_translucent(p)`（欧氏距离，同度量；`t ≥ d_far`（=1.0 天空/远平面，v2.16）→ ∞）；**`Z_translucent(p) ≥ t_far − δ`（δ=0.05）→ 射线穿过了 C 的整格 → 越过计数++**；
+  3. 越过计数 ≥ `removalPixelThreshold`（默认 2）→ C 表层消失 → 进 `deletions` 列表。
+- **读的是 translucent 目标全体像素，不是只读 `t < m` 像素**：`t == m`（主拷贝）同样参与比较——它恰好是"无半透明在前"的编码。判定式与 §7.11 main 场唯一差异只在**哨兵**：不透明场"无表面 = 天空 1.0"，translucent 场"无半透明 = 主深度拷贝"。
+- **为何单一数值判据天然不误删活水 / 不假删被遮挡物**：translucent 目标 = `min(主拷贝, 首个半透明面)`，三类情形已编码进同一个数值——
+
+  | 情形 | translucent 值 t | `t ≥ t_far` 比较 |
+  |---|---|---|
+  | C 仍在（满形状格的自身面 / 更近半透明在前） | 满形状活半透明（水/玻璃块）必写自身面 < C 的 t_far | 不成立 → **保留**（不误删活水/活满格玻璃；非满形状薄物的空余像素见下） |
+  | C 被舀干，背后露天空/坑底 | `t == m` == 天空(1.0)/远处墙 ≥ t_far | 成立 → **gone**（水鬼主场景） |
+  | 不透明墙新挡在 C 前方 | `t == m ==` 墙距离 < t_far | 不成立 → **欠删保留**（墙占位交 §5.1 更新路径） |
+  | C 表层消失、背后另有一片更远的水/玻璃 | `t < m` 但 t ≥ t_far | 成立 → **gone**（远处半透明是独立对象） |
+
+  `copyDepthFrom(main)` 正是让镜像法免于"不透明遮挡被读成消失"假删除的关键——v2.24 为工序 B/C 引入的机制在此被第二次复用。
+
+**表层所有权边界（半透明固有，与不透明判据"被挡欠删"同族）**：
+
+- 逐格在场证明只对**拥有该像素首个半透明面**的格成立：水的顶层、独立玻璃块。**被淹没/被上层罩住的深层格不产生自己的 translucent 片元**（流体面剔除，§5.4 工序 C 区间推进同为"只枚举会写片元的可见格"）→ 整片还在时判保留；
+- **整片水被完全舀干**：原边界像素集体转 `t==m ≥ t_far` → **整片记录的格一轮全删**（含深水柱中间格——它们表层消失由"无半透明在前"同时证明，无需逐格拥有片元）；
+- **部分收缩（残留浅层水）**：残水表面在深层幽灵格 t_far 之前 → 深层欠删。但残水自身半透明、罩住下层视觉无害，且桶舀水的现实终态通常全干/留独立源——主场景（全干）被完整解决。欠删方向无害（宁欠勿过），接受；
+- **满格透明方块（玻璃块/染色玻璃/冰等：`isShapeFullBlock` 且非 opaque）与水同判据，本版一并纳入范围**——它们填满整格，镜像法前提"在场 = 该格沿射线整段被自身近面终结"成立（活玻璃块每颗穿格像素都写自身近面 < t_far，与活水同理）。reporter 的 translucent 段谓词即"水 ∪ 满格透明"（岩浆恒写 main、归 main/opaque 段），判据/几何对二者零改动；applier 对"当前仍是流体（水/岩浆）或满格透明"的删除条目放行。
+- **真正不能进本判据的是非满形状透明块（玻璃板/栅栏/铁栏杆/压力板/红石线/绊线等）**——不是"半透明物体做不到消失判断"，而是判据前提对它们不成立：薄物不填满 1×1×1 格，格内空余部分的像素在物体**活着**时射线就已从薄体旁穿格而过、直达背后/天空（`t ≥ t_far`）→ 一个活玻璃板单快照内就有远超 ≥2 像素投"消失"票 → **活体被误删**（有害方向，违"宁欠勿过"，比它要治的幽灵更糟）。这与不透明判据从一开始就把 opaque 限制在 `isShapeFullBlock` 是**同一原因**——限制项是"**非满形状**"而非"半透明"；薄栅栏/铁栏杆写 main、玻璃板/红石线写 translucent，换场不解决"空余像素"问题。要纳入它们的**旧路线**——把采样从"全格 bbox"换成"物体实际渲染形状 AABB"（cells 携带状态、采集侧重建 shape、只测薄板/柱的投影 + 轮廓与亚像素容差）——属次级工程；§7.13 给出更轻的替代：保留整格 bbox 判据、对越票像素追加「射线∩被记住形状」几何相交过滤（未立项、v2.36 不含）。其余透明方块维持 §7.11 边界①"永成幽灵（接受）"。岩浆见下（走 main 场，范围天然涵盖）。
+
+**判据场选择（渲染配置 + 该格现实写哪张场决定，不得混用，与 §5.4 采集通道同构）**：
+
+- **Fabulous && `hasTranslucentDepth()`**（translucent 目标在场）→ **translucent 段**（水/满格透明）对 **translucent 场**判定（`DeletionJudge.testTranslucent`，逐像素读 translucent 目标）——必要（Fabulous 下它们只写 translucent 目标、不写 main，只在这张场上可证消失）；**main/opaque 段**（实心不透明 ∪ 冻结实体占用格 ∪ 岩浆）仍走 main 场（`DeletionJudge.test`），两段判据并行、删格并入同一 deletions。
+- **Fancy/Fast**（无独立 translucent 目标，水/岩浆/玻璃块都写 main）→ translucent 段并入 **现有 main 场判据**（§7.11 原样，直接对 translucent 格跑 `DeletionJudge.test`），`removalTranslucentEnabled` 不生效；判据代码零新增（只放宽 reporter 段谓词 + applier 守卫）。
+- **Fabulous && !`hasTranslucentDepth()`**（第二路 PBO 软失败，§3.4 降级）→ translucent 场不可用：**任何写 translucent 目标的对象（水/满格透明）绝不可喂 main 场**（Fabulous 下它们不写 main、喂 main 场恒假消失，上文背景），该帧这类格的删除空集（幽灵暂留，优雅降级，PBO 恢复后自愈）；岩浆在 main/opaque 段（写 main）→ 仍可走 main 场判、不受影响。实现按该格现实的采集通道（§5.4 判定它写哪张场）路由。
+
+**反向通道与两端改动（cells 文件 version=2 → version=3）**：
+
+- **记忆侧 `MemoryCellReporter`**：cells 集合并为<b>两段</b>（version=3）——**opaque/main 段** = 现有"实心不透明块 + 冻结实体占用格" + **非水流体（岩浆）**；**translucent 段** = **水 + 满格透明**。对 `TerrainRestorer.appliedBlocks(dim)`（已应用方块表含 blockId）的每格按其记忆世界现状 `BlockState` 判定分段：水（`fluidState.is(WATER)`）→ translucent；非流体 → `isShapeFullBlock(state) && !state.canOcclude()`（玻璃块/染色玻璃/冰/遮光玻璃等满格透明）→ translucent；其余非水流体（岩浆）→ main（恒写 main、归 main 段——避免 Fabulous PBO 降级时被当写 translucent 对象而空判）。段谓词与 §5.4 采集侧"会写自身近面的整格"同口径，薄物/非满形状被挡在段外。同一距离球（≤ `removalMaxRayDist`）过滤。文件布局升 **version=3**：version=2 头（dimension 段）之后 opaque/main 段 long 数组之后追加 **translucent 开关 byte + translucent 段 count + translucent long 数组**，两段并列、各带独立 count；**version≤2 旧文件 → translucent 段空** → 采集侧只按主路径删（岩浆/非 Fabulous 水），行为等同 v2.23，无迁移负担。
+  **为何逐格上报而非整水体/整玻璃**：纯累积记忆只知"自己放过哪些格"、不知对象边界；上报全部 translucent 段格后由采集侧逐格在场判定天然收敛（活格保留、消失的删），语义与不透明格完全对称。
+- **采集侧 `ObjectResolver`**：现有 `DeletionJudge.test`（main 场）管 **main/opaque 段**（实心不透明格 + 冻结实体占用格 + 岩浆）照旧；对 **translucent 段**按当前图形配置路由（上文判据场选择）：`fabulous && hasTranslucentDepth() && cells.translucentEnabled()` → `DeletionJudge.testTranslucent`（translucent 场判定，bbox/slab/δ/阈值全复用，逐像素比较对象换成 translucent 目标）；非 Fabulous（Fancy/Fast，水/满格透明写 main）→ `DeletionJudge.test`（并入 main 场）；Fabulous &&（!`hasTranslucentDepth()` || !`translucentEnabled`）→ translucent 段判据空集（水/满格透明绝不可喂 main 场——恒假消失；PBO 恢复 / 开关重开自愈）。两段删格并入同一 `deletions` 列表（随 terrain.nbt 顶层落盘），记忆侧无需区分来源。判定与 §5.4 采集同度量（同 δ = 0.05）。
+- **记忆侧 `DeletionApplier`**：对 deletion 格**按内容放行**——deletion 主循环守卫从 `isSolidOpaque` 放宽到 `isDeletableContent`（= 实心不透明 ∪ 流体（水/岩浆）∪ 满格透明：`isShapeFullBlock && !canOcclude`），只有记忆世界当前内容属于可删集才执行 818 置空（translucent 段条目与 main 段岩浆条目同规则；被删满格透明格即从记忆世界清除）；**不得**因此对非满形状/段外方块放行（玻璃板/栅栏/压力板/红石线的拒删保持 §7.11 边界①——它们本就进不了段，双保险防误删）。currentTerrain 可见格跳过、相机格快路径（仍只删实心不透明，v2.22 语义）、幂等性同 §7.11。
+- **配置**：复用 `removalEnabled`/`removalPixelThreshold`/`removalMaxRayDist`；新增 `removalTranslucentEnabled`（默认 true，仅 Fabulous 生效）可选开关——随 cells 文件 version=3 头部下发（translucent 开关 byte），Fabulous && `hasTranslucentDepth()` 时采集侧据此路由 translucent 段（false → 判据空集、幽灵暂留）；Fancy/Fast 下不生效（水/满格透明写 main、本就由 main 场判据覆盖）。
+
+**已知边界（v2.36）**：
+
+① translucent 场判据与渲染配置/第二路 PBO 强耦合：非 Fabulous 或 PBO 软失败时写 translucent 目标的对象（水/满格透明）消失判定空集（岩浆写 main、走 main 场不受影响）；② 表层所有权——部分收缩残留浅层水时深层幽灵欠删（残水自罩、视觉无害）；**满格透明方块（玻璃块/冰）本版已纳入**；非满形状透明块（玻璃板/栅栏/压力板等）需几何过滤才可判（§7.13 轻量草案，未立项）——本版仍未纳入、欠删（接受）；③ 深度量化可靠距离仍 ≤ `removalMaxRayDist`=96（δ 仅 ≤~100 格内可靠，§7.11 `removalMaxRayDist` 详解——流体的 t_far 与 main 场同为欧氏距离比较，误差界不变）；④ 记忆侧离线 → 无 cells → 不删（同 §7.11，优雅降级自愈）；⑤ 会话间切换图形配置（Fabulous ↔ Fancy）造成的跨配置陈旧细胞走**当前**配置的场判定，方向保守（欠删不误删）。
+
+**验证清单（待游戏内，Phase 10）**：
+
+- 桶舀水源致整片水消失 → **单次快照内**整片记录的水格（含深水柱中间格）判删、记忆世界水消失；
+- 敲掉/移动独立玻璃块、染色玻璃、冰 → 判删、记忆世界清除；活玻璃块不被误删；被更近墙遮挡的活玻璃欠删保留；
+- 活水池塘/海洋/深湖不被误删（逐像素 `t < t_far`）；水面嵌套/水下玻璃不连带误删；
+- 部分排水（留浅层）→ 深层幽灵欠删但视觉无害；岩浆被舀/流走 → main 场判据删除；
+- Fancy/Fast：水/玻璃块写 main → 放宽 reporter/applier 后走现有判据删除；Fabulous PBO 软失败 → 本帧水/玻璃块跳过、不误删、恢复后自愈；
+- 玻璃板/栅栏/压力板等非满形状透明块仍不删（防误删回归）。
+
+---
+
+### 7.13 非满形状方块减量（几何过滤草案：整格 bbox 预判 + 形状相交过滤，未立项，未来方向）
+
+> **状态**：v2.36（§7.12）把减量范围扩到流体 ∪ 满格透明，**非满形状方块（写 main：栅栏/铁栏杆/门/台阶/活板门/梯子/火把/压力板…；Fabulous 下写 translucent：玻璃板/红石线…）仍整类欠删**，§7.12 末将其归为"需换成实际渲染形状 AABB 采样、属次级工程"。本节记录经论证的**轻量替代**：不必换采样体积——**保留整格 bbox 判据原样，只对"越票"像素追加一个「射线 ∩ 被记住形状」的几何相交过滤**。方向已与用户讨论定稿，**未立项、未实现**（v2.36 之后候选；代码另起须先经本节审阅）。
+
+**根因（为何非满形状不能直接套整格判据）**：整格 bbox 判据的假证据只来自一种像素——**穿过格内空余区域**的射线。非满形状的"在/不在"信号差只存在于**几何区**（薄体实际占的那部分格）；空余区在物体**活着**时射线就不被终止（直达背后/天空，`Z ≥ t_far`），与"物体已消失"在外观上无差别 → 全部计入会让一个活玻璃板单快照内就有远超 ≥2 像素越票 → 误删活体。§7.11/§7.12 因此把谓词钉在 `isShapeFullBlock`——**限制项是"形状是否填满整格"，与透明度、写哪张场无关**。
+
+**两步法（第一步与现判据零改动）**：
+
+1. 对记忆格 C，沿用 §7.11/§7.12 同款整格判定：8 角投影 → 屏幕 bbox → 逐像素射线-AABB slab + 读 C 实际写的场（§5.4 路由）`Z ≥ t_far − δ` → 越票。**这一层的判据、哨兵、几何一律不改**；
+2. 对每张越票 p 追加**形状相交过滤**：用 C 的**被记住 BlockState** 重建实际 VoxelShape（cells 携带状态），判「射线(camPos→p) ∩ 形状 ≠ ∅」。不相交（该射线只穿格内空余区，活着时本就不被终止、无作证价值）→ **作废该票**；相交 → 保留为真消失证据。越过数仍 ≥ `removalPixelThreshold` 才进 deletions。
+
+**为何是 sound（只消原假证据源、不引入新假删）**：
+
+| 像素情形 | 整格预判（Z ≥ t_far − δ 越票） | 形状相交过滤 | 结果 |
+|---|---|---|---|
+| 活体、射线过空余区 | 越票（假象） | 不相交 → 作废 | ✓ 消除唯一假证据源 |
+| 活体、射线过几何区 | 不越票（近面深度 < t_far） | （本就不进过滤） | ✓ 活体安全 |
+| 已消失、射线过几何区 | 越票 | 相交 → 保留 | ✓ 真证据 |
+| 已消失、射线过空余区 | 越票 | 不相交 → 作废 | ✓ 剔除无意义像素 |
+
+**关键推论**：活体穿过几何区的像素在**第一步就被自己的近面深度排除**（近面 < t_far，进不了越票集），过滤阶段见到的"相交越票"只可能是"几何已消失、露出背景"。因此过滤器**只需一个相交谓词**，无需对真实形状做逐像素 t_near/t_far 簿记、也无需改预判参照距离（仍是整格远面 + δ）——这就是它比"采样体积换成实际渲染形状 AABB"轻的地方。**满格方块是本法的退化情形**（几何 = 整格 bbox → 过滤恒真 → 与 §7.11/§7.12 现判据完全一致），可统一取代而非另开一套并行判据。
+
+**实现必要条件**：
+
+- **cells 携带 BlockState（文件再升级）**：`MemoryCellReporter` 把"仍在记忆世界的非满形状格"（opaque ∪ 非满透明）按记忆现状状态序列化——连接形态已编码进状态属性（栅栏/墙/红石线的 `north/east/south/west/up`、门/活板门朝向/开合等），重建形状忠实；采集侧 `DeletionJudge` 用该状态重建 VoxelShape。多数非满方块 VoxelShape ≈ 渲染形状；渲染比碰撞更精细处（红石线等）以"重建形状近似 + 亚像素容差"处理。加入 opaque / translucent 段还是新增"几何段"，未来定夺（不影响判据本体）。
+- **场选择沿用 §7.12 判据场选择 + §5.4 路由，不得混用**：不透明非满 / CUTOUT（栅栏/铁栏杆/门/梯子…）写 main → main 场判定（任意配置）；半透明非满（Fabulous 下的玻璃板/红石线…）写 translucent → **仅 Fabulous && `hasTranslucentDepth()` 时可判**，Fancy/Fast 下它们写 main → 走 main 场。写 translucent 的对象绝不可喂 main 场（Fabulous 下恒假消失，同 §7.12）。
+- **轮廓/亚像素/斜掠是唯一残余脆弱点（工程而非逻辑）**：光栅化中"像素中心射线命中形状"与"该像素存在该形状 fragment"在贴边像素可能不一致。方向可控、**宁丢勿错**——对贴边/斜掠的越票（射线在形状内弦长过短，如 < 数个 δ）降权或作废（grazing 命中本只在轮廓边缘产生 fragment），配合既有 ≥2 多票阈值全消误删。§7.12 已提及的"投影 + 轮廓与亚像素容差"即此。
+- **applier 语义转折**：格由 judge 经几何过滤证明消失后，applier 的"非满形状拒删"双保险须**放开**——改为与 §7.11/§7.12 同构的"记忆世界当前该格仍是同一几何格（内容对得上）才 818"（内容不符 → 跳过、交放置/更新路径）。这是把"整类拉黑"升级为"诚实几何判定"的语义前提，也是本方案唯一的"放宽"点——由几何过滤承担防误删职责。
+
+**仍修不了的部分（与几何过滤正交，保持原边界）**：
+
+- **Fabulous 绊线**：活着时不写任何已读深度场（§10.8），几何过滤反而更糟（重建出形状、测到的是背后表面 → 恒判消失）。它是"信号缺失"类而非形状类——须另读 weather 深度场，或仅 Fancy/Fast 可删；
+- **形状为空的方块**（下界传送门方块）：无体积可交，删不了（可接受）；
+- 被永久遮挡后移除、距离 > `removalMaxRayDist`=96（深度量化超 δ 可靠区）、占屏 <2px（薄物最易触达）→ 依旧欠删不误删（宁欠勿过）；
+- **半满形状 BE 方块（箱/床/旗…）被整体移除**：格本身可判删后，还须配套"格被判删 → 清该格 BE 内容记忆"的路径（BE 现只在原位被无 BE 新方块替换时 `clearStale`，见 §7.2/§7.3）。
+
+**代价**：只作用于距离球内候选格。对活体，越票仅来自空余区像素（bbox 投影的一小部分），过滤把其全部作废 → 恒 0 票；对消失格，过滤只是形状相交判定。量级 O(候选格 × bbox 像素 × 形状相交)，与 §7.11 现判据同阶。
+
+**建议验证（若立项，并入对应 Phase）**：敲掉独立玻璃板/铁栏杆/红石线 → 判删、记忆世界清除；活玻璃板/栅栏（含靠墙、部分遮挡）不被误删；斜视角薄板（真实形状重建）不漏判；Fabulous 下红石线随 translucent 场删、Fancy/Fast 走 main 场删；远距薄物优雅欠删；Fabulous 绊线仍不删（回归预期）。
+
 ---
 
 ## 八、线程模型
@@ -812,7 +1149,7 @@ for p in 全部像素:
 | 线程 | 职责 |
 |---|---|
 | **API 线程**（WebSocket） | `requestCapture()` 置标志 → `awaitSnapshot(超时)` 取深度快照（含 TAIL 捕获的实体 AABB 列表）→ **读记忆侧 `memory_cells.bin`（mtime 门控，v2.23 反向通道）** → 用捕获的 AABB 建 **SectionPos 桶** → **`Unprojector.visibleBlockHits`**（纯数学，扫描同时产出方块去重点 + 实体候选像素原始点 W）→ 经 `Minecraft.execute` 交集合给渲染线程查询 → 组装 JSON 响应 |
-| **渲染线程** | `tryCapture`（Mixin TAIL）：手写 GL PBO 回读深度 + 快照矩阵/相机；**快照实际被渲染实体列表**（**第二注入点 `extractVisibleEntities` @TAIL** 复刻 L821-826 裁剪谓词，v2.9 定稿；`LevelRenderState.entityRenderStates` 不可用——DTO 缺 AABB/id 且 renderLevel TAIL 前已 reset；`entitiesForRendering()` 原样全收会假阳性）→ `queueFencedTask` 回调置快照并 countDown → **`ObjectResolver.resolve` 四路查询**（方块直查 / 方块实体 NBT / 实体闭区间 contains + 深度排序 + 肢体判别精判 / 半透明·绊线 §5.4——**仅 Fabulous，v2.10/v2.12**）→ **`DeletionJudge` 逐块判定（v2.23：cells → 逐块投影 + 深度判定 → deletions）** → NBT 序列化 → 三 store 落盘 |
+| **渲染线程** | `tryCapture`（Mixin TAIL）：手写 GL PBO 回读深度 + 快照矩阵/相机；**快照实际被渲染实体列表**（**第二注入点 `extractVisibleEntities` @TAIL** 复刻 L821-826 裁剪谓词，v2.9 定稿；`LevelRenderState.entityRenderStates` 不可用——DTO 缺 AABB/id 且 renderLevel TAIL 前已 reset；`entitiesForRendering()` 原样全收会假阳性）→ `queueFencedTask` 回调置快照并 countDown → **`ObjectResolver.resolve` 四路查询**（方块直查 / 方块实体 NBT / 实体闭区间 contains + 深度排序 + 肢体判别精判 / 半透明·绊线 §5.4——**仅 Fabulous，v2.10/v2.12**）→ **`DeletionJudge` 逐块判定（v2.23：cells → 逐块投影 + 深度判定 → deletions；**v2.36**：`fabulous && hasTranslucentDepth()` 时对 cells.translucent 段（流体 ∪ 满格透明）追加 translucent 场判定）** → NBT 序列化 → 三 store 落盘 |
 | **回读回调** | `queueFencedTask` 回调（渲染线程触发），只拷贝深度数组 + 置快照 + countDown，不碰游戏数据 |
 
 - **反投影 / 去重可在 API 线程**：纯矩阵乘 + 哈希去重，快照数据已与游戏解耦，无竞态；
@@ -855,7 +1192,8 @@ API 线程: requestCapture → awaitSnapshot(5000)（null → 超时错误）
 | 实体判定 | O(实体附近像素 × 桶内实体数)：SectionPos 桶粗过滤 + `AABB.contains` + 射线-AABB + 肢体判别（v2.11，他体/薄方块排除 + 前向扫） | 绝大多数像素 O(1) 桶 miss 跳过，可忽略 |
 | 半透明/绊线通道（§5.4，仅 Fabulous） | **v2.26 区间射线推进**：O(Σ 区间像素 × 射线穿过的透明格数)——仅 `translucentDepth < mainDepth` 像素推进，跨 section 用 `maybeHas(透明)` 整节跳步（非透明节 O(1)）；**总量 = 答案体积**，无候选粗筛、无 8px 合并 | 单层水每像素 ≈1 格、深湖 ≈ 水深；满屏深湖最坏几十 ms（Phase 9 实测）；**v2.26 删除** v2.11 粗筛（10⁵~10⁶ 候选 8 角投影 + 8px 栅格合并）与 v2.24 首层判别；工序 B（v2.24）首层透明面深度 pass = O(全像素) 单趟反投影仍承担首层精确落位；**v2.12**：绊线随推进枚举、开销并入透明格数，可忽略 |
 | 减量判定（v2.23，采集侧 `DeletionJudge`） | O(视锥内记忆块数 × 投影像素)：几千~几万格 × 几~几十 px ≈ 几十万次深度读 + §5.4 式射线-AABB，每快照一次、毫秒级 | 取代 v2.22 记忆侧 DDA 投票（跨帧 K≥2 + 证据门控已删）；**单快照内 ≥2 像素越过即判删**，无跨帧依赖、静态玩家一次快照即可删 |
-| 反向通道（v2.23，cells 文件） | 记忆侧：O(累积块数) 距离过滤 + 原子写（写时，ms）；采集侧：mtime stat + 读（几十 KB） | 记忆侧离线 → 无 cells 文件 → 无删除证据，优雅降级 |
+| 半透明减量（v2.36，流体 + 满格透明，translucent 场判定） | 附加 O(视锥内 translucent 格数 × 投影像素)——translucent 深度与 main 同帧两路 PBO 已读回（§3.4），无新增读回；仅 Fabulous 且 `hasTranslucentDepth()` 时执行 | 判定式/δ/阈值与 §7.11 main 场同款，比较对象换成 translucent 目标（"首个半透明面 ∪ 主拷贝"）；PBO 软失败 → 该帧水/玻璃块跳过、不误删；岩浆/非 Fabulous 水走 main 场无此开销 |
+| 反向通道（v2.23，v2.36 cells 文件） | 记忆侧：O(累积块数) 距离过滤 + 原子写（写时，ms）；采集侧：mtime stat + 读（几十 KB，version=3 增流体段） | 记忆侧离线 → 无 cells 文件 → 无删除证据，优雅降级 |
 | **对比 v1** | 地形遍历从"几十万次 getBlockState"降到"几万次反投影 + 几千次查询" | **更准（只可见）且更省**；代价是新增深度管道 |
 
 ---
@@ -874,8 +1212,9 @@ API 线程: requestCapture → awaitSnapshot(5000)（null → 超时错误）
 10. **实体盒覆盖缺口（v2.9/v2.10）**：marker 盔甲架（0×0 盒但模型照画）、大堆物品平片 Z 向摊开（~3 格）、带 display block 的矿车纵向延伸——这些像素归属不到 → 漏检。**v2.10 已统一 `inflate(0.5)` 对齐 vanilla 视锥盒**（此前 0.45 的 0.05 壳已消解）；剩余缺口仅 `getBoundingBoxForCulling` 覆盖更大的实体（Sniffer 0.6 / Illusioner 更大，见 §5.3/§12）。**v2.11 补防**：marker 盔甲架 0×0 盒参与 §5.3 **未外扩盒**的 slab 求交属零体积退化——slab 求交对零/负外扩盒**直接返回 null（不判相交）**，防除零/NaN，该实体留给 contains/侧向判定兜底。
 11. **F3 调试 gizmo（v2.9）**：`late_debug` pass 在 TAIL 前把主深度清成 1.0 → 捕获到全天空假深度，须检测跳过该帧。
 12. **resize / 全景截图（v2.9）**：窗口 resize 重建深度纹理、全景截图临时 resize 4096×4096 → 缓冲须动态分配、每帧重取句柄。
-13. **减量边界（v2.23，详见 §7.11）**：只删"实心 + 不透明"格（记忆侧 cells 文件只含此类 + 冻结实体占用格）——排干的水/岩浆、被移除的透明/非实心方块（玻璃/栅栏/压力板）仍永成幽灵（接受）；`removalMaxRayDist=96` 外的格保守保留（深度量化误差超出 δ 可靠区，§4.2/§10.5）；记忆世界离线时无删除证据（优雅降级，恢复后自愈）。
+13. **减量边界（v2.23，v2.36 修订流体 + 满格透明部分，详见 §7.11/§7.12）**：只删"实心 + 不透明"格 + v2.36 的流体/满格透明格（cells version≤2 文件只含前者 + 冻结实体占用格）——被移除的**非满形状**透明/半实心方块（玻璃板/栅栏/压力板）仍永成幽灵（接受；未来方向：几何过滤，见 §7.13 设计草案）；排干的水/岩浆及满格透明减量见 **v2.36（§7.12，✅ 已实现 2026-09-08）**——Fabulous 下 translucent 场同构判据、Fancy/Fast 与岩浆走 main 场（放宽 reporter/applier 门槛：translucent 段 = 水 ∪ 满格透明、岩浆归 main 段）；`removalMaxRayDist=96` 外的格保守保留（深度量化误差超出 δ 可靠区，§4.2/§10.5）；记忆世界离线时无删除证据（优雅降级，恢复后自愈）。
 14. **两深度锚点边界（v2.24，v2.26 修订，见 §5.4）**：工序 B 首层透明面深度 pass 仅在 Fabulous（translucent 目标非空）可用——Fancy/Fast 无独立目标，回退 §5.1 最近表面语义（水面掩盖水底）；嵌套半透明的**精确面**深度给不出——**v2.26 起由工序 C 区间射线推进逐格归属、方块级粒度（水柱中间水格全部枚举）**；绊线（weather 目标）与掉落物（item_entity 目标）不在 translucent 深度内——绊线恒走工序 C 区间推进、掉落物走实体通道（§5.3）；透明/不透明共面边界靠 δ 容差兜底。
+15. **半透明方块减量边界（v2.36，流体 + 满格透明，见 §7.12）**：translucent 场判据只在 Fabulous 且第二路 PBO 成功（`hasTranslucentDepth`）时存在——非 Fabulous 或 PBO 软失败时水/玻璃块的消失判定空集（岩浆写 main 不受影响，仍可删）；表层所有权限制——部分收缩残留浅层水时深层幽灵欠删（残水自罩、视觉无害），玻璃板/栅栏等**非满形状**透明块仍不删（进不了 translucent 段，防误删回归，接受）；判据与采集同度量、深度量化可靠距离上限 `removalMaxRayDist`=96 不变。
 
 ---
 
@@ -961,6 +1300,14 @@ API 线程: requestCapture → awaitSnapshot(5000)（null → 超时错误）
 - 验证过程：海洋场景 t/m 双深度诊断（t<m=88% 证实深度机制正常、反投影 t 命中率 0% 定位谓词根因）→ 谓词修复后水柱完整上报（用户实测确认）→ 移除 `[TEST-CODE]` 诊断块。
 - 编译：`gradlew compileJava` 通过（BUILD SUCCESSFUL）。
 
+### Phase 10：半透明方块减量（水 + 满格透明）——translucent 深度在场判定（v2.36，✅ 已实现 2026-09-08，待游戏内验证）
+> v2.36 实施（2026-09-08，✅ 已实现；范围定案见 §7.12）：排干的水/岩浆及被移除的满格透明（玻璃块/染色玻璃/冰）因 §7.11 只删实心不透明格而永成幽灵。修正 = 在 translucent 深度场上同构复刻 §7.11 判据（translucent 目标 = 主深度拷贝被 TRANSLUCENT 组在前覆盖，"无半透明"自编码为 `t==m` → 单值比较天然不误删活对象）；cells 分两段——**opaque/main 段**（实心不透明 ∪ 冻结实体占用格 ∪ **岩浆**）+ **translucent 段 = 水 ∪ 满格透明**；判据场随采集通道选（Fabulous 下水/玻璃 → translucent 场；Fancy/Fast 水/玻璃写 main → 现有 main 场 + 放宽 reporter/applier 门槛；岩浆写 main → 恒走 main 段，PBO 降级不受影响）。
+- [x] `memory_cells.bin` version=3：记忆侧 `MemoryCellReporter` 两段布局（opaque/main 段 long 数组 + translucent 开关 byte + translucent 段 count/longs；`appliedBlocks(dim)` 取格 + 现状核验分段：水/满格透明 → translucent、实心不透明/岩浆 → main + 同距离球/指纹/原子写）；version≤2 旧文件 translucent 段空、行为等同 v2.23
+- [x] 采集侧：`DeletionJudge` 增 `testTranslucent` 判定变体（读 cells.translucent 段；复用 bbox/slab/δ；比较 translucent 目标 `Z_translucent ≥ t_far − δ`、≥2 像素，防御性判空集）；`ObjectResolver` 按「Fabulous && hasTranslucentDepth && `translucentEnabled` → translucent 场 / Fancy-Fast → 并入 main 场 / Fabulous &&（!hasT || !开关）→ 空集」路由 translucent 段，删格并入同一 `deletions`
+- [x] 记忆侧 `DeletionApplier`：deletion 主循环守卫放宽到 `isDeletableContent`（实心不透明 ∪ 流体（水/岩浆）∪ 满格透明）；相机格快路径仍只删实心不透明；玻璃板/栅栏等非满形状/段外仍拒删
+- [x] 配置：`removalTranslucentEnabled`（默认 true，仅 Fabulous 生效；随 cells version=3 头下发）
+- [ ] 验证（待游戏内，Phase 10）：桶舀水整片消失一轮删（含深水柱中间格）；敲掉/移动玻璃块、染色玻璃、冰 → 判删、活玻璃不误删、被挡玻璃欠删；活水/活岩浆不误删；部分排水欠删但视觉无害；Fabulous PBO 软失败水/玻璃跳过、Fancy/Fast 走 main 场删除；玻璃板/栅栏等非满形状回归不删
+
 ---
 
 ## 十二、实现期需核实的源码清单
@@ -998,3 +1345,4 @@ API 线程: requestCapture → awaitSnapshot(5000)（null → 超时错误）
 | **反向通道 cells 文件（v2.23）** | ✅ 已核实：`MemoryCellReporter` 用 `Files.write(tmp, buf)` + `Files.move(ATOMIC_MOVE)`（回退 `REPLACE_EXISTING`）原子写，小端 ByteBuffer 布局（magic SCEL + version + threshold + maxRayDist + count + longs）与采集侧 `MemoryCellsReader` 逐字节对应；采集侧读时 `Files.getLastModifiedTime` mtime 门控、解析失败保留旧 mtime 下轮重试（半截写防护同 §7.4）；`TerrainData.fingerprint()` 已含 `deletions`（§7.4 门控不误跳过） | `MemoryCellReporter` / `MemoryCellsReader` / `Files` |
 | **记忆侧距离球过滤（v2.23）** | ✅ 已核实：`MemoryCellReporter.computeCells` 只做 `|cell−agentPos|² ≤ removalMaxRayDist²` 距离球过滤（球心 = 玩家眼睛 `eyeY`），不缩角度（Over-inclusive 成立）；球外格不进 cells 文件 → 采集侧对它们无像素命中、自然跳过；触发 = mutationVersion 变化 || 每 `memoryCellsWriteIntervalTicks` 兜底 || 内容指纹变化 | `MemoryCellReporter` |
 | **translucent 目标深度可读（v2.24）** | ✅ 已核实：`LevelRenderer.getTranslucentTarget()` 在 Fabulous（`useShaderTransparency()`）下返回独立 translucent RenderTarget、Fancy/Fast 为 null（`ChunkSectionLayerGroup.outputTarget()` L32 引用）；`addMainPass` L705-706 `copyDepthFrom(main)` + L710 TRANSLUCENT 组 LEQUAL 覆盖 ⇒ 其深度 = "首个半透明面"且 `≤ mainDepth`；同投影同尺寸 → 第二路 PBO 可直接读 | `LevelRenderer` L222-234/L705-710 / `ChunkSectionLayerGroup` L28-37 / `RenderTarget.getDepthTexture` L118 |
+| **fluid/透明面剔除对 translucent 逐格在场判定（v2.36）** | ✅ 判据已实现（2026-09-08，§7.12）；渲染面剔除细部仍待游戏内观察：水/岩浆流体的渲染面剔除（淹没/内部面是否写 translucent 片元）与满格透明方块的面剔除，只影响"整片消失单帧全删 vs 多帧收敛"的快慢，不影响判据安全（活对象必在暴露面写片元 → `t < t_far` 保活；消失必 `t==m`） | `FlowingFluid`/`FluidRenderer` / `SectionCompiler` / `GlassBlock` |

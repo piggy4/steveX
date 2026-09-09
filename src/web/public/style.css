@@ -13,6 +13,7 @@
   --success: #43ad51;
   --success-dark: #23672b;
   --success-soft: #eefaf0;
+  --danger: #dc2626;
   --danger-soft: #fef2f2;
   --shadow: 0 18px 50px rgba(26, 35, 42, 0.08);
   --radius-xl: 14px;
@@ -604,6 +605,179 @@ select {
 
 .mod-result.err {
   border-left: 3px solid var(--danger);
+}
+
+/* 通用小标签基座（原无任何 .pill 基础样式；busy-pill / username-pill 复用） */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+/* Mod API 查询器（agents 卡内：搜索 + 分组下拉 + step JSON 模板/填参，参考不执行） */
+.modapi-search {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 52px;
+  padding: 0 16px;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  cursor: text;
+}
+
+.modapi-search svg {
+  width: 18px;
+  height: 18px;
+  color: #6d6d7b;
+}
+
+.modapi-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.modapi-search input::placeholder {
+  color: #838291;
+}
+
+.modapi-search:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
+}
+
+.modapi-detail {
+  margin-top: 14px;
+  padding: 14px;
+  background: var(--panel-soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+.modapi-grammar {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+}
+
+/* 语法框内静态 step 写法说明（pre 保行距，与上方逐方法 zh 说明同框） */
+.modapi-grammar-code {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  color: #46404a;
+}
+
+/* 逐方法中文说明（随选中方法刷新），置于语法框顶；与 step 写法之间用虚线分隔 */
+.modapi-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed var(--line-strong);
+  line-height: 1.5;
+}
+
+.modapi-meta .pill {
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  font-weight: 600;
+}
+
+.modapi-method {
+  font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  font-size: 13px;
+  color: var(--text);
+  background: rgba(37, 99, 235, 0.08);
+  padding: 1px 6px;
+  border-radius: 6px;
+}
+
+.modapi-zh {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.modapi-step {
+  min-height: 58px;
+}
+
+.modapi-params {
+  margin-top: 6px;
+  display: grid;
+  gap: 2px;
+  font-size: 12.5px;
+}
+
+.modapi-params-title {
+  color: var(--muted);
+  font-weight: 700;
+  margin: 6px 0 2px;
+}
+
+.modapi-noparam {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 2px 0;
+}
+
+.modapi-prow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
+  padding: 3px 2px;
+  border-bottom: 1px dashed var(--line);
+}
+
+.modapi-prow:last-child {
+  border-bottom: 0;
+}
+
+.modapi-prow .pname {
+  width: 118px;
+  font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  color: var(--text);
+}
+
+.modapi-prow .ptype {
+  color: var(--muted-2);
+}
+
+.modapi-prow .pmeta {
+  color: var(--muted-2);
+  white-space: nowrap;
+}
+
+.modapi-prow .pmeta.req {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.modapi-prow .phint {
+  flex: 1 1 180px;
+  color: var(--muted);
+}
+
+.modapi-feedback {
+  margin-top: 10px;
 }
 
 /* Mod Batch 批量面板：输入区加高，结果区等宽字体 + 更高上限 */

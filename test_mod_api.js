@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * steveX 验证脚本 —— 采集端 mod WebSocket JSON-RPC API（48 方法）。
+ * steveX 验证脚本 —— 采集端 mod WebSocket JSON-RPC API（50 方法）。
  * 替代旧 test_api.py（HTTP 版，mod 的 HTTP API 已不存在）。
  *
  * 用法：
@@ -178,16 +178,16 @@ async function testViaSteveX() {
     return { status: res.status, json: await res.json() }
   }
 
-  // 方法清单（48）
+  // 方法清单（50）
   const methods = await get('/api/mod/methods')
   check('GET /api/mod/methods 返回 ok', methods.json.ok === true)
-  check('方法清单共 48 个', Array.isArray(methods.json.methods) && methods.json.methods.length === 48,
+  check('方法清单共 50 个', Array.isArray(methods.json.methods) && methods.json.methods.length === 50,
     `count=${methods.json.methods?.length}`)
 
   // 状态
   const st = await get('/api/mod/status')
-  check('GET /api/mod/status 返回 connected + 48 methods',
-    typeof st.json.connected === 'boolean' && st.json.methodCount === 48)
+  check('GET /api/mod/status 返回 connected + 50 methods',
+    typeof st.json.connected === 'boolean' && st.json.methodCount === 50)
 
   // 透传主路径
   const p = await post('/api/mod/player', {})
@@ -207,7 +207,7 @@ async function testViaSteveX() {
 
   // /api/skills 语义已改为 mod 方法清单
   const skills = await get('/api/skills')
-  check('GET /api/skills 返回 48 个方法', skills.json.ok === true && skills.json.skills.length === 48,
+  check('GET /api/skills 返回 50 个方法', skills.json.ok === true && skills.json.skills.length === 50,
     `count=${skills.json.skills?.length}`)
 
   // agent 状态含 mod 连接信息

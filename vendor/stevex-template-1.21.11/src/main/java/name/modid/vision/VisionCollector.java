@@ -11,6 +11,7 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.util.ProblemReporter;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.storage.TagValueOutput;
@@ -44,6 +45,9 @@ public class VisionCollector {
 
     /** 实体轻量快照存储 —— 快照覆盖写（v2 起内容 = 本次可见实体，无 scannedSections）。 */
     private static final VisionEntityStore entityStore = new VisionEntityStore();
+
+    /** v2.31：群系 cell 存储 —— 单调 union 覆盖写（独立 biomes.nbt，见 VisionBiomeStore）。 */
+    private static final VisionBiomeStore biomeStore = new VisionBiomeStore();
 
     /**
      * 实体全量 NBT 的 TTL 缓存（uuid → 最近一次序列化结果）。
@@ -93,26 +97,68 @@ public class VisionCollector {
         }
         if (entity == null || entity.isRemoved()) return null;
 
+        CompoundTag nbt = serializeEntityFull(entity);
+        if (nbt != null) {
+            entityNbtCache.put(uuid, new CachedEntityNbt(now, nbt));
+        }
+        return nbt;
+    }
+
+    /**
+     * 把实体序列化成<b>标准整份 NBT payload</b>（{@code {id, ...saveWithoutId}}，设计 §5）：可被
+     * vanilla {@code EntityType.create(ValueInput…)} 完整装载的标准实体存档。返回 null = 不可装载
+     * （实体不存在 / 已移除 / 类型不可序列化如玩家 / 保存失败）。
+     *
+     * <p>v2.35（展示实体内容记忆）抽出复用：{@link #collectEntityNbt}（Tier-2 按需）与采集管线
+     * （§6.2，{@code LevelRendererMixin} 对白名单展示实体本帧编码）共用同一保存路径，两侧格式保证
+     * 一致。必须在渲染线程调用（读实体状态 / registryAccess 均有竞态）。
+     */
+    public static CompoundTag serializeEntityFull(final Entity entity) {
+        if (entity == null || entity.isRemoved()) return null;
         // getEncodeId() 是 protected；用注册表 key 等价取 id，且类型需可序列化（如玩家返回 null）
         if (!entity.getType().canSerialize()) return null;
-        String encodeId = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString();
-
+        final String encodeId = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString();
         try (ProblemReporter.ScopedCollector reporter =
                      new ProblemReporter.ScopedCollector(entity.problemPath(), LOGGER)) {
             TagValueOutput output = TagValueOutput.createWithContext(reporter, entity.registryAccess());
             output.putString("id", encodeId);
             entity.saveWithoutId(output);
-            CompoundTag nbt = output.buildResult();
-            entityNbtCache.put(uuid, new CachedEntityNbt(now, nbt));
-            return nbt;
+            return output.buildResult();
         } catch (Exception e) {
-            LOGGER.warn("[Vision] Failed to serialize entity {}: {}", uuid, e.getMessage());
+            LOGGER.warn("[Vision] Failed to serialize entity {}: {}", entity.getUUID(), e.getMessage());
             return null;
         }
     }
 
     /** TTL 缓存条目：序列化时刻 + 结果 NBT。 */
     private record CachedEntityNbt(long lastMillis, CompoundTag nbt) {}
+
+    // ==================== 掉落物实体大类（v2.34，单一事实来源） ====================
+
+    /**
+     * 掉落物实体注册名（{@code minecraft:item}），懒加载缓存。
+     *
+     * <p>drop item 载荷（v2.34）的实体大类判定曾分散在多处（mixin 用 {@code instanceof ItemEntity}、
+     * ObjectResolver 用 {@code EntityType.ITEM} 注册表键），此处收敛为<b>唯一来源</b>：
+     * 一律经 {@code EntityType.ITEM} 从注册表派生，避免硬编码字符串在 namespace/版本演化下漂移。
+     * 懒加载（首次调用才触注册表），避开类初始化时机问题。
+     */
+    private static String itemEntityTypeId;
+
+    /** 掉落物实体 typeId；注册表就绪前的首次调用在运行时发生，安全。 */
+    public static String itemTypeId() {
+        String t = itemEntityTypeId;
+        if (t == null) {
+            t = BuiltInRegistries.ENTITY_TYPE.getKey(EntityType.ITEM).toString();
+            itemEntityTypeId = t;
+        }
+        return t;
+    }
+
+    /** typeId 是否掉落物实体 —— drop item 载荷的产端（采集）/消费端（存储、半透明候选）共用此判定。 */
+    public static boolean isItemEntity(final String typeId) {
+        return typeId != null && itemTypeId().equals(typeId);
+    }
 
     // ==================== BlockState 序列化（供 ObjectResolver 复用，v2.2 改 package-private） ====================
 
@@ -161,6 +207,17 @@ public class VisionCollector {
     /**
      * 实体轻量物理状态（Tier 1）：纯字段读取即可获得，不含 NBT。
      * 全量 NBT 走 {@link #collectEntityNbt(UUID, boolean)} 按需查询。
+     *
+     * @param item    v2.34（掉落物记忆）：当 typeId 为 {@code minecraft:item} 时携带物品栈
+     *                （{@code ItemStack.CODEC} + {@code NbtOps} 编码 tag）；其余类型 / 空栈为 null。
+     *                采集端 snapshot 帧已编码，读侧（file/JSON）只消费 tag、无需再触游戏。
+     * @param payload v2.35（展示实体内容记忆）：当 typeId ∈ 采集白名单（{@link DecorativeConfig}）
+     *               时为整份可装载 NBT payload（{@code {id, ...saveWithoutId}}，见
+     *               设计 §3/§5，由 {@link #serializeEntityFull} 本帧编码）；其余类型 / 失败为 null。
+     *               记忆侧用它做<b>内容复原</b>（整份装载）。
+     * @param content v2.35（决策点 2 渠道 B）：与 payload 同帧构建的<b>薄内容摘要</b>
+     *                （{@link DecorativeSummary}），仅用于采集端 snapshot JSON（{@code entities[].content}），
+     *                记忆侧不使用；无摘要类型 / 解码失败 → null。
      */
     public record EntityLightSnapshot(
             int id,
@@ -170,7 +227,10 @@ public class VisionCollector {
             float yaw, float pitch,
             double vx, double vy, double vz,
             boolean onGround,
-            float health
+            float health,
+            CompoundTag item,
+            CompoundTag payload,
+            CompoundTag content
     ) {}
 
     // ==================== 查询接口 ====================
@@ -185,5 +245,10 @@ public class VisionCollector {
 
     public static VisionEntityStore getEntityStore() {
         return entityStore;
+    }
+
+    /** v2.31：群系 cell 存储访问。 */
+    public static VisionBiomeStore getBiomeStore() {
+        return biomeStore;
     }
 }

@@ -39,9 +39,10 @@ public class VisionApi {
      *           "cameraPos", "timestamp",
      *           "visibleBlockCount", "blockEntityCount", "entityCount",
      *           "blockEntities":[ {pos, typeId, block, state, nbt} ],
-     *           "entities":[ {id, uuid, type, pos, rotation, motion, onGround, health} ],
+     *           "entities":[ {id, uuid, type, pos, rotation, motion, onGround, health,
+     *                        item?(v2.34 掉落物), content?(v2.35 展示实体薄摘要)} ],
      *           "storeStats":{ "terrain":{blocks}, "blockEntities":{new,updated,skipped},
-     *                          "entities":{entities} } }
+     *                          "entities":{entities}, "biomes":{cells,added}(v2.31) } }
      */
     private static Map<String, Object> snapshot() {
         DepthCapture.requestCapture();
@@ -128,6 +129,8 @@ public class VisionApi {
         resp.put("nonSkyPixels", hits.nonSkyPixels());
         resp.put("cameraPos", snap.cameraPos().x() + "," + snap.cameraPos().y() + "," + snap.cameraPos().z());
         resp.put("timestamp", snap.timestamp());
+        // v2.32：agent 当前维 id（与 terrain.nbt 顶层 currentDimension 一致，语义同 store 落盘）。
+        resp.put("dimension", result.value.dimension());
         resp.put("visibleBlockCount", result.value.visibleBlockCount());
         resp.put("blockEntityCount", result.value.blockEntityCount());
         resp.put("entityCount", result.value.entityCount());
@@ -155,6 +158,20 @@ public class VisionApi {
             m.put("motion", List.of(e.vx(), e.vy(), e.vz()));
             m.put("onGround", e.onGround());
             m.put("health", e.health());
+            // v2.34（掉落物记忆）：带 item tag 的 minecraft:item → 暴露物品 id + 堆叠数；
+            // components 等详情仍走 Tier-2 vision/entity，保持快照轻量。
+            if (e.item() != null) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("id", e.item().getStringOr("id", ""));
+                item.put("count", e.item().getIntOr("count", 1));
+                m.put("item", item);
+            }
+            // v2.35（决策点 2 渠道 B）：展示实体薄内容摘要（item/equipment/text/blockId 等，
+            // DecorativeSummary 在采集帧与 payload 同帧构建）。仅白名单展示实体且摘要成功时有。
+            // 记忆侧复原用的是持久化的整份 payload（entities.nbt "nbt" 键），本字段纯给 agent 看。
+            if (e.content() != null) {
+                m.put("content", nbtToJson(e.content()));
+            }
             entities.add(m);
         }
         resp.put("entities", entities);
@@ -163,6 +180,8 @@ public class VisionApi {
         storeStats.put("terrain", result.value.terrainStats());
         storeStats.put("blockEntities", result.value.blockEntityStats());
         storeStats.put("entities", result.value.entityStats());
+        // v2.31：生物群系 cell 统计（union 总数 + 本帧新增；新增>0 意味着 biomes.nbt 有更新）
+        storeStats.put("biomes", result.value.biomeStats());
         resp.put("storeStats", storeStats);
         return resp;
     }

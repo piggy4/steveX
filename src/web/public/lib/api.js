@@ -62,6 +62,59 @@ export async function fetchModMethods() {
   return (data && data.methods) || []
 }
 
+// ── 批量时序 API（设计 docs/批量时序API设计方案.md v1）──
+// 启动一段有序步骤序列：{steps:[{method,params?,waitMs?}|{waitMs}], stopOnError?}，
+// 8090 服务端后台串行执行（步前 waitMs 延时），立即返回 batchId。
+export async function startBatch(steps, options = {}) {
+  try {
+    const res = await fetch('/api/mod/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ steps }),
+      signal: options.signal
+    })
+    const data = await res.json().catch(() => null)
+    if (!data || typeof data !== 'object') {
+      return { ok: false, error: `Invalid server response (HTTP ${res.status})` }
+    }
+    if (!data.ok) {
+      return { ok: false, error: data.error || `HTTP ${res.status}`, runningId: data.runningId }
+    }
+    return { ok: true, batchId: data.batchId }
+  } catch (err) {
+    return {
+      ok: false,
+      cancelled: err && err.name === 'AbortError',
+      error: err && err.name === 'AbortError' ? 'Request cancelled' : `Request failed: ${err.message || String(err)}`
+    }
+  }
+}
+
+// 查询 batch 进度。未知/已过期 id → 返回 null（404）。
+export async function getBatch(batchId) {
+  try {
+    const res = await fetch(`/api/mod/batch/${encodeURIComponent(batchId)}`)
+    if (!res.ok) return null
+    const data = await res.json()
+    return (data && data.ok && data.batch) || null
+  } catch (_) {
+    return null
+  }
+}
+
+// 中止某 batch（等待中的步立即取消；在途 mod 调用返回后停）。
+export async function stopBatch(batchId) {
+  try {
+    const res = await fetch(`/api/mod/batch/${encodeURIComponent(batchId)}/stop`, {
+      method: 'POST'
+    })
+    const data = await res.json().catch(() => null)
+    return (data && data.ok) ? { ok: true } : { ok: false, error: (data && data.error) || `HTTP ${res.status}` }
+  } catch (err) {
+    return { ok: false, error: `Request failed: ${err.message || String(err)}` }
+  }
+}
+
 // 获取 mod 连接状态（GET /api/mod/status）
 export async function fetchModStatus() {
   const res = await fetch('/api/mod/status')

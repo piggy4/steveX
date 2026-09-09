@@ -5,9 +5,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtAccounter;
@@ -31,6 +33,16 @@ import org.slf4j.LoggerFactory;
  * 另在 {@link #place} 加世界权威校验兜底（防止重启 / 文件残留导致"石头里的箱子实体"类 ghosting）。
  *
  * <p>坐标处理：不做任何平移，NBT 里的方块坐标严格对应世界坐标。
+ *
+ * <p>v2.32（世界类型区分，见 docs/世界类型区分与镜像复原设计方案.md §5）：
+ * <ul>
+ *   <li>源文件（{@code block_entities.nbt}）按维分桶；已应用表 / 指纹 / 昼夜对齐状态<b>按维隔离</b>，
+ *       每 tick 只对 {@code level.dimension()} 桶做 diff/apply（其它维桶不动，镜像切回时再 apply）；</li>
+ *   <li>agent 姿态（位置/朝向/FOV）与昼夜时间随<b>该维桶</b>记录——读 pose 从当前维桶读、不再读顶层；
+ *       姿态变化 → 返回 {@link AgentPose} 触发传送（换维首次驱动时即使姿态数值相同也会因维不同而触发）；</li>
+ *   <li>同一文件内容（同一读取代际）同一维只交付一次 pose / 内容，换维由 {@link MemoryWorldManager}
+ *       先经 {@link #currentPoseFor} 拿到目标维姿态做跨维传送、本类随后把该维内容铺到已加载区块。</li>
+ * </ul>
  */
 public class MemoryRestorer {
 
@@ -53,45 +65,50 @@ public class MemoryRestorer {
     /** v2.18：agent 位置比较容差（1 mm），过滤双精度坐标下的浮点抖动。 */
     private static final double POS_EPSILON = 1e-3;
 
-    /** 已应用的世界状态：方块坐标 -> 内容指纹（block+state+nbt）。 */
-    private final Map<BlockPos, String> applied = new LinkedHashMap<>();
+    /** v2.32：已应用的世界状态按维隔离：维度 → 方块坐标 → 内容指纹（block+state+nbt）。累积，只增不删。 */
+    private final Map<String, Map<BlockPos, String>> appliedByDim = new LinkedHashMap<>();
 
-    /** 已应用版本的源文件内容指纹；为 null 表示需要重新读取。 */
-    private String appliedFingerprint = null;
+    /** v2.32：已应用版本的源文件内容指纹按维；该维未出现过（null）→ 需要应用。 */
+    private final Map<String, String> appliedFingerprintByDim = new LinkedHashMap<>();
+
+    /** v2.32：昼夜对齐状态按维（最近一次应用该维的 dayTime；旧文件无 → 无键 = -1 语义不应用）。 */
+    private final Map<String, Long> lastDayTimeByDim = new LinkedHashMap<>();
+
+    /** v2.32：最近一次成功读取解析出的各维桶（维度 → blocks + pose + dayTime），跨 tick 缓存。 */
+    private Map<String, DimData> parsedBuckets = Map.of();
+
+    /** v2.32：一次读取代际内已向调用方交付过数据的维集合。 */
+    private final Set<String> servedThisRead = new HashSet<>();
 
     /** v2.13 mtime 门控（§7.4）：最近一次成功读取的源文件 mtime；未变 → 不读不解压。 */
     private FileTime lastMtime;
-
-    /** v2.15：最近一次触发传送的 agent 视角（位置 + 朝向）；未变 → 不重复传送。 */
-    private AgentPose lastPose;
-
-    /** v2.21：最近一次应用的世界时间（dayTime）；旧文件无该字段时 -1（哨兵）。 */
-    private long lastDayTime = -1L;
 
     private int ticks;
     private int missingSourceCounter;
 
     /** 服务器（世界）启动 / 切换时调用，清空已应用状态。 */
     public void onServerStart() {
-        applied.clear();
-        appliedFingerprint = null;
+        appliedByDim.clear();
+        appliedFingerprintByDim.clear();
+        lastDayTimeByDim.clear();
+        parsedBuckets = Map.of();
+        servedThisRead.clear();
         lastMtime = null;
-        lastPose = null;
-        lastDayTime = -1L;
         ticks = 0;
         LOGGER.info("[MemoryWorld] Restorer ready");
     }
 
     /** 命令触发：强制重新读取源文件。须同时清 mtime 门控，否则 mtime 相同会被提前拦下。 */
     public void forceRefresh() {
-        appliedFingerprint = null;
+        appliedFingerprintByDim.clear();
+        parsedBuckets = Map.of();
+        servedThisRead.clear();
         lastMtime = null;
-        lastPose = null;
     }
 
     /**
      * v2.10：清除指定位置的旧方块实体记录（由 {@link TerrainRestorer} 在方块类型改变、且新方块
-     * 无方块实体时调用）。
+     * 无方块实体时调用）。v2.32 增加维度参数——只清<b>该维</b>已应用表里的记录。
      *
      * <p>{@code block_entities.nbt} 增量合并永不删除旧条目 → 若不清除，重启后该位置的旧 BE 会被
      * 重新放回世界（"石头里的箱子实体"类 ghosting）。世界内旧 BE 已由 TerrainRestorer 的 setBlock
@@ -100,15 +117,26 @@ public class MemoryRestorer {
      *
      * <p>该位置没有已应用记录时是廉价 no-op。
      */
-    public void clearStale(final BlockPos pos) {
-        applied.remove(pos);
+    public void clearStale(final String dimension, final BlockPos pos) {
+        Map<BlockPos, String> applied = appliedByDim.get(dimension);
+        if (applied != null) applied.remove(pos);
     }
 
     /**
-     * 驱动一次轮询：源文件 mtime 变化时读取并（按需）同步方块实体。
+     * v2.32：指定维最后一次记录 / 缓存的 agent 姿态（换维时 {@link MemoryWorldManager} 先取它做
+     * 跨维传送，目标 = 文件该维桶顶层 agentPos）。该维无数据 / 无姿态 → null。
+     */
+    public AgentPose currentPoseFor(final String dimension) {
+        DimData data = parsedBuckets.get(dimension);
+        return data == null ? null : data.pose;
+    }
+
+    /**
+     * 驱动一次轮询：源文件 mtime 变化时读取（解析全文件各维桶）；之后只对<b>当前 level 维</b>桶做
+     * 差异应用，并在有数据时返回该维的 agent 姿态（供 manager 决定是否传送——manager 负责与上次
+     * 姿态 / 维度比较，本类每个"新内容代际 × 首次驱动该维"返回一次）。
      *
-     * <p>v2.15：返回值用于「跟随观察者视角」——当文件里的 agent 位置/朝向较上次变化时，
-     * 返回新的 {@link AgentPose} 供 {@code MemoryWorldManager} 传送玩家；未变化 / 未更新时
+     * <p>返回值用于「跟随观察者视角」——agent 位置/朝向/维变化时 manager 据此传送玩家；无数据时
      * 返回 null。
      */
     public AgentPose tick(final ServerLevel level) {
@@ -123,8 +151,9 @@ public class MemoryRestorer {
                         + "Set 'sourceFile' in config/stevex-test/memory.json.",
                         config.gameDirectory());
             }
-            appliedFingerprint = null;
             lastMtime = null; // 文件重新出现后自然触发首次读取
+            servedThisRead.clear();
+            appliedFingerprintByDim.clear();
             return null;
         }
         missingSourceCounter = 0;
@@ -138,43 +167,48 @@ public class MemoryRestorer {
             LOGGER.warn("[MemoryWorld] Failed to stat source file {}: {}", source, e.getMessage());
             return null;
         }
-        if (mtime.equals(lastMtime)) return null;
-
-        FileData current = readFile(source);
-        if (current == null) return null; // 写入半截等 → 保留旧 mtime，下轮重试
-
-        lastMtime = mtime; // 只在成功读取后才推进
-
-        // v2.21：世界时间对齐（§7.10）——dayTime >= 0（旧文件无该字段 → -1 哨兵）且较上次变化时
-        // setDayTime。与内容指纹 / 视角跟随解耦：agent 站桩不动时，方块与视角不变，但昼夜仍随每次
-        // 采集对齐。与 advance_time=false 不冲突——setDayTime 直接设值，不依赖 tickTime 自增。
-        if (current.dayTime() >= 0 && current.dayTime() != lastDayTime) {
-            level.setDayTime(current.dayTime());
-            lastDayTime = current.dayTime();
-            LOGGER.info("[MemoryWorld] Day time synced to {} ({})", current.dayTime(),
-                    current.dayTime() % 24000L);
+        if (!mtime.equals(lastMtime)) {
+            Map<String, DimData> parsed = readFile(source);
+            if (parsed == null) return null; // 写入半截等 → 保留旧 mtime，下轮重试
+            lastMtime = mtime; // 只在成功读取后才推进
+            parsedBuckets = parsed;
+            servedThisRead.clear();
         }
 
-        // 内容指纹变化 → 同步方块实体；与下面的视角跟随解耦（视角变化不要求方块实体变化）
-        String fp = fingerprint(current.blocks());
-        if (!fp.equals(appliedFingerprint)) {
-            appliedFingerprint = fp;
-            sync(level, current.blocks());
+        final String dim = level.dimension().identifier().toString();
+        final DimData data = parsedBuckets.get(dim);
+        if (data == null) return null; // 该维还没有数据
+        if (servedThisRead.contains(dim)) return null; // 本代际已交付
+        servedThisRead.add(dim);
+
+        // v2.21：世界时间对齐（§7.10），按维——只对当前维桶的 dayTime（采集时该维世界时间）对齐；
+        // 与 advance_time=false 不冲突——setDayTime 直接设值，不依赖 tickTime 自增。
+        if (data.dayTime >= 0) {
+            Long last = lastDayTimeByDim.get(dim);
+            if (last == null || last != data.dayTime) {
+                level.setDayTime(data.dayTime);
+                lastDayTimeByDim.put(dim, data.dayTime);
+                LOGGER.info("[MemoryWorld] Day time synced [{}] to {} ({})", dim, data.dayTime,
+                        data.dayTime % 24000L);
+            }
         }
 
-        // v2.15：agent 视角变化 → 返回新 pose 触发传送（与内容指纹解耦）
-        AgentPose pose = current.pose();
-        if (pose != null && !samePose(lastPose, pose)) {
-            lastPose = pose;
-            return pose;
+        // 内容指纹变化 → 同步方块实体
+        String fp = fingerprint(data.blocks);
+        if (!fp.equals(appliedFingerprintByDim.get(dim))) {
+            appliedFingerprintByDim.put(dim, fp);
+            sync(level, dim, data.blocks);
         }
-        return null;
+
+        // agent 视角：交付当前维桶记录的姿态，是否真正传送由 manager 与上次姿态 / 维度比较后决定
+        return data.pose;
     }
 
     // ==================== 差异计算与应用 ====================
 
-    private void sync(final ServerLevel level, final Map<BlockPos, StoredBlock> current) {
+    private void sync(final ServerLevel level, final String dimension, final Map<BlockPos, StoredBlock> current) {
         if (current.isEmpty()) return; // 空记忆，无需放置
+        Map<BlockPos, String> applied = appliedByDim.computeIfAbsent(dimension, k -> new LinkedHashMap<>());
 
         Map<BlockPos, String> next = new LinkedHashMap<>();
         List<BlockPos> toPlace = new ArrayList<>();
@@ -197,7 +231,7 @@ public class MemoryRestorer {
         applied.clear();
         applied.putAll(next);
 
-        LOGGER.info("[MemoryWorld] Sync: +{} placed, total {} entries", placed, applied.size());
+        LOGGER.info("[MemoryWorld] Sync [{}]: +{} placed, total {} entries", dimension, placed, applied.size());
     }
 
     private boolean place(final ServerLevel level, final BlockPos pos, final StoredBlock sb) {
@@ -240,24 +274,33 @@ public class MemoryRestorer {
 
     // ==================== 读取源文件 ====================
 
-    private FileData readFile(final Path source) {
+    /**
+     * 读取整份文件 → 各维 (blocks + pose + dayTime)。旧版单维文件经 {@link WorldsFile#read} 自动
+     * 包成 overworld 桶 → 姿态 / 昼夜字段在旧文件顶层、恰为该"桶"的顶层，解析路径一致。
+     */
+    private Map<String, DimData> readFile(final Path source) {
         try {
             CompoundTag root = NbtIo.readCompressed(source, NbtAccounter.unlimitedHeap());
-            if (root == null) return new FileData(Map.of(), null, -1L);
+            if (root == null) return Map.of();
 
-            CompoundTag beTag = root.getCompoundOrEmpty(KEY_BLOCK_ENTITIES);
-            Map<BlockPos, StoredBlock> out = new LinkedHashMap<>();
-            for (String key : beTag.keySet()) {
-                BlockPos pos = parsePos(key);
-                if (pos == null) continue;
-
-                CompoundTag entry = beTag.getCompoundOrEmpty(key);
-                String blockId = entry.getStringOr(KEY_BLOCK, "");
-                Map<String, String> state = readState(entry.getCompoundOrEmpty(KEY_STATE));
-                CompoundTag nbt = entry.getCompoundOrEmpty(KEY_NBT);
-                out.put(pos, new StoredBlock(blockId, state, nbt));
+            WorldsFile.Result r = WorldsFile.read(root);
+            Map<String, DimData> out = new LinkedHashMap<>();
+            for (Map.Entry<String, CompoundTag> e : r.worlds().entrySet()) {
+                CompoundTag bucket = e.getValue();
+                Map<BlockPos, StoredBlock> blocks = new LinkedHashMap<>();
+                CompoundTag beTag = bucket.getCompoundOrEmpty(KEY_BLOCK_ENTITIES);
+                for (String key : beTag.keySet()) {
+                    BlockPos pos = parsePos(key);
+                    if (pos == null) continue;
+                    CompoundTag entry = beTag.getCompoundOrEmpty(key);
+                    String blockId = entry.getStringOr(KEY_BLOCK, "");
+                    Map<String, String> state = readState(entry.getCompoundOrEmpty(KEY_STATE));
+                    CompoundTag nbt = entry.getCompoundOrEmpty(KEY_NBT);
+                    blocks.put(pos, new StoredBlock(blockId, state, nbt));
+                }
+                out.put(e.getKey(), new DimData(blocks, readPose(bucket), bucket.getLongOr(KEY_WORLD_TIME, -1L)));
             }
-            return new FileData(out, readPose(root), root.getLongOr(KEY_WORLD_TIME, -1L));
+            return out;
         } catch (IOException e) {
             LOGGER.warn("[MemoryWorld] Failed to read source file {}: {}", source, e.getMessage());
             return null;
@@ -265,7 +308,7 @@ public class MemoryRestorer {
     }
 
     /**
-     * 从文件顶层读取 agent 视角（眼睛位置 + yaw/pitch + 基础视场角）。
+     * 从桶顶层读取 agent 视角（眼睛位置 + yaw/pitch + 基础视场角）。
      *
      * <p>v2.18：位置改为双精度眼睛坐标；旧整数格式（如 {@code "100,64,96"}）仍可解析
      * （{@link #parseVec3} 用 {@code Double.parseDouble} 兼容）。旧文件无
@@ -273,17 +316,18 @@ public class MemoryRestorer {
      * v2.19：旧文件无 {@code agentFov} → FOV 填 {@link #FOV_MISSING}，沿用玩家当前视场角。
      * 位置缺失 / 解析失败 → 返回 null。
      */
-    private static AgentPose readPose(final CompoundTag root) {
-        Vec3 pos = parseVec3(root.getStringOr(KEY_AGENT_POS, ""));
+    private static AgentPose readPose(final CompoundTag bucket) {
+        Vec3 pos = parseVec3(bucket.getStringOr(KEY_AGENT_POS, ""));
         if (pos == null) return null;
-        float yaw = root.contains(KEY_AGENT_YAW) ? root.getFloatOr(KEY_AGENT_YAW, 0.0f) : Float.NaN;
-        float pitch = root.contains(KEY_AGENT_PITCH) ? root.getFloatOr(KEY_AGENT_PITCH, 0.0f) : Float.NaN;
-        int fov = root.contains(KEY_AGENT_FOV) ? root.getIntOr(KEY_AGENT_FOV, FOV_MISSING) : FOV_MISSING;
+        float yaw = bucket.contains(KEY_AGENT_YAW) ? bucket.getFloatOr(KEY_AGENT_YAW, 0.0f) : Float.NaN;
+        float pitch = bucket.contains(KEY_AGENT_PITCH) ? bucket.getFloatOr(KEY_AGENT_PITCH, 0.0f) : Float.NaN;
+        int fov = bucket.contains(KEY_AGENT_FOV) ? bucket.getIntOr(KEY_AGENT_FOV, FOV_MISSING) : FOV_MISSING;
         return new AgentPose(pos, yaw, pitch, fov);
     }
 
-    /** 两个 agent 视角是否「等价」：位置差 < {@link #POS_EPSILON}，且 yaw/pitch 差在 0.5° 内（过滤抖动）。 */
-    private static boolean samePose(final AgentPose a, final AgentPose b) {
+    /** 两个 agent 视角是否「等价」（供 manager 决定是否真的需要传送，见 {@link MemoryWorldManager}）：
+     *  位置差 < {@link #POS_EPSILON}，且 yaw/pitch 差在 0.5° 内（过滤抖动）。 */
+    static boolean samePose(final AgentPose a, final AgentPose b) {
         if (a == b) return true;
         if (a == null || b == null) return false;
         return posEquals(a.pos(), b.pos())
@@ -366,8 +410,8 @@ public class MemoryRestorer {
     public record AgentPose(Vec3 pos, float yaw, float pitch, int fov) {}
 
     /**
-     * 一次文件读取结果：方块实体表 + agent 视角 + 世界时间（dayTime，v2.21）。
-     * dayTime 为 {@code -1} 表示旧文件无该字段（不应用时间对齐）。
+     * 一个维桶的一次读取结果：方块实体表 + agent 视角 + 世界时间（dayTime，v2.21）。
+     * dayTime 为 {@code -1} 表示该维无该字段（不应用时间对齐）。
      */
-    private record FileData(Map<BlockPos, StoredBlock> blocks, AgentPose pose, long dayTime) {}
+    private record DimData(Map<BlockPos, StoredBlock> blocks, AgentPose pose, long dayTime) {}
 }

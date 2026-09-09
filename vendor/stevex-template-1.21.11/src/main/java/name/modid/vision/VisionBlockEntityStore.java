@@ -15,7 +15,7 @@ import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 
 /**
- * 方块实体 NBT 持久化存储 —— 基于文件的增量保存。
+ * 方块实体 NBT 持久化存储 —— 基于文件的增量保存（跨时间累积 union，按维分桶）。
  *
  * <p>行为：
  * <ul>
@@ -24,25 +24,32 @@ import org.slf4j.Logger;
  *   <li>NBT 已变化  → 更新存储</li>
  * </ul>
  *
+ * <p>v2.32（世界类型区分，见 docs/世界类型区分与镜像复原设计方案.md）：内容按<b>维度</b>分桶——
+ * 内存 {@code byDim: Map<dim, Map<posKey, StoredEntry>>}，agent 姿态字段同样每维一份
+ * （{@code poseByDim}）。换维采集只更新自己那维的子图，其余维条目原样保留，坐标天然不再跨维碰撞。
+ * 文件顶层 {@code { "currentDimension", "worlds": { <dim>: { agentPos..., blockEntities } } }}。
+ *
  * <p>文件格式（NBT）：
  * <pre>{@code
  * {
- *   "agentPos": "100.5,65.62,96.0",
- *   "agentYaw": -45.0,
- *   "agentPitch": 10.0,
- *   "agentFov": 70,
- *   "dayTime": 6000,
- *   "blockEntities": {
- *     "128,64,-32": { "typeId": "minecraft:chest", "block": "minecraft:chest",
- *                     "state": {"facing":"east","waterlogged":"false"},
- *                     "nbt": {...}, "timestamp": 1720000000 },
- *     ...
+ *   "currentDimension": "minecraft:overworld",
+ *   "worlds": {
+ *     "minecraft:overworld": {
+ *       "agentPos": "100.5,65.62,96.0",
+ *       "agentYaw": -45.0,
+ *       "agentPitch": 10.0,
+ *       "agentFov": 70,
+ *       "dayTime": 6000,
+ *       "blockEntities": {
+ *         "128,64,-32": { "typeId": "minecraft:chest", "block": "minecraft:chest",
+ *                         "state": {"facing":"east","waterlogged":"false"},
+ *                         "nbt": {...}, "timestamp": 1720000000 }, ...
+ *       }
+ *     },
+ *     "minecraft:the_nether": { ... }
  *   }
  * }
  * }</pre>
- *
- * <p>{@code agentPos} 是最后一次采集时观察者的相机（眼睛）双精度坐标
- * （"x,y,z"，游戏精度），只维护一份顶层记录，随每次保存刷新。
  */
 public class VisionBlockEntityStore {
 
@@ -62,21 +69,14 @@ public class VisionBlockEntityStore {
     private static final String KEY_WORLD_TIME = "dayTime";
     private static final String KEY_TIMESTAMP = "timestamp";
 
-    /** 内存中缓存的全部已存储方块实体。key = "x,y,z" */
-    private final Map<String, StoredEntry> entries = new LinkedHashMap<>();
+    /** v2.32：维度 → 该维已存储方块实体（key = "x,y,z"）。外层保留插入序（先访问的维在前）。 */
+    private final Map<String, Map<String, StoredEntry>> byDim = new LinkedHashMap<>();
 
-    /** 最后一次采集时 agent 的相机（眼睛）双精度坐标（"x,y,z"），空串表示未知。 */
-    private String agentPos = "";
+    /** v2.32：维度 → 该维最后一次采集时的 agent 姿态（agentPos/…/dayTime），随该维桶持久化。 */
+    private final Map<String, Pose> poseByDim = new LinkedHashMap<>();
 
-    /** 最后一次采集时 agent 的朝向（度）；随文件持久化（v2.15）。 */
-    private float agentYaw = 0.0f;
-    private float agentPitch = 0.0f;
-
-    /** 最后一次采集时 agent 的基础视场角（整数度）；随文件持久化（v2.19）。 */
-    private int agentFov = 0;
-
-    /** 最后一次采集时世界时间（dayTime，游戏时间单位；未知时 -1）；随文件持久化（v2.21，§7.10）。 */
-    private long dayTime = -1L;
+    /** v2.32：最近一次写入所属维（文件顶层 currentDimension）。 */
+    private String currentDimension = WorldsFile.LEGACY_DIMENSION;
 
     private final Path filePath;
     private boolean dirty;
@@ -89,8 +89,8 @@ public class VisionBlockEntityStore {
     // ==================== 公开接口 ====================
 
     /**
-     * 将一批快照与已有存储对比，仅写入新增或变化的条目；同时把本次采集时
-     * agent 所在的坐标记录为文件顶层的最新 {@code agentPos}。
+     * 将一批快照与已有存储对比，仅写入新增或变化的条目（限当前维子图）；同时把本次采集时
+     * agent 所在坐标记录为<b>当前维</b>桶的最新 {@code agentPos}。
      *
      * @param snapshots 当前帧收集到的方块实体快照
      * @param agentPos 采集时观察者的相机（眼睛）双精度坐标（游戏精度），可为 null
@@ -98,6 +98,7 @@ public class VisionBlockEntityStore {
      * @param agentPitch 采集时观察者俯仰朝向（度）
      * @param agentFov 采集时观察者基础视场角（整数度，游戏精度）
      * @param worldTime 采集时世界时间（dayTime，游戏时间单位；无世界时 -1，v2.21）
+     * @param dimensionId v2.32：采集时所在维 id，决定更新哪个维的子图 / 姿态
      * @return 统计信息 { "new": n, "updated": n, "skipped": n }
      */
     public Map<String, Integer> sync(final Map<BlockPos, VisionCollector.BlockEntitySnapshot> snapshots,
@@ -105,32 +106,28 @@ public class VisionBlockEntityStore {
                                      final float agentYaw,
                                      final float agentPitch,
                                      final int agentFov,
-                                     final long worldTime) {
+                                     final long worldTime,
+                                     final String dimensionId) {
         int added = 0, updated = 0, skipped = 0;
 
-        // 顶层 agent 坐标：只在发生变化时标记 dirty，从而刷新文件
+        // v2.32：换维强制标记 dirty——确保新维首次出现（即使内容/姿态恰好一致）也会落盘建立桶。
+        if (!dimensionId.equals(currentDimension)) {
+            currentDimension = dimensionId;
+            dirty = true;
+        }
+        // 当前维顶层姿态：只在发生变化时标记 dirty，从而刷新文件
+        Pose pose = poseByDim.get(dimensionId);
         String newAgentPos = agentPosKey(agentPos);
-        if (!newAgentPos.equals(this.agentPos)) {
-            this.agentPos = newAgentPos;
-            dirty = true;
-        }
-        // v2.15：顶层 agent 朝向，变化时同样标记 dirty（记忆世界据此跟随观察者视角）
-        if (Math.abs(agentYaw - this.agentYaw) > 0.001f || Math.abs(agentPitch - this.agentPitch) > 0.001f) {
-            this.agentYaw = agentYaw;
-            this.agentPitch = agentPitch;
-            dirty = true;
-        }
-        // v2.19：顶层 agent 基础视场角，变化时标记 dirty（记忆世界据此同步视场角）
-        if (agentFov != this.agentFov) {
-            this.agentFov = agentFov;
-            dirty = true;
-        }
-        // v2.21：顶层世界时间，变化时标记 dirty（§7.10；世界静止时恒等，不触发无谓落盘）
-        if (worldTime != this.dayTime) {
-            this.dayTime = worldTime;
+        if (pose == null || !pose.agentPos.equals(newAgentPos)
+                || Math.abs(agentYaw - pose.agentYaw) > 0.001f
+                || Math.abs(agentPitch - pose.agentPitch) > 0.001f
+                || agentFov != pose.agentFov
+                || worldTime != pose.dayTime) {
+            poseByDim.put(dimensionId, new Pose(newAgentPos, agentYaw, agentPitch, agentFov, worldTime));
             dirty = true;
         }
 
+        Map<String, StoredEntry> entries = byDim.computeIfAbsent(dimensionId, k -> new LinkedHashMap<>());
         for (var entry : snapshots.entrySet()) {
             BlockPos pos = entry.getKey();
             VisionCollector.BlockEntitySnapshot snapshot = entry.getValue();
@@ -174,19 +171,20 @@ public class VisionBlockEntityStore {
         return Map.of("new", added, "updated", updated, "skipped", skipped);
     }
 
-    /** 存储中已有的方块实体总数。 */
+    /** 存储中已有的方块实体总数（跨全部维）。 */
     public int size() {
-        return entries.size();
+        int total = 0;
+        for (Map<String, StoredEntry> entries : byDim.values()) {
+            total += entries.size();
+        }
+        return total;
     }
 
-    /** 清除全部存储（内存 + 文件）。 */
+    /** 清除全部存储（内存 + 文件，跨全部维）。 */
     public void clear() {
-        entries.clear();
-        agentPos = "";
-        agentYaw = 0.0f;
-        agentPitch = 0.0f;
-        agentFov = 0;
-        dayTime = -1L;
+        byDim.clear();
+        poseByDim.clear();
+        currentDimension = WorldsFile.LEGACY_DIMENSION;
         try {
             Files.deleteIfExists(filePath);
         } catch (IOException e) {
@@ -216,51 +214,70 @@ public class VisionBlockEntityStore {
             CompoundTag root = NbtIo.readCompressed(filePath, NbtAccounter.unlimitedHeap());
             if (root == null) return;
 
-            agentPos = root.getStringOr(KEY_AGENT_POS, "");
-            agentYaw = root.getFloatOr(KEY_AGENT_YAW, 0.0f);
-            agentPitch = root.getFloatOr(KEY_AGENT_PITCH, 0.0f);
-            agentFov = root.getIntOr(KEY_AGENT_FOV, 0);
-            dayTime = root.getLongOr(KEY_WORLD_TIME, -1L);
-            CompoundTag beTag = root.getCompoundOrEmpty(KEY_BLOCK_ENTITIES);
-            for (String key : beTag.keySet()) {
-                CompoundTag entry = beTag.getCompoundOrEmpty(key);
-                entries.put(key, new StoredEntry(
-                        entry.getCompoundOrEmpty(KEY_NBT),
-                        entry.getStringOr(KEY_TYPE_ID, ""),
-                        entry.getStringOr(KEY_BLOCK, ""),
-                        propsFromNbt(entry.getCompoundOrEmpty(KEY_STATE)),
-                        entry.getLongOr(KEY_TIMESTAMP, 0L)
+            WorldsFile.Result r = WorldsFile.read(root);
+            currentDimension = r.currentDimension();
+            for (Map.Entry<String, CompoundTag> e : r.worlds().entrySet()) {
+                String dim = e.getKey();
+                CompoundTag bucket = e.getValue();
+                Map<String, StoredEntry> entries = new LinkedHashMap<>();
+                CompoundTag beTag = bucket.getCompoundOrEmpty(KEY_BLOCK_ENTITIES);
+                for (String key : beTag.keySet()) {
+                    CompoundTag entry = beTag.getCompoundOrEmpty(key);
+                    entries.put(key, new StoredEntry(
+                            entry.getCompoundOrEmpty(KEY_NBT),
+                            entry.getStringOr(KEY_TYPE_ID, ""),
+                            entry.getStringOr(KEY_BLOCK, ""),
+                            propsFromNbt(entry.getCompoundOrEmpty(KEY_STATE)),
+                            entry.getLongOr(KEY_TIMESTAMP, 0L)
+                    ));
+                }
+                byDim.put(dim, entries);
+                poseByDim.put(dim, new Pose(
+                        bucket.getStringOr(KEY_AGENT_POS, ""),
+                        bucket.getFloatOr(KEY_AGENT_YAW, 0.0f),
+                        bucket.getFloatOr(KEY_AGENT_PITCH, 0.0f),
+                        bucket.getIntOr(KEY_AGENT_FOV, 0),
+                        bucket.getLongOr(KEY_WORLD_TIME, -1L)
                 ));
             }
-            LOGGER.info("[Vision] Loaded {} stored block entities from {}", entries.size(), filePath);
+            LOGGER.info("[Vision] Loaded {} stored block entities across {} dimension(s) from {}",
+                    size(), byDim.size(), filePath);
         } catch (IOException e) {
             LOGGER.error("[Vision] Failed to load store file: {}", e.getMessage());
         }
     }
 
     private void save() {
-        CompoundTag root = new CompoundTag();
-        CompoundTag beTag = new CompoundTag();
-
-        for (var e : entries.entrySet()) {
-            CompoundTag entry = new CompoundTag();
-            entry.putString(KEY_TYPE_ID, e.getValue().typeId);
-            entry.putString(KEY_BLOCK, e.getValue().blockId);
-            entry.put(KEY_STATE, propsToNbt(e.getValue().stateProps));
-            entry.put(KEY_NBT, e.getValue().nbt);
-            entry.putLong(KEY_TIMESTAMP, e.getValue().timestamp);
-            beTag.put(e.getKey(), entry);
+        Map<String, CompoundTag> buckets = new LinkedHashMap<>();
+        for (var de : byDim.entrySet()) {
+            String dim = de.getKey();
+            Pose pose = poseByDim.get(dim);
+            CompoundTag bucket = new CompoundTag();
+            if (pose != null) {
+                bucket.putString(KEY_AGENT_POS, pose.agentPos);
+                bucket.putFloat(KEY_AGENT_YAW, pose.agentYaw);
+                bucket.putFloat(KEY_AGENT_PITCH, pose.agentPitch);
+                bucket.putInt(KEY_AGENT_FOV, pose.agentFov);
+                bucket.putLong(KEY_WORLD_TIME, pose.dayTime);
+            }
+            CompoundTag beTag = new CompoundTag();
+            for (var e : de.getValue().entrySet()) {
+                CompoundTag entry = new CompoundTag();
+                entry.putString(KEY_TYPE_ID, e.getValue().typeId);
+                entry.putString(KEY_BLOCK, e.getValue().blockId);
+                entry.put(KEY_STATE, propsToNbt(e.getValue().stateProps));
+                entry.put(KEY_NBT, e.getValue().nbt);
+                entry.putLong(KEY_TIMESTAMP, e.getValue().timestamp);
+                beTag.put(e.getKey(), entry);
+            }
+            bucket.put(KEY_BLOCK_ENTITIES, beTag);
+            buckets.put(dim, bucket);
         }
-        root.putString(KEY_AGENT_POS, agentPos);
-        root.putFloat(KEY_AGENT_YAW, agentYaw);
-        root.putFloat(KEY_AGENT_PITCH, agentPitch);
-        root.putInt(KEY_AGENT_FOV, agentFov);
-        root.putLong(KEY_WORLD_TIME, dayTime);
-        root.put(KEY_BLOCK_ENTITIES, beTag);
 
         try {
-            NbtIo.writeCompressed(root, filePath);
-            LOGGER.debug("[Vision] Saved {} block entities to {}", entries.size(), filePath);
+            NbtIo.writeCompressed(WorldsFile.wrap(currentDimension, buckets), filePath);
+            LOGGER.debug("[Vision] Saved {} block entities across {} dimension(s) to {}",
+                    size(), byDim.size(), filePath);
         } catch (IOException ex) {
             LOGGER.error("[Vision] Failed to save store file: {}", ex.getMessage());
         }
@@ -309,6 +326,9 @@ public class VisionBlockEntityStore {
     }
 
     // ==================== 内部数据结构 ====================
+
+    /** 某维最后一次采集时的 agent 姿态（该维桶的顶层字段）。 */
+    private record Pose(String agentPos, float agentYaw, float agentPitch, int agentFov, long dayTime) {}
 
     private static class StoredEntry {
         CompoundTag nbt;

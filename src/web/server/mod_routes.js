@@ -1,4 +1,5 @@
 const { METHODS, METHOD_NAMES } = require('../../mod/methods')
+const { registerBatchRoutes } = require('./mod_batch')
 
 /**
  * 采集端 mod WS API 透传路由（steveX_改进方案.md §五）。
@@ -13,6 +14,10 @@ const { METHODS, METHOD_NAMES } = require('../../mod/methods')
  */
 
 function registerModRoutes(app, manager) {
+  // 批量时序 API（设计 docs/批量时序API设计方案.md v1）：三条 /api/mod/batch* 路由
+  // 必须在下方 POST /api/mod/*splat 通配之前注册，否则 batch 会被当成 mod 方法名透传。
+  registerBatchRoutes(app, manager)
+
   const getClient = () => (manager.getModClient ? manager.getModClient() : null)
 
   // ── 透传主路径：POST /api/mod/:method ──

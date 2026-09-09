@@ -117,11 +117,13 @@ function registerRoutes(app, manager) {
 
   // ---- Skills: 语义改为 mod 48 方法清单（原 77 命令执行层已退役）----
   // 前端可复用该接口渲染"可调用方法"下拉，等价于 GET /api/mod/methods。
+  // args 由 paramDefs 派生为 name→type 紧凑对象（形状与旧 m.params 一致）。
   app.get('/api/skills', (req, res) => {
     const skills = METHODS.map(m => ({
       name: m.method,
       description: m.description,
-      args: m.params
+      args: Object.fromEntries(m.paramDefs.map(p => [p.name, p.type])),
+      zh: m.zh
     }))
 
     res.json({ ok: true, skills })

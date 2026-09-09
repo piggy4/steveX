@@ -5,7 +5,8 @@
 	"mixins": [
 		"ExampleMixin",
 		"ServerLevelMixin",
-		"LevelMixin"
+		"LevelMixin",
+		"PortalTravelMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

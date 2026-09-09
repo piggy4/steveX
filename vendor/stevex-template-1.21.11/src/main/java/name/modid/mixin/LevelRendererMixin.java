@@ -4,7 +4,10 @@ import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.resource.GraphicsResourceAllocator;
 import java.util.ArrayList;
 import java.util.List;
+import name.modid.vision.DecorativeConfig;
+import name.modid.vision.DecorativeSummary;
 import name.modid.vision.DepthCapture;
+import name.modid.vision.VisionCollector;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
@@ -16,10 +19,16 @@ import net.minecraft.client.renderer.entity.EntityRenderDispatcher;
 import net.minecraft.client.renderer.gizmos.DrawableGizmoPrimitives;
 import net.minecraft.client.renderer.state.LevelRenderState;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.HolderLookup;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.NbtOps;
+import net.minecraft.nbt.Tag;
 import net.minecraft.world.TickRateManager;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
@@ -126,14 +135,37 @@ public abstract class LevelRendererMixin {
                     final double z = entity.getZ() + lerpZ;
                     final Vec3 motion = entity.getDeltaMovement();
                     final float health = entity instanceof LivingEntity living ? living.getHealth() : 0.0f;
+                    // 实体注册名：v2.34 掉落物 / v2.35 展示实体分支的判定依据（先算一次共用）。
+                    final String typeId = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString();
+                    // v2.34（掉落物记忆）：本帧物品栈在快照瞬间编码（读到的正是"本帧被渲染的栈"，
+                    // 杜绝 ObjectResolver 延后解析时栈被合并/拾取换掉的竞态）。掉落实体大类判定经
+                    // VisionCollector#isItemEntity（注册表派生的单一事实来源），与 ObjectResolver
+                    // 的半透明掉落物候选共用同一判定（防子类异 id 等边角与解析侧不一致）。
+                    // instanceof 仍需保留以取栈实例。空栈/失败 → null。
+                    final CompoundTag itemTag = entity instanceof ItemEntity itemEntity
+                            && VisionCollector.isItemEntity(typeId)
+                            ? encodeItemStack(itemEntity.getItem(), lvl.registryAccess())
+                            : null;
+                    // v2.35（展示实体内容记忆，设计 §6.2）：typeId ∈ 采集白名单（DecorativeConfig，
+                    // config/stevex/vision.json 热重载）→ 本帧编码整份可装载 NBT payload + 同帧
+                    // 薄内容摘要。白名单只控采集端；内存侧无白名单（§3.3）。非白名单 → 两者 null。
+                    final CompoundTag payload;
+                    final CompoundTag content;
+                    if (DecorativeConfig.isDecorative(typeId)) {
+                        payload = VisionCollector.serializeEntityFull(entity);
+                        content = DecorativeSummary.build(entity, typeId, payload, lvl.registryAccess());
+                    } else {
+                        payload = null;
+                        content = null;
+                    }
                     out.add(new DepthCapture.EntitySnapshotData(
                             entity.getId(),
                             entity.getUUID(),
-                            BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString(),
+                            typeId,
                             box, x, y, z,
                             entity.getYRot(), entity.getXRot(),
                             motion.x, motion.y, motion.z,
-                            entity.onGround(), health));
+                            entity.onGround(), health, itemTag, payload, content));
                 }
             }
         }
@@ -167,5 +199,20 @@ public abstract class LevelRendererMixin {
             final DrawableGizmoPrimitives alwaysOnTopPrimitives
     ) {
         DepthCapture.setLateDebugCleared(!alwaysOnTopPrimitives.isEmpty());
+    }
+
+    /**
+     * v2.34（掉落物记忆，见 docs/掉落物记忆设计方案.md）：把物品栈编码成 {@code ItemStack.CODEC} tag
+     * （{@code {id, count?, components?}}，与容器/末影箱条目同一路径，记忆侧同法解码）。空栈 / 失败 → null。
+     */
+    private static CompoundTag encodeItemStack(final ItemStack stack, final HolderLookup.Provider registries) {
+        if (stack == null || stack.isEmpty()) return null;
+        try {
+            Tag tag = ItemStack.CODEC.encodeStart(registries.createSerializationContext(NbtOps.INSTANCE), stack)
+                    .resultOrPartial(err -> { }).orElse(null);
+            return tag instanceof CompoundTag c ? c : null;
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 }
