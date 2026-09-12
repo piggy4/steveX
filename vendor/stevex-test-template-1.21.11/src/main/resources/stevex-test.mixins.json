@@ -8,6 +8,9 @@
 		"LevelMixin",
 		"PortalTravelMixin"
 	],
+	"client": [
+		"SpriteContentsAccessor"
+	],
 	"injectors": {
 		"defaultRequire": 1
 	},

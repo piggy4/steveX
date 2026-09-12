@@ -64,6 +64,15 @@ public class TerrainRestorer {
     private static final String KEY_STATE = "state";
     /** v2.23（§7.11）删除证据：采集侧 {@code DeletionJudge} 逐块证明消失的 BlockPos 列表（LongArrayTag）。 */
     private static final String KEY_DELETIONS = "deletions";
+    /**
+     * v2.37 七次修订（§15.3）<b>信号缺失族</b>删除证据：采集侧 {@code SignalLossCorrector} 用
+     * <b>真实世界状态直读</b>（而非深度推断）证明消失的绊线 / 绊线钩格（同型 LongArrayTag）。
+     *
+     * <p>与 {@link #KEY_DELETIONS} <b>并列为两个键</b>：两者证据类型不同、记忆侧执行时各用各的守卫
+     * （{@code deletions} 走 {@code isDeletableContent ∪ isShapedDeletableContent}，本键走
+     * {@code isSignalLossBlock}）。合并成一键就只能挂一道守卫，双保险失效（§15.2）。
+     */
+    private static final String KEY_SIGNAL_LOSS_DELETIONS = "signalLossDeletions";
     /** v2.22（§7.11）采集时相机（眼睛）位置 —— 相机格快路径 + 距离球参考（DeletionApplier 用）。 */
     private static final String KEY_AGENT_POS = "agentPos";
 
@@ -280,7 +289,7 @@ public class TerrainRestorer {
         }
     }
 
-    /** 解析一个维桶（正文形态与旧版文件顶层逐字一致）：blocks + deletions + cameraPos。 */
+    /** 解析一个维桶（正文形态与旧版文件顶层逐字一致）：blocks + deletions + signalLossDeletions + cameraPos。 */
     private static TerrainData parseBucket(final CompoundTag bucket) {
         Map<BlockPos, TerrainBlock> blocks = new LinkedHashMap<>();
         CompoundTag blocksTag = bucket.getCompoundOrEmpty(KEY_BLOCKS);
@@ -293,15 +302,24 @@ public class TerrainRestorer {
             blocks.put(pos, new TerrainBlock(blockId, state));
         }
         // v2.23：采集侧 DeletionJudge 逐块证明消失的格（LongArrayTag）。旧文件无该键 → 空列表，兼容
-        List<BlockPos> deletions = new ArrayList<>();
-        if (bucket.get(KEY_DELETIONS) instanceof LongArrayTag deletionsTag) {
-            for (long packed : deletionsTag.getAsLongArray()) {
-                deletions.add(BlockPos.of(packed));
-            }
-        }
+        final List<BlockPos> deletions = readPosLongArray(bucket, KEY_DELETIONS);
+        // v2.37 七次修订（§15）：信号缺失族（状态直读证明消失的绊线 / 绊线钩）。
+        // 旧采集侧 / 旧文件无该键 → 空列表 → 该通道静默不删（只增不删，方向安全，且不影响 deletions）。
+        final List<BlockPos> signalLossDeletions = readPosLongArray(bucket, KEY_SIGNAL_LOSS_DELETIONS);
         // 相机位置（DeletionApplier 相机格快路径用）。旧文件无该键 → null，兼容
         Vec3 cameraPos = parseVec3(bucket.getStringOr(KEY_AGENT_POS, ""));
-        return new TerrainData(blocks, deletions, cameraPos);
+        return new TerrainData(blocks, deletions, signalLossDeletions, cameraPos);
+    }
+
+    /** 读一个 BlockPos long 数组键（缺失 / 类型不符 → 空列表）。 */
+    private static List<BlockPos> readPosLongArray(final CompoundTag bucket, final String key) {
+        if (!(bucket.get(key) instanceof LongArrayTag tag)) return List.of();
+        final long[] packed = tag.getAsLongArray();
+        final List<BlockPos> out = new ArrayList<>(packed.length);
+        for (long p : packed) {
+            out.add(BlockPos.of(p));
+        }
+        return out;
     }
 
     private static Map<String, String> readState(final CompoundTag stateTag) {
@@ -356,18 +374,26 @@ public class TerrainRestorer {
      * 一帧地形数据：方块表（v2 起无 scannedSections，纯累积语义）+ 删除证据。
      *
      * <p>v2.23（§7.11）：{@code surfaces} / {@code skyRays} 已移除——减量判定完全移到采集侧
-     * {@code DeletionJudge}（记忆侧反向通道只上报 cells）；本记录只剩 {@code deletions}
-     * （采集侧逐块证明消失的格）与 {@code cameraPos}（相机格快路径）。{@link DeletionApplier}
-     * 消费二者。
+     * {@code DeletionJudge}（记忆侧反向通道只上报 cells）；本记录只剩删除证据与 {@code cameraPos}
+     * （相机格快路径）。{@link DeletionApplier} 消费之。
+     *
+     * <p>v2.37 七次修订（§15）：删除证据由一条扩为<b>两条并列</b>——
+     * {@code deletions}（深度推断证明消失的记忆格）与 {@code signalLossDeletions}（状态直读证明
+     * 消失的信号缺失族格，绊线 / 绊线钩）。二者<b>定义域不相交且守卫不同</b>，故在执行侧分两个
+     * 通道，绝不合流（§15.2）。
      */
     record TerrainData(
             Map<BlockPos, TerrainBlock> blocks,
             List<BlockPos> deletions,
+            /** v2.37 七次修订（§15）：状态直读证明消失的信号缺失族格（绊线 / 绊线钩）。 */
+            List<BlockPos> signalLossDeletions,
             Vec3 cameraPos
     ) {
-        /** 内容指纹 = 方块表 + 删除清单（deletions 变化同样触发重新读取 / 应用，§7.11）。 */
+        /** 内容指纹 = 方块表 + 两条删除清单（任一变化都须触发重新读取 / 应用，§7.11 / §15.7 第 8 条）。
+         *  <p>漏掉 {@code signalLossDeletions} → 镜像里绊线被拆而其余键未变 → 本侧判定"文件没变"
+         *  → 该通道静默空转（安全但功能全无，且无任何错误迹象）。 */
         String fingerprint() {
-            return blocks.toString() + "|" + deletions.toString();
+            return blocks.toString() + "|" + deletions.toString() + "|" + signalLossDeletions.toString();
         }
     }
 

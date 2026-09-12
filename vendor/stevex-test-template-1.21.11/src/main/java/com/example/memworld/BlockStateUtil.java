@@ -2,6 +2,7 @@ package com.example.memworld;
 
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
@@ -9,6 +10,7 @@ import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.StateDefinition;
 import net.minecraft.world.level.block.state.properties.Property;
@@ -73,7 +75,64 @@ public final class BlockStateUtil {
      */
     public static boolean isFullTransparentCell(final Level level, final BlockPos pos, final BlockState state) {
         if (state.isAir() || !state.getFluidState().isEmpty()) return false;
+        // v2.37 修补（设计 §4.1 第 2 步）：RenderShape == INVISIBLE 的方块（air/barrier/bubble_column/
+        // end_gateway/end_portal/light/liquid/structure_void/moving_piston）渲染足迹为零——若同时满足
+        // isShapeFullBlock && !canOcclude（barrier/light/structure_void 等正是如此），旧口径会把它们塞进
+        // translucent 段并用整格 bbox 判 → 对零足迹的东西过投票。此谓词独立于本版功能，v2.23/v2.36 亦适用。
+        if (!hasModelRenderShape(state)) return false;
         return Block.isShapeFullBlock(state.getShape(level, pos)) && !state.canOcclude();
+    }
+
+    // ==================== v2.37（§7.13 / 非满形状方块减量） ====================
+
+    /** 该方块是否由方块模型系统渲染（{@code RenderShape.MODEL}）。{@code INVISIBLE} = 渲染足迹为零。 */
+    public static boolean hasModelRenderShape(final BlockState state) {
+        return state.getRenderShape() == RenderShape.MODEL;
+    }
+
+    /**
+     * v2.37 <b>信号缺失排除表</b>（设计 §4.1 第 6 步 / §2.2）：Fabulous 下不写任何已读深度场的方块。
+     * 活体不产生可读信号 ⇒ 判"消失"必误删活体，属信号缺失而非几何问题——换任何几何源都救不了，
+     * 故只有这一族需要手列。表维护在此处，记忆侧上报与采集侧判定两侧复用同一口径。
+     */
+    private static final Set<Block> SIGNAL_LOSS_BLOCKS = Set.of(
+            Blocks.TRIPWIRE,        // 绊线：Fabulous 下画进 weather 目标、不写 main/translucent 深度
+            Blocks.TRIPWIRE_HOOK    // 绊线钩（本体几何正常，但其激活/信号语义与绊线同族，一并欠删）
+    );
+
+    /** 是否属于信号缺失族（设计 §4.1 第 6 步）。 */
+    public static boolean isSignalLossBlock(final Block block) {
+        return SIGNAL_LOSS_BLOCKS.contains(block);
+    }
+
+    /**
+     * v2.37（设计 §4.1）<b>单一上报谓词</b>——记忆侧几何段上报、采集侧几何求交、{@link DeletionApplier}
+     * 放行守卫共用同一把尺（同文件、同侧，杜绝口径漂移）：
+     *
+     * <ol>
+     *   <li>该格有<b>方块本体</b>（非空气）；纯水格/纯岩浆格由 {@code getRenderShape() != MODEL} 自动排除
+     *       （{@code LiquidBlock} 返回 {@code INVISIBLE}），故含水非满块（有方块本体）仍是候选；</li>
+     *   <li>{@code RenderShape == MODEL}（排除 {@code INVISIBLE} 族）；</li>
+     *   <li><b>非满形状</b>——满格方块走 §7.11/§7.12 现段（整格盒是它的退化情形，进几何段零收益）；</li>
+     *   <li>该格无方块实体（{@code getBlockEntity(pos) == null}）——几何在 BE renderer 里，不在方块模型
+     *       系统内，{@code collectParts} 的 quad 数可能为 0 或只盖住底座 = <b>几何低估</b>（唯一方向错的
+     *       一类）；</li>
+     *   <li>不在信号缺失表（绊线/绊线钩）。</li>
+     * </ol>
+     *
+     * <p><b>几何非空（设计 §4.1 第 5 步）不在此判</b>——它需要客户端烘焙模型（{@code ModelGeometryCache}），
+     * 由 {@code MemoryCellReporter.computeCells} 在拿到 quad 清单后自动兜底（quad 数 = 0 → 不进几何段）。
+     *
+     * <p><b>判定次序是承重的</b>（设计 §4.4）：调用方必须<b>先形状后流体</b>——先问本谓词，命中者直接入
+     * 几何段（无视 waterlogged），只有非候选格才走 §7.12 现分支。否则 waterlogged 栅栏会先被 translucent
+     * 水段吞走，复现 v2.36 的"活本体被整格置空"误删缺陷。
+     */
+    public static boolean isShapedDeletableContent(final Level level, final BlockPos pos, final BlockState state) {
+        if (state.isAir()) return false;                                   // ① 有方块本体
+        if (!hasModelRenderShape(state)) return false;                     // ② RenderShape.MODEL
+        if (isSignalLossBlock(state.getBlock())) return false;             // ⑤ 信号缺失族
+        if (Block.isShapeFullBlock(state.getShape(level, pos))) return false; // ③ 满格走现段
+        return level.getBlockEntity(pos) == null;                          // ④ 无 BE
     }
 
     /**

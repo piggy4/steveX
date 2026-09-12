@@ -40,7 +40,8 @@ import org.slf4j.Logger;
  *       "dayTime": 6000,
  *       "timestamp": 1720000000,
  *       "blocks": { "128,64,-32": { "block": "minecraft:stone", "state": {} }, ... },
- *       "deletions": [ 819874916943... , ... ]
+ *       "deletions": [ 819874916943... , ... ],
+ *       "signalLossDeletions": [ 819874916944... , ... ]
  *     },
  *     "minecraft:the_nether": { ... }
  *   }
@@ -53,6 +54,12 @@ import org.slf4j.Logger;
  * <p>v2.23（§7.11）：每个维桶内顶层新增 {@code deletions}（BlockPos long 列表）——采集侧
  * {@link DeletionJudge} 用记忆侧反向通道 cells 文件逐块深度判定出的「被证明已消失」的记忆格。
  * 记忆世界侧 {@code DeletionApplier} 据此减量删除。v2.22 的 {@code surface}/@{@code skyRays} 字段已移除。
+ *
+ * <p>v2.37 七次修订（§15）：每个维桶内顶层再新增<b>并列键</b> {@code signalLossDeletions}（同型
+ * BlockPos long 列表）——信号缺失族（绊线 / 绊线钩）的"被证明已消失"，由
+ * {@link SignalLossCorrector} <b>状态直读</b>（而非深度推断）产出。与 {@code deletions} 分立两键
+ * 是刻意的：记忆侧两条通道各有独立守卫，合并会让双保险失效（理由详见
+ * {@link #KEY_SIGNAL_LOSS_DELETIONS}）。采集侧**不持有**该族名单，族由记忆侧上报什么定义。
  */
 public class VisionTerrainStore {
 
@@ -71,6 +78,19 @@ public class VisionTerrainStore {
     private static final String KEY_STATE = "state";
     /** v2.23（§7.11）：被证明消失的记忆格（BlockPos long 数组，采集侧 DeletionJudge 产出）。 */
     private static final String KEY_DELETIONS = "deletions";
+    /**
+     * v2.37 七次修订（§15.3）：<b>信号缺失族</b>（绊线 / 绊线钩）被证明消失的记忆格（同型 long 数组，
+     * 采集侧 {@code SignalLossCorrector} 产出）。
+     *
+     * <p><b>为什么是并列键而不是并进 {@code deletions}</b>：两条通道的证据类型不同（深度推断 vs
+     * 状态直读），记忆侧执行时各用各的守卫——{@code deletions} 走
+     * {@code isDeletableContent ∪ isShapedDeletableContent}，本键走 {@code isSignalLossBlock}。
+     * 若并为一键，记忆侧就只能挂一道守卫：要么把 {@code isSignalLossBlock} 加进原守卫（等于对
+     * <b>所有</b>删除来源放宽，双保险失效），要么绊线过不了原守卫（通道静默失效）。分立两键使两道
+     * 守卫的定义域互不相交（绊线既非 {@code isDeletableContent} 也非 {@code isShapedDeletableContent}），
+     * 两条保险各自完整（§15.2）。
+     */
+    private static final String KEY_SIGNAL_LOSS_DELETIONS = "signalLossDeletions";
 
     private final Path filePath;
 
@@ -96,17 +116,21 @@ public class VisionTerrainStore {
      *
      * @param blocks 本次可见方块（key = 方块坐标）
      * @param deletions v2.23：被证明消失的记忆格（采集侧 DeletionJudge 产出，可空）
+     * @param signalLossDeletions v2.37（§15）：被证明消失的<b>信号缺失族</b>格（采集侧
+     *        {@code SignalLossCorrector} 状态直读产出，可空）。<b>恒不与 {@code deletions} 合并</b>，
+     *        理由见 {@link #KEY_SIGNAL_LOSS_DELETIONS}
      * @param agentPos 采集时观察者的相机（眼睛）双精度坐标（游戏精度），可为 null
      * @param agentYaw 采集时观察者水平朝向（度）
      * @param agentPitch 采集时观察者俯仰朝向（度）
      * @param agentFov 采集时观察者基础视场角（整数度，游戏精度）
      * @param worldTime 采集时世界时间（dayTime，游戏时间单位；无世界时 -1，v2.21）
      * @param dimensionId v2.32：采集时所在维 id（{@code level.dimension().identifier()}），决定写哪个桶
-     * @return 统计信息 { "blocks": n, "deletions": n }
+     * @return 统计信息 { "blocks": n, "deletions": n, "signalLossDeletions": n }
      */
     public Map<String, Object> sync(
             final Map<BlockPos, VisionCollector.TerrainBlockSnapshot> blocks,
             final List<BlockPos> deletions,
+            final List<BlockPos> signalLossDeletions,
             final Vec3 agentPos,
             final float agentYaw,
             final float agentPitch,
@@ -139,10 +163,19 @@ public class VisionTerrainStore {
         }
         bucket.put(KEY_DELETIONS, new LongArrayTag(arr));
 
+        // v2.37（§15.3）：信号缺失族裁决恒写并列键（空 = 本帧无该族删除证据）。
+        // 记忆侧读不到该键 → 空列表（旧文件 / 旧版采集侧）→ 该通道静默不删，只增不删，方向安全。
+        final long[] slArr = new long[signalLossDeletions.size()];
+        for (int i = 0; i < signalLossDeletions.size(); i++) {
+            slArr[i] = signalLossDeletions.get(i).asLong();
+        }
+        bucket.put(KEY_SIGNAL_LOSS_DELETIONS, new LongArrayTag(slArr));
+
         worlds.put(dimensionId, bucket);
         writeFile();
 
-        return Map.of("blocks", blocks.size(), "deletions", deletions.size());
+        return Map.of("blocks", blocks.size(), "deletions", deletions.size(),
+                "signalLossDeletions", signalLossDeletions.size());
     }
 
     // ==================== 内部 ====================

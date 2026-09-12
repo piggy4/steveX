@@ -63,7 +63,9 @@ public class VisionApi {
         final long ts = System.currentTimeMillis();
         final Unprojector unproj = new Unprojector(snap);
         final var bucket = ObjectResolver.buildBucket(snap.entities());
-        final Unprojector.UnprojectResult hits = unproj.visibleBlockHits(bucket.keySet(), Unprojector.EPSILON);
+        // v2.39（§4.2.1 决策 R-1）：落格量单列（LANDING_EPSILON = 1/128），与 ObjectResolver 的
+        // 探针 ε 解耦——后者用于 air 回退恢复 / 实体盒膨胀，语义是"探到相邻格"，不随落格量下调。
+        final Unprojector.UnprojectResult hits = unproj.visibleBlockHits(bucket.keySet(), Unprojector.LANDING_EPSILON);
         // v2.23（§7.11）反向通道：读记忆侧 memory_cells.bin（mtime 门控）→ 待判定记忆格清单。
         // 记忆侧离线 / 文件缺失 → 空清单 → 无删除证据 → 只增不删（优雅降级）。
         final MemoryCellsReader.CellsData cells = new MemoryCellsReader().read();
@@ -114,9 +116,12 @@ public class VisionApi {
 
         // 诊断日志（INFO）：采集成功但对象为空时，据此区分「深度回读全天空」与「反投影/查询异常」。
         // nonSkyPixels=0 或 depthMin=depthMax=1.0 ⇒ 深度缓冲被读成空（全 1.0）。
+        // landingBoundary（v2.39，§4.2.1）：落格推移改变了所属格的像素数 = 压在格界平面上的面
+        // 的屏幕占比。它与 ε 无关地只反映场景内容；若相邻帧间大幅抖动 ⇒ ε 已低于量化下界。
         SteveX.LOGGER.info(
-                "[Vision] snapshot: nonSkyPixels={}, depthMin={}, depthMax={}, visibleBlocks={}, blockEntities={}, entities={}, cameraPos={}",
+                "[Vision] snapshot: nonSkyPixels={}, depthMin={}, depthMax={}, landingBoundary={}(ε={}), visibleBlocks={}, blockEntities={}, entities={}, cameraPos={}",
                 hits.nonSkyPixels(), min, max,
+                hits.boundaryResolvedPixels(), Unprojector.LANDING_EPSILON,
                 result.value.visibleBlockCount(), result.value.blockEntityCount(), result.value.entityCount(),
                 snap.cameraPos());
 

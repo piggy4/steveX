@@ -26,3 +26,7 @@ steveX.code-workspace
 vendor/**/build/
 vendor/**/.gradle/
 vendor/**/run/
+
+# Python tooling artifacts
+__pycache__/
+*.pyc

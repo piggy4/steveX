@@ -32,6 +32,8 @@ import org.slf4j.LoggerFactory;
  *                                      //   false = 该配置下暂留幽灵（岩浆走 main 场不受影响；Fancy/Fast 不生效）
  *   "memoryCellsWriteIntervalTicks": 10, // v2.23：cells 文件重算兜底间隔（tick）
  *   "memoryCellsFile": "",             // v2.23：memory_cells.bin 路径；留空自动探测
+ *   "memorySpritesFile": "",           // v2.37（§7.13）：memory_sprites.bin 路径（sprite alpha 掩码表，
+ *                                      //   独立文件 + 增量下发）；留空自动探测（与 cells 同级）
  *   "containerFile": "",               // v2.28（§5.2.2）：容器内容源 NBT 文件（containers.nbt）；留空自动探测
  *   "containerReconcileOnPoll": true,  // v2.28：每轮 reconcile 覆写容器内容（权威还原玩家改动）；
  *                                      //   false = 仅文件变化时覆写（允许手动摆放实验）
@@ -69,6 +71,9 @@ public class MemoryConfig {
     public int memoryCellsWriteIntervalTicks = 10;
     /** memory_cells.bin 自定义路径；留空则自动探测（源 terrain.nbt 同级，采集侧读同一路径）。 */
     public String memoryCellsFile = "";
+    /** v2.37（§7.13）：memory_sprites.bin 自定义路径（sprite alpha 掩码表，独立文件 + 增量下发）；
+     *  留空则自动探测（与 memory_cells.bin 同级，采集侧读同一路径）。 */
+    public String memorySpritesFile = "";
     // v2.28（§5.2.2）：容器内容记忆（独立交互通道，见 ContainerMemoryApplier）。
     /** containers.nbt 自定义路径；留空则自动探测（源 block_entities.nbt 同级，采集侧写同一路径）。 */
     public String containerFile = "";
@@ -115,6 +120,7 @@ public class MemoryConfig {
                 if (json.has("removalTranslucentEnabled") && json.get("removalTranslucentEnabled").isJsonPrimitive()) removalTranslucentEnabled = json.get("removalTranslucentEnabled").getAsBoolean();
                 if (json.has("memoryCellsWriteIntervalTicks") && json.get("memoryCellsWriteIntervalTicks").isJsonPrimitive()) memoryCellsWriteIntervalTicks = json.get("memoryCellsWriteIntervalTicks").getAsInt();
                 if (json.has("memoryCellsFile") && json.get("memoryCellsFile").isJsonPrimitive()) memoryCellsFile = json.get("memoryCellsFile").getAsString();
+                if (json.has("memorySpritesFile") && json.get("memorySpritesFile").isJsonPrimitive()) memorySpritesFile = json.get("memorySpritesFile").getAsString();
                 if (json.has("containerFile") && json.get("containerFile").isJsonPrimitive()) containerFile = json.get("containerFile").getAsString();
                 if (json.has("containerReconcileOnPoll") && json.get("containerReconcileOnPoll").isJsonPrimitive()) containerReconcileOnPoll = json.get("containerReconcileOnPoll").getAsBoolean();
                 if (json.has("biomeFile") && json.get("biomeFile").isJsonPrimitive()) biomeFile = json.get("biomeFile").getAsString();
@@ -153,6 +159,7 @@ public class MemoryConfig {
             json.addProperty("removalTranslucentEnabled", removalTranslucentEnabled);
             json.addProperty("memoryCellsWriteIntervalTicks", memoryCellsWriteIntervalTicks);
             json.addProperty("memoryCellsFile", memoryCellsFile);
+            json.addProperty("memorySpritesFile", memorySpritesFile);
             json.addProperty("containerFile", containerFile);
             json.addProperty("containerReconcileOnPoll", containerReconcileOnPoll);
             json.addProperty("biomeFile", biomeFile);
@@ -323,5 +330,29 @@ public class MemoryConfig {
         }
         return Minecraft.getInstance().gameDirectory.toPath()
                 .resolve("stevex/vision/memory_cells.bin");
+    }
+
+    /**
+     * 解析 {@code memory_sprites.bin} 目标路径（{@link SpriteAlphaTable} 写入，采集侧
+     * {@code SpriteTableCache} 读同一路径）。
+     *
+     * <p>v2.37（设计 §4.3.1）：sprite alpha 掩码表<b>独立于 cells 文件</b>——它体积大且几乎不变，
+     * 混在 cells 里会让每次重写都重发整张表；拆开后只在首次用到新 sprite / 资源重载时重写一次。
+     * 探测顺序与 {@link #resolveMemoryCellsFile()} 完全一致（只换文件名），保证两文件始终同目录
+     * ——"先写 sprite、再写 cells"的次序硬约束才有意义。
+     */
+    public Path resolveMemorySpritesFile() {
+        if (Minecraft.getInstance() == null) return null;
+
+        if (memorySpritesFile != null && !memorySpritesFile.isBlank()) {
+            return Path.of(memorySpritesFile);
+        }
+
+        final Path cells = resolveMemoryCellsFile();
+        if (cells != null) {
+            return cells.getParent().resolve("memory_sprites.bin");
+        }
+        return Minecraft.getInstance().gameDirectory.toPath()
+                .resolve("stevex/vision/memory_sprites.bin");
     }
 }

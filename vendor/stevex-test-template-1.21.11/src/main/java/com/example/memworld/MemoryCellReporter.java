@@ -7,10 +7,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
@@ -56,10 +59,15 @@ import org.slf4j.LoggerFactory;
  *       不含玻璃板/栅栏/压力板等非满形状透明块（须 §7.13 几何过滤，v2.36 不纳入、欠删）。</li>
  * </ul>
  *
- * <p>文件格式（小端，与采集侧 {@code MemoryCellsReader} 对应；version = 3）：
+ * <p>v2.37 七次修订（§15）：格式升 <b>version = 5</b>，末尾追加<b>信号缺失段</b>——绊线 / 绊线钩
+ * （该族在 Fabulous 下画进 weather 目标、不写任何已读深度场，故不喂深度判据）。采集侧对这段不做
+ * 深度判定，而是直读真实世界状态判"是否已消失"（§15.2 段②）。<b>本段是采集侧唯一的族来源</b>：
+ * 采集侧刻意不持族名单，"哪些格可删"与"哪些格被上报"因此永远不会错配。
+ *
+ * <p>文件格式（小端，与采集侧 {@code MemoryCellsReader} 对应；version = 5）：
  * <pre>{@code
  *   [0..3]   magic "SCEL"
- *   [4]      version = 3
+ *   [4]      version = 5
  *   [5..8]   int 维 id 字节长度 L（UTF-8）
  *   [9..9+L) UTF-8 dimensionId（活动维）
  *   [..]     int removalPixelThreshold   （采集侧删除判定阈值，随通道下发，单一来源）
@@ -69,8 +77,16 @@ import org.slf4j.LoggerFactory;
  *   [..]     byte removalTranslucentEnabled（v2.36 translucent 场开关，采集侧据此路由）
  *   [..]     int translucentCount
  *   [..]     translucentCount × long（BlockPos.asLong；水 + 满格透明）
+ *   [..]     long spriteEpoch             （v2.37 几何段；本文件引用的 sprite 表版本）
+ *   [..]     int shapedCount
+ *   [..]     shapedCount × { long pos.asLong; ushort blockIdLen; UTF-8 blockId;
+ *                            byte quadCount; quadCount × 96B（12 顶点 + 8 UV + 3 法线 float，1 sprite int） }
+ *   [..]     int signalLossCount          （v2.37 七改；镜像中当前在场的信号缺失族格数，空段恒写 0）
+ *   [..]     signalLossCount × { long BlockPos.asLong; ushort blockIdLen; UTF-8 blockId }
  * }</pre>
  * <p>version ≤ 2 旧文件：无 translucent 段 → 采集侧只按 opaque/main 段删，行为等同 v2.23（无迁移负担）。
+ * <p>version = 3/4：分别缺几何段 / 信号缺失段 → 采集侧对应段取空集（欠删，方向安全）。
+ * 版本号严格递进、采集侧按版本分支，故旧文件永不被误读成新布局。
  *
  * <p>文件路径 = 源 terrain.nbt 所在目录的 {@code memory_cells.bin}（采集侧读同一路径）。
  * 记忆侧离线不写 → 采集侧无删除证据 → 只增不删（优雅降级）。
@@ -80,11 +96,28 @@ public final class MemoryCellReporter {
     private static final Logger LOGGER = LoggerFactory.getLogger("stevex-test/memory");
     private static final byte[] MAGIC = {'S', 'C', 'E', 'L'};
     /** v2.32：格式版本升到 2（头部在 version 之后追加 UTF-8 维 id 段；version=1 旧文件无维标签）。
-     *  v2.36（§7.12）：版本升到 3（opaque/main longs 之后追加 translucent 开关 byte + translucent 段）。 */
-    private static final int VERSION = 3;
+     *  v2.36（§7.12）：版本升到 3（opaque/main longs 之后追加 translucent 开关 byte + translucent 段）。
+     *  v2.37（§7.13）：版本升到 4（translucent 段之后追加 long spriteEpoch + int shapedCount + 几何段）。
+     *  v2.37 七次修订（§15）：版本升到 5（几何段之后追加 int signalLossCount + 信号缺失段）。
+     *  <p><b>为什么必须升版而不能"并入 v4"</b>：采集侧 {@code MemoryCellsReader.parse} 的末尾是
+     *  {@code if (sp != bytes.length) return null}（严格不留尾巴，防格式错位被静默当成功）。
+     *  在 v4 尾后追加段落而不升版 ⇒ 旧版采集侧读到多余字节即整份作废（cells 全丢、恒不删）；
+     *  反之升到 5 ⇒ 旧版采集侧因版本不符而拒绝读取（{@code ver >= 5} 不认识），同样是"宁可不删"，
+     *  但**行为可辨识**（有版本号可查）。故升版是唯一正确的做法，见 {@code MemoryCellsReader} 中
+     *  "若将来再追加段落，须同时升版并按版本分支，勿放宽此检查"的既有约定。 */
+    private static final int VERSION = 5;
 
-    /** 一次上报的两段集合（main/opaque 段与 translucent 段，见类 javadoc §7.12 分段）。 */
-    private record Segments(Set<Long> main, Set<Long> translucent) {}
+    /** 一条几何段条目（v2.37，设计 §4.3.2）：格 + 方块注册 id + quad 面清单。
+     *  {@code fp} = 内容指纹（顶点/UV/法线/sprite 下标 + blockId 的哈希），供指纹门控比较
+     *  ——{@code Quad} 内含 {@code float[]}，record 的自动 equals 不会深比较，故不直接比数组。 */
+    private record ShapedEntry(String blockId, ModelGeometryCache.Quad[] quads, int fp) {}
+
+    /** 一次上报的四段集合（main/opaque 段、translucent 段、v2.37 几何段、v2.37七改 信号缺失段，
+     *  见类 javadoc）。
+     *  <p>信号缺失段的值取 blockId（而非只存格）：采集侧**刻意不持**族名单（族由本侧上报什么定义），
+     *  该字符串用于诊断日志与将来在本侧加族时的可追溯性；采集侧的判据与方块种类无关。 */
+    private record Segments(Set<Long> main, Set<Long> translucent, Map<Long, ShapedEntry> shaped,
+                           Map<Long, String> signalLoss) {}
 
     private final TerrainRestorer terrain;
     private final EntityRestorer entities;
@@ -100,7 +133,7 @@ public final class MemoryCellReporter {
     }
 
     private static Segments emptySegments() {
-        return new Segments(Set.of(), Set.of());
+        return new Segments(Set.of(), Set.of(), Map.of(), Map.of());
     }
 
     /** 服务器（世界）启动 / 切换时调用，清空指纹与版本。 */
@@ -128,22 +161,62 @@ public final class MemoryCellReporter {
         lastMutationVersion = version;
 
         final Segments segments = computeCells(level, dimension);
-        // 内容指纹门控：两段集合都未变才不重写（含 translucent 开关随写入内容一起指纹化）
+        // 内容指纹门控：四段集合都未变才不重写（含 translucent 开关随写入内容一起指纹化）
+        // v2.37 七次修订（§15.7 第 8 条）：**信号缺失段必须入指纹**。漏掉它 → 镜像里绊线变了
+        // （被拆掉 / 新拉了一条）而其余三段未变 → 本侧不重写文件 → 采集侧读到的候选恒为旧集 →
+        // 整条通道**静默空转**（方向安全，但功能全无、且没有任何错误迹象，是最难查的一类失效）。
         if (segments.main().equals(lastSegments.main())
-                && segments.translucent().equals(lastSegments.translucent())) {
+                && segments.translucent().equals(lastSegments.translucent())
+                && sameShaped(segments.shaped(), lastSegments.shaped())
+                && segments.signalLoss().equals(lastSegments.signalLoss())) {
             return;
         }
 
         final Path file = config.resolveMemoryCellsFile();
         if (file == null) return;
-        if (writeAtomic(file, dimension, segments, config.removalPixelThreshold,
-                config.removalMaxRayDist, config.removalTranslucentEnabled)) {
-            lastSegments = segments;
-            LOGGER.info("[MemoryWorld] Wrote {} main + {} translucent memory cells [{}] to {} (threshold={}, "
-                    + "maxDist={}, translucentEnabled={})",
-                    segments.main().size(), segments.translucent().size(), dimension, file,
-                    config.removalPixelThreshold, config.removalMaxRayDist, config.removalTranslucentEnabled);
+
+        // v2.37（设计 §4.3.1）**写入次序硬约束**：先写 sprite 文件（新 epoch + 全量表），再写 cells。
+        // 反序会出现"cells 引用新 epoch 的下标、磁盘上却还是旧 epoch 的表"的窗口，采集侧会 fail-closed
+        // 整段跳过（欠删，方向安全但白丢一轮）；正序则新表先落地，cells 引用的下标必然有效。
+        // SpriteAlphaTable.flushIfDirty 只在表内容变化（首次用到新 sprite / 资源重载）时真正重写
+        // ——暖机后本文件 mtime 不变，这正是"增量式"的落点（§10 第 15 条验收）。
+        final ModelGeometryCache geometry = ModelGeometryCache.get();
+        final Path spriteFile = config.resolveMemorySpritesFile();
+        if (spriteFile != null) {
+            geometry.sprites().flushIfDirty(spriteFile);
         }
+
+        if (writeAtomic(file, dimension, segments, config.removalPixelThreshold,
+                config.removalMaxRayDist, config.removalTranslucentEnabled, geometry.sprites().epoch())) {
+            lastSegments = segments;
+            LOGGER.info("[MemoryWorld] Wrote {} main + {} translucent + {} shaped + {} signalLoss memory cells "
+                            + "[{}] to {} (threshold={}, maxDist={}, translucentEnabled={}, spriteEpoch={})",
+                    segments.main().size(), segments.translucent().size(), segments.shaped().size(),
+                    segments.signalLoss().size(), dimension, file, config.removalPixelThreshold,
+                    config.removalMaxRayDist, config.removalTranslucentEnabled, geometry.sprites().epoch());
+        }
+    }
+
+    /** 几何段指纹比较：{@code Quad} 内含数组，须按 {@code fp} 逐格比对（不深比数组）。 */
+    private static boolean sameShaped(final Map<Long, ShapedEntry> a, final Map<Long, ShapedEntry> b) {
+        if (a.size() != b.size()) return false;
+        for (Map.Entry<Long, ShapedEntry> e : a.entrySet()) {
+            final ShapedEntry other = b.get(e.getKey());
+            if (other == null || other.fp() != e.getValue().fp()) return false;
+        }
+        return true;
+    }
+
+    /**
+     * 客户端 tick：驱动 {@link ModelGeometryCache} 烘焙排队中的方块几何（设计 §4.2 第 2 步——
+     * 模型必须在客户端线程取，服务器 tick 只读缓存）。
+     *
+     * <p>由 {@code MemoryWorldManager.onClientTick} 调用。烘焙期同时完成 sprite 的 intern
+     * （读 alpha 掩码也在客户端线程），故本方法返回后 {@code SpriteAlphaTable} 可能变脏，
+     * 由下一个服务器 tick 的 {@link #tick} 负责按序落盘。
+     */
+    public static void tickClient() {
+        ModelGeometryCache.get().tickClient();
     }
 
     // ==================== 集合重算 ====================
@@ -157,12 +230,27 @@ public final class MemoryCellReporter {
     }
 
     /**
-     * 重算待上报两段格集（§7.11 / v2.32 / v2.36）：按"该格现实写哪张深度场"分类（与采集侧路由同口径，
-     * 见类 javadoc）。Over-inclusive：只缩距离，不做视锥。
+     * 重算待上报三段格集（§7.11 / v2.32 / v2.36 / v2.37）：按"该格现实写哪张深度场"分类（与采集侧
+     * 路由同口径，见类 javadoc）。Over-inclusive：只缩距离，不做视锥。
      * <ul>
+     *   <li><b>几何段（v2.37 新增）</b>：非满形状 + {@code RenderShape.MODEL} + 无 BE + 模型几何非空
+     *       —— 按「quad 面清单 + sprite alpha 掩码」精确求交判（设计 §2.1/§4.1）；</li>
      *   <li><b>main 段</b>：实心不透明块 + 冻结实体占用格 + 非水流体（岩浆，恒写 main）；</li>
-     *   <li><b>translucent 段</b>：水 + 满格透明方块（玻璃块/冰等，Fabulous 写 translucent 目标）。</li>
+     *   <li><b>translucent 段</b>：水 + 满格透明方块（玻璃块/冰等，Fabulous 写 translucent 目标）；</li>
+     *   <li><b>信号缺失段（v2.37 七次修订新增，§15）</b>：绊线 / 绊线钩（
+     *       {@link BlockStateUtil#isSignalLossBlock}）—— 该族在 Fabulous 下画进 weather 目标、不写任何
+     *       已读深度场，故<b>不喂深度判据</b>；采集侧改为直读真实世界状态判其是否消失（§15.2 段②）。
+     *       本段是"这族块在镜像里还在场"的唯一权威来源——采集侧不持族名单，族由本段上报什么定义。</li>
      * </ul>
+     *
+     * <p><b>判定次序是承重的（设计 §4.4，"先形状后流体"）</b>：必须先问几何谓词——命中者直接入几何段、
+     * <b>无视 waterlogged</b>；只有<b>非候选格</b>才走现有流体/满格透明分支。<b>严禁"先流体后形状"</b>：
+     * 否则 waterlogged 栅栏会先被 translucent 水段吞走，到不了几何谓词，复现 v2.36 的"活本体被整格
+     * 置空"误删缺陷（§1.3）。两个段互斥由本次序保证。
+     *
+     * <p>信号缺失段的插入点不承重（三段定义域互不相交，§15.5）：绊线走
+     * {@code isShapedDeletableContent} 的第 ⑤ 步必然返回 false、也非实心不透明/流体/满格透明，
+     * 故放在形状分支之后与放在最后完全等价。放在形状分支之后只为就近可读。
      */
     private Segments computeCells(final ServerLevel level, final String dimension) {
         final Vec3 agent = agentPos(level);
@@ -170,6 +258,9 @@ public final class MemoryCellReporter {
         final double r2 = config.removalMaxRayDist * config.removalMaxRayDist;
         final Set<Long> main = new HashSet<>();
         final Set<Long> translucent = new HashSet<>();
+        final Map<Long, ShapedEntry> shaped = new HashMap<>();
+        final Map<Long, String> signalLoss = new HashMap<>();
+        final ModelGeometryCache geometry = ModelGeometryCache.get();
 
         // ① 方块：先距离过滤（便宜），再读一次世界状态判定分段。只取该维已应用方块。
         for (BlockPos pos : terrain.appliedBlocks(dimension)) {
@@ -178,6 +269,30 @@ public final class MemoryCellReporter {
             final double dz = pos.getZ() + 0.5 - agent.z;
             if (dx * dx + dy * dy + dz * dz > r2) continue;
             final BlockState state = level.getBlockState(pos);
+            // ★ 次序：先形状（§4.4）——命中者直接入几何段，不再按流体分流，保证 waterlogged 非满块
+            //   只进几何段、不进 translucent 水段（两段互斥）。§4.1 第 5 步"几何非空"在此兜底：
+            //   未烘焙完（null）或几何为空（quad 数 = 0 / 全部法线退化 / alpha 表不可得）→ 不进文件。
+            if (BlockStateUtil.isShapedDeletableContent(level, pos, state)) {
+                final ModelGeometryCache.Quad[] quads = geometry.get(state, pos);
+                if (quads != null && quads.length > 0) {
+                    final String blockId = BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString();
+                    shaped.put(pos.asLong(),
+                            new ShapedEntry(blockId, quads, fingerprint(blockId, quads)));
+                }
+                continue;
+            }
+            // ★ v2.37 七次修订（§15）：信号缺失族（绊线 / 绊线钩）→ 独立段。
+            //   这一族在 Fabulous 下画进 weather 目标、不写任何已读深度场，**活体无信号** ⇒ 深度判据
+            //   下"活着"与"消失了"不可区分 ⇒ 若像其余块那样入 main/translucent 段，采集侧会恒判它
+            //   "消失"（一格活体都不放过）。故自 v2.23 起整族排除；本版改为**换判据**而非继续排除：
+            //   采集侧对这一段不做深度判定，而是直接读真实世界状态（§15.2 段②）。
+            //   与几何段/流体段的次序无关（三段定义域互不相交，§15.5）：{@code isShapedDeletableContent}
+            //   的第 ⑤ 步就是 {@code !isSignalLossBlock}，绊线走完形状谓词必然返回 false 落到这里；
+            //   而它既非实心不透明、也非流体、也非满格透明（故原先自然落进"其余"被丢弃）。
+            if (BlockStateUtil.isSignalLossBlock(state.getBlock())) {
+                signalLoss.put(pos.asLong(), BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString());
+                continue;
+            }
             if (BlockStateUtil.isSolidOpaque(level, pos, state)) {
                 main.add(pos.asLong());            // 实心不透明 → main
             } else if (BlockStateUtil.isNonWaterFluid(state)) {
@@ -187,7 +302,8 @@ public final class MemoryCellReporter {
             } else if (BlockStateUtil.isFullTransparentCell(level, pos, state)) {
                 translucent.add(pos.asLong());     // 满格透明（玻璃块/冰）→ translucent
             }
-            // 非满形状透明（玻璃板/栅栏/压力板/薄物）与空气：不纳入任何段（欠删无害，§7.12 边界①）
+            // 其余（空气 / RenderShape.INVISIBLE / BE 非满块）不纳入任何段（欠删无害）
+            // （信号缺失族原在此列，v2.37 七次修订起改入上面的独立段，见 §15）
         }
 
         // ② 冻结实体占用格（AABB 覆盖的所有格，距离过滤）→ 一律 main（实体写 main，见 §7.11）。只取该维已放置实体。
@@ -209,28 +325,59 @@ public final class MemoryCellReporter {
                 }
             }
         }
-        return new Segments(main, translucent);
+        return new Segments(main, translucent, shaped, signalLoss);
+    }
+
+    /** 几何段内容指纹（blockId + 全部 quad 的顶点/UV/法线/sprite 下标）。 */
+    private static int fingerprint(final String blockId, final ModelGeometryCache.Quad[] quads) {
+        int h = blockId.hashCode();
+        for (ModelGeometryCache.Quad q : quads) {
+            h = h * 31 + java.util.Arrays.hashCode(q.vertices());
+            h = h * 31 + java.util.Arrays.hashCode(q.uvs());
+            h = h * 31 + Float.floatToIntBits(q.nx());
+            h = h * 31 + Float.floatToIntBits(q.ny());
+            h = h * 31 + Float.floatToIntBits(q.nz());
+            h = h * 31 + q.spriteIndex();
+        }
+        return h;
     }
 
     // ==================== 原子写 ====================
 
     /** 原子写（临时文件 + rename，半截写防护同 §7.4）。失败返回 false（调用方不推进指纹）。
-     *  <p>v2.36 布局（见类 javadoc）：version=3 起在 opaque 段后追加 translucentEnabled byte 与
-     *  translucent 段；两段用 {@link Set} 无序语义，集合相等即内容相等（指纹门控只比集合）。
+     *  <p>v2.37 布局（见类 javadoc）：version=4 起在 translucent 段后追加 long spriteEpoch 与几何段；
+     *  version=5（七次修订）在几何段后再追加 int signalLossCount + 信号缺失段。
+     *  各段用 {@link Set}/{@link Map} 无序语义，集合/指纹相等即内容相等。
      *  字节序与采集侧 {@code MemoryCellsReader} 一致：{@link ByteOrder#LITTLE_ENDIAN}。 */
     private static boolean writeAtomic(final Path target, final String dimension, final Segments segments,
                                        final int threshold, final double maxRayDist,
-                                       final boolean translucentEnabled) {
+                                       final boolean translucentEnabled, final long spriteEpoch) {
         try {
             Files.createDirectories(target.getParent());
             final Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
             final byte[] dimBytes = dimension == null ? new byte[0] : dimension.getBytes(StandardCharsets.UTF_8);
             // 布局：magic(4) + ver(1) + dimLen(4) + dim + 16（threshold/maxRayDist）+ opaqueCount(4)
             //       + opaque×8 + translucentEnabled(1) + translucentCount(4) + translucent×8
+            //       + spriteEpoch(8) + shapedCount(4) + shaped 几何段
+            //       + signalLossCount(4) + signalLoss 信号缺失段
+            // 固定部分（不含 dim 与各变长段）= 4+1+4+4+8+4+1+4+8+4+4 = 46
             final int opaque = segments.main().size();
             final int translucent = segments.translucent().size();
+            final Map<Long, ShapedEntry> shaped = segments.shaped();
+            final Map<Long, String> signalLoss = segments.signalLoss();
+            // 几何段字节数：每格 8(pos) + 2(blockIdLen) + blockId + 1(quadCount) + quadCount×96
+            int shapedBytes = 0;
+            for (Map.Entry<Long, ShapedEntry> e : shaped.entrySet()) {
+                shapedBytes += 8 + 2 + e.getValue().blockId().getBytes(StandardCharsets.UTF_8).length + 1
+                        + e.getValue().quads().length * 96;
+            }
+            // 信号缺失段字节数：每格 8(pos) + 2(blockIdLen) + blockId（同几何段的两段式，无 quad）
+            int signalLossBytes = 0;
+            for (String blockId : signalLoss.values()) {
+                signalLossBytes += 8 + 2 + blockId.getBytes(StandardCharsets.UTF_8).length;
+            }
             final ByteBuffer buf = ByteBuffer.allocate(
-                    30 + dimBytes.length + (opaque + translucent) * 8
+                    46 + dimBytes.length + (opaque + translucent) * 8 + shapedBytes + signalLossBytes
             ).order(ByteOrder.LITTLE_ENDIAN);
             buf.put(MAGIC);                    // [0..3]
             buf.put((byte) VERSION);           // [4]
@@ -247,7 +394,42 @@ public final class MemoryCellReporter {
             for (long c : segments.translucent()) {       // translucent × long
                 buf.putLong(c);
             }
-            Files.write(tmp, buf.array());
+            // v2.37 几何段（设计 §4.3.2）
+            buf.putLong(spriteEpoch);          // 本文件引用的 sprite 表 epoch
+            buf.putInt(shaped.size());         // shapedCount
+            for (Map.Entry<Long, ShapedEntry> e : shaped.entrySet()) {
+                final ShapedEntry entry = e.getValue();
+                final byte[] idBytes = entry.blockId().getBytes(StandardCharsets.UTF_8);
+                buf.putLong(e.getKey());       // BlockPos.asLong
+                buf.putShort((short) idBytes.length);
+                buf.put(idBytes);              // block 注册 id（采集侧据此路由判据场 + 定 alpha 阈值）
+                // quadCount 是 byte：上限 255。超限只写前 255 条——几何变**小**方向（欠删，安全），
+                // 且写入条数与计数严格一致（多写会让采集侧解析错位，那是危险方向）。
+                final int quadCount = Math.min(255, entry.quads().length);
+                buf.put((byte) quadCount);
+                for (int qi = 0; qi < quadCount; qi++) {
+                    final ModelGeometryCache.Quad q = entry.quads()[qi];
+                    for (float v : q.vertices()) buf.putFloat(v); // 12 × float：p0..p3，格内局部 [0,1]
+                    for (float v : q.uvs()) buf.putFloat(v);      // 8 × float：sprite 局部 [0,1]
+                    buf.putFloat(q.nx());                         // 3 × float：单位法线（自算）
+                    buf.putFloat(q.ny());
+                    buf.putFloat(q.nz());
+                    buf.putInt(q.spriteIndex());                  // int：本 epoch 的 sprite 表下标
+                }
+            }
+            // v2.37 七次修订（§15.3）信号缺失段：本段是**最后一段**。采集侧解析到此处即文件尾，
+            // 归零的 signalLossCount（本世界常态）也必须写——它是"无该族在场"的权威断言，而非缺省。
+            buf.putInt(signalLoss.size());     // signalLossCount
+            for (Map.Entry<Long, String> e : signalLoss.entrySet()) {
+                final byte[] idBytes = e.getValue().getBytes(StandardCharsets.UTF_8);
+                buf.putLong(e.getKey());       // BlockPos.asLong
+                buf.putShort((short) idBytes.length);
+                buf.put(idBytes);              // block 注册 id（如 minecraft:tripwire；诊断 + 将来加族用）
+            }
+            final byte[] bytes = new byte[buf.position()];
+            buf.flip();
+            buf.get(bytes);
+            Files.write(tmp, bytes);
             // ATOMIC_MOVE 尽力而为；失败时回退 REPLACE_EXISTING（同目录 rename 通常原子）
             try {
                 Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
