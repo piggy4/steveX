@@ -222,18 +222,48 @@ public class MemoryRestorer {
 
         if (toPlace.isEmpty()) return;
 
-        int placed = 0;
+        int placedNew = 0;
+        int rewritten = 0;
+        int skipped = 0;
         for (BlockPos pos : toPlace) {
             StoredBlock sb = current.get(pos);
-            if (sb != null && place(level, pos, sb)) placed++;
+            boolean isNew = applied.get(pos) == null;
+            if (sb != null && place(level, pos, sb)) {
+                if (isNew) placedNew++;
+                else rewritten++;
+            } else {
+                // v2.38 §18.5-C：**失败/被拒的 pos 不记账**——把它在 applied 里的旧指纹留下（本来就没有就
+                // 删掉），于是下一帧仍满足 `key != applied.get(pos)` ⇒ 继续进 toPlace 重试。
+                // 原实现无条件 `applied.putAll(next)`，任何一次静默失败（如 loadStatic 返回 null、worldState
+                // 守卫拒绝）都会被记成"已应用"⇒ 永不重试，只能靠重启自愈（§18.4-2）。
+                skipped++;
+                String prev = applied.get(pos);
+                if (prev == null) next.remove(pos);
+                else next.put(pos, prev);
+            }
         }
 
         applied.clear();
         applied.putAll(next);
 
-        LOGGER.info("[MemoryWorld] Sync [{}]: +{} placed, total {} entries", dimension, placed, applied.size());
+        // §18.5-D：三种情况必须可分辨——旧的 `+N placed` 把"首次放置 / 内容重写 / 失败跳过"混成一个数，
+        // 2026-09-12 的误判正是读它读出来的（§18.4 附注）。读法见 §10 第 22 条：
+        // placed = 该 pos 首次放置；rewritten = 之前放过、本次内容或状态变了（**BE 内容收缩走这一支**）；
+        // skipped = 没生效（下一帧会重试）。
+        LOGGER.info(
+                "[MemoryWorld] Sync [{}]: +{} placed, {} rewritten, {} skipped, total {} entries",
+                dimension, placedNew, rewritten, skipped, applied.size());
     }
 
+    /**
+     * 放置一个 BE 记录（方块 + 方块实体内容），并**发布**这次改动。
+     *
+     * <p><b>返回值语义（§18.5-C）</b>：载荷里有内容、但实体没能装上（{@link BlockEntity#loadStatic} 返回
+     * null）⇒ 返回 <b>false</b>，让调用方不记账、下一帧重试。只放方块（载荷无内容）或两者都放好 ⇒ true。
+     *
+     * <p><b>为何要"发布"（§18）</b>：内容收缩时方块状态一字不变，于是 `setBlock` 什么都不做、
+     * `setBlockEntity` 也只是把实体塞进 map——**改动既到不了客户端、也到不了磁盘**。见下面两处发布调用。
+     */
     private boolean place(final ServerLevel level, final BlockPos pos, final StoredBlock sb) {
         try {
             BlockState state = BlockStateUtil.fromSaved(sb.blockId(), sb.state());
@@ -250,8 +280,14 @@ public class MemoryRestorer {
             // 不含 UPDATE_KNOWN_SHAPE(bit16) → 不传播形状更新；不含 UPDATE_SKIP_ON_PLACE 之外的效果（816 含
             // 512 SKIP_ON_PLACE / 256 SKIP_BE_SIDEEFFECTS / 32 SUPPRESS_DROPS / 16 KNOWN_SHAPE）→ 挂墙方块
             // 不因支撑方块未放置被破坏、红石线保留采集时连接、被替换方块不掉落物；保留 bit2 客户端同步。
-            level.setBlock(pos, state, Block.UPDATE_CLIENTS | Block.UPDATE_SKIP_ALL_SIDEEFFECTS);
+            //
+            // 返回值 = "状态是否真的写了"：LevelChunk.setBlockState 对**同状态**直接返回 null
+            // （LevelChunk.java:282）⇒ Level.setBlock 在 Level.java:224 `oldState == null → return false`，
+            // **连 sendBlockUpdated 都走不到**（:237）。"方块没变、只有 BE 内容变了"正是这种情况。
+            final boolean stateWritten =
+                    level.setBlock(pos, state, Block.UPDATE_CLIENTS | Block.UPDATE_SKIP_ALL_SIDEEFFECTS);
 
+            boolean installed = false;
             if (sb.nbt() != null && !sb.nbt().isEmpty()) {
                 CompoundTag nbt = sb.nbt().copy();
                 // 用目标坐标覆盖 nbt 里的位置字段，防止残留源世界坐标
@@ -263,9 +299,32 @@ public class MemoryRestorer {
                 if (be != null) {
                     be.setLevel(level);
                     level.setBlockEntity(be);
+                    installed = true;
                 }
+            } else {
+                installed = true; // 载荷无内容：本条目只负责方块，"实体没装上"这种情况不存在
             }
-            return true;
+
+            if (installed) {
+                // 发布 ①（客户端，§18.5-A）：状态没变时上面那次 setBlock 一个包都没发，必须显式补一下——
+                // 与 vanilla CampfireBlockEntity.markUpdated() 同款（它就是 sendBlockUpdated(pos, state, state, 3)）。
+                // 链路：ServerLevel.sendBlockUpdated(ServerLevel.java:1127) → ServerChunkCache.blockChanged(:464)
+                // → ChunkHolder.blockChanged(:123，需 ticking chunk) → chunkHoldersToBroadcast
+                // → ServerChunkCache.broadcastChangedChunks(:357) → ChunkHolder.broadcastChanges(:174)
+                // → broadcastBlockEntityIfNeeded(:212) → getUpdatePacket()。状态变了的那次 setBlock 已经排过
+                // 同样的队，无需重复发（故仅在 !stateWritten 时补）。
+                if (!stateWritten) {
+                    level.sendBlockUpdated(pos, state, state, Block.UPDATE_CLIENTS);
+                }
+                // 发布 ②（落盘，§18.5-B）：Level.setBlockEntity → LevelChunk.setBlockEntity 只做
+                // blockEntities.put，既不置脏也不发包（Level.java:698-703 / LevelChunk.java:400-410、427-455）；
+                // 置脏的唯一入口是 Level.blockEntityChanged → markUnsaved（Level.java:875-879）。
+                // **刻意不用 be.setChanged()**：它还会 updateNeighbourForOutputSignal（Level.java:994-1003，
+                // 水平四向扫、命中比较器即**直接** neighborChanged）⇒ 会在冻结世界里把红石/比较器逻辑激活，
+                // 破坏 §7.9 冻结不变量。直接调 blockEntityChanged 只做 markUnsaved，零副作用。
+                level.blockEntityChanged(pos);
+            }
+            return installed;
         } catch (Exception e) {
             LOGGER.warn("[MemoryWorld] Failed to place {} at {}: {}", sb.blockId(), pos, e.getMessage());
             return false;

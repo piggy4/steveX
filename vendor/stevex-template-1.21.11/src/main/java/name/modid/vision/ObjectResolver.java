@@ -187,23 +187,32 @@ public final class ObjectResolver {
         //     水/满格透明绝不可喂 main 场——恒假消失，优雅降级、恢复后自愈）；岩浆走 main 段不受影响。
         final boolean dimensionOk = cells.dimension() != null && !cells.dimension().isEmpty()
                 && cells.dimension().equals(dimensionId);
+        // v2.38（§7.1 决策 G2）：渲染距离闸门。客户端只画渲染距离内的区块，界外方块"存在但没写深度"
+        // ⇒ 判据在那儿是恒假阳性（§1.1 判据侧对称性断裂）。门限 = min(removalMaxRayDist, (rd−2)×16)，
+        // 公式与安全余量的全部说明只在 DeletionJudge.renderDistanceGate 一处，此处只取值。
+        // 注：rd ≤ 2 时门限为 0 ⇒ 本帧所有记忆格都不可判（全欠删）——这是有意的保守退化，不是缺陷。
+        final double maxDistBlocks = DeletionJudge.renderDistanceGate(
+                Minecraft.getInstance().options.getEffectiveRenderDistance(), cells.maxRayDist());
         final List<BlockPos> deletions = new ArrayList<>();
         final List<BlockPos> translucentDeletions = new ArrayList<>();
         if (dimensionOk) {
             // main 段 → main 场（§7.11 原样判据）
-            deletions.addAll(DeletionJudge.test(snap, unproj, cells.cells(), cells.pixelThreshold(), terrain.keySet()));
+            deletions.addAll(DeletionJudge.test(snap, unproj, cells.cells(), cells.pixelThreshold(),
+                    terrain.keySet(), maxDistBlocks));
             // translucent 段 → 按当前图形配置路由（与 §5.4 采集通道同口径，不得混用）
             if (!cells.translucentCells().isEmpty()) {
                 if (fabulous) {
                     if (snap.hasTranslucentDepth() && cells.translucentEnabled()) {
                         translucentDeletions.addAll(DeletionJudge.testTranslucent(
-                                snap, unproj, cells.translucentCells(), cells.pixelThreshold(), terrain.keySet()));
+                                snap, unproj, cells.translucentCells(), cells.pixelThreshold(),
+                                terrain.keySet(), maxDistBlocks));
                     }
                     // Fabulous && (!hasTranslucentDepth || !translucentEnabled) → translucent 段空集
                 } else {
                     // Fancy/Fast：水/满格透明写 main → 并入现有 main 场判据
                     translucentDeletions.addAll(DeletionJudge.test(
-                            snap, unproj, cells.translucentCells(), cells.pixelThreshold(), terrain.keySet()));
+                            snap, unproj, cells.translucentCells(), cells.pixelThreshold(),
+                            terrain.keySet(), maxDistBlocks));
                 }
             }
             deletions.addAll(translucentDeletions);
@@ -242,7 +251,8 @@ public final class ObjectResolver {
                 }
                 shapedJudged = resolved.size();
                 shapedDeletions.addAll(DeletionJudge.testShaped(
-                        snap, unproj, resolved, cells.pixelThreshold(), terrain.keySet(), shapedUnjudged));
+                        snap, unproj, resolved, cells.pixelThreshold(), terrain.keySet(),
+                        maxDistBlocks, shapedUnjudged));
             } else {
                 shapedJudged = -1; // 整段作废（epoch 不符 / sprite 表不可得）
                 // local=0 表示本端**没有**可用的 sprite 表（文件缺失 / 解析失败——多为格式错位），
@@ -279,12 +289,35 @@ public final class ObjectResolver {
             signalLossStats = null; // 记忆侧离线 / 空段 / 跨维 → 无候选，无话可说
         }
 
+        // v2.37（§7.14）实体在场校正通道：对记忆侧上报的**冻结实体占用格**直读真实世界（同 §15 的路线：
+        // 换证据类型，而非修补谓词）。旧判据要求实体 AABB 覆盖的**全部**格都被证明为空，而 deletions 证明
+        // 的是"这格没有实心不透明方块"——实体格含"当前可见方块"（营火 / 耕地 / 雪层 / 台阶…）时该格
+        // 永不入 deletions ⇒ 与非满方块共格的冻结实体**永久残留**（§7.14 根因）。
+        //   未加载 ⇒ 不裁决（读不到 ≠ 不存在，P1——本通道唯一的新增前提）；
+        //   查到实体（除 agent 自身，见 EntityPresenceCorrector 的承重说明）⇒ 不裁决（P3）；
+        //   已加载 ∧ 查询为空 ⇒ 缺席。
+        // **并列**而非并入 deletions：deletions 对实体是错的代理（实体渲染几何 ≪ AABB，格内空余区的射线
+        // 投票"越过"——既是欠删来源、也是误删活体的隐蔽通道）。实体格本版已整段撤出 main 段，实体裁决
+        // 由本通道独占（§7.14.1"替换而非并列"）。本通道对渲染帧零依赖：不读深度 / PBO / Fabulous。
+        final List<BlockPos> entityDeletions = new ArrayList<>();
+        final EntityPresenceCorrector.Stats entityPresenceStats;
+        if (dimensionOk && !cells.entityCells().isEmpty()) {
+            final EntityPresenceCorrector.Result epr =
+                    EntityPresenceCorrector.correct(level, cells.entityCells(), visibleEntityCells(snap));
+            entityDeletions.addAll(epr.absent());
+            entityPresenceStats = epr.stats();
+        } else {
+            entityPresenceStats = null; // 记忆侧离线 / 空段 / 跨维 → 无候选，无话可说
+        }
+
         // v2.36/v2.37 诊断：main/translucent/shaped 三段各自判删数 + 几何段可判格数
+        // v2.38 追加 maxDist：G2 闸门的实际取值（欠删方向的"可见的盲目"——rd 调小 / 门限收缩会让
+        // 判删数下降，不打出这个数就会被误读成"识别变准了"，与 §10 第 18 条同一条原则）。
         LOGGER.info("[Vision] deletions: main={}, translucent={}, shaped={}/{} judged (total={}, fabulous={}, "
-                        + "hasTranslucentDepth={}, translucentEnabled={})",
+                        + "hasTranslucentDepth={}, translucentEnabled={}, maxDist={})",
                 deletions.size() - translucentDeletions.size() - shapedDeletions.size(),
                 translucentDeletions.size(), shapedDeletions.size(), shapedJudged,
-                deletions.size(), fabulous, snap.hasTranslucentDepth(), cells.translucentEnabled());
+                deletions.size(), fabulous, snap.hasTranslucentDepth(), cells.translucentEnabled(), maxDistBlocks);
 
         // v2.37 七次修订（§15.7 / §10 第 19 条）诊断：信号缺失族校正通道逐格记账。
         // 本通道的四档跳过全部**方向安全**（跳过 = 不裁决 = 欠删），但它们的含义完全不同，混在一起就
@@ -298,6 +331,22 @@ public final class ObjectResolver {
                             + "stillPresent={}, visibleSkipped={}",
                     signalLossStats.candidates(), signalLossDeletions.size(), signalLossStats.unloaded(),
                     signalLossStats.voidAir(), signalLossStats.stillPresent(), signalLossStats.visibleSkipped());
+        }
+
+        // v2.37（§7.14 / §10 第 19 条同款）诊断：实体在场校正通道逐格记账。四档全部方向安全（跳过 =
+        // 不裁决 = 欠删），但含义完全不同，混在一起就无法与"判了但没删"区分：
+        //   unloaded：P1 守卫真的在干活。非零正常且必需（玩家走远即发生）；候选非空却恒为 0，反而要查。
+        //   occupied：常态档（活着的镜像副本每轮都落在这里）。它恒等于候选数 = 当前没有可删的实体。
+        //   visibleSkipped：恒不应触发的**跨源**双保险（可见实体必然在 level 实体表里）。
+        //                  零星非零有一个良性来源：快照 AABB 是渲染帧**插值**盒，快移实体的插值盒可能
+        //                  多覆盖一格而该格此刻已空——这不是矛盾。持续 / 大面积非零才是要查的信号。
+        //   absent：本通道唯一被授权证明的事实（= 上面 absent 方括号里的数）。
+        if (entityPresenceStats != null) {
+            LOGGER.info("[Vision] entityPresence: candidates={}, absent={}, unloaded={}, occupied={}, "
+                            + "visibleSkipped={}",
+                    entityPresenceStats.candidates(), entityPresenceStats.absent(),
+                    entityPresenceStats.unloaded(), entityPresenceStats.occupied(),
+                    entityPresenceStats.visibleSkipped());
         }
 
         // v2.37 诊断（设计 §10 第 16 条）：δ 逐格化的实际落点。判据 2b 为 Z ≥ t_shape_exit + δ_cell，
@@ -341,8 +390,41 @@ public final class ObjectResolver {
         // v2.37 七次修订（§15.3）：signalLossDeletions 作为**并列键**随同一份 terrain.nbt 落盘
         // （不并入 deletions，见上）；记忆侧 DeletionApplier 用并列通道按各自的守卫执行。
         final Map<String, Object> terrainStats = VisionCollector.getTerrainStore().sync(
-                terrain, deletions, signalLossDeletions, agentPos, agentYaw, agentPitch, agentFov,
-                worldTime, dimensionId);
+                terrain, deletions, signalLossDeletions, entityDeletions, agentPos, agentYaw, agentPitch,
+                agentFov, worldTime, dimensionId);
+
+        // v2.38（§4.1 F1 / §7.1 决策 G·H·I）唯一删除原语 —— 同一 resolve 内、terrain.nbt 落盘之后，
+        // 把"判据证明已消失"这一事实落到两份**持久负载**上（§1.1 的对称性断裂正因为负载只增不删）：
+        //   VisionBlockEntityStore：**即时**修剪（决策 G 不对称的 BE 侧——NBT 载荷每帧可观测、可重建，
+        //                           误剪代价 = 一轮闪烁且自愈）；
+        //   ContainerMemoryStore  ：**延迟 K 代际**修剪 + 观测到活体即撤销（决策 G 的容器侧——Items
+        //                           是交互事件产物、观测层面拿不回来 ⇒ 必须给可撤销窗口）。
+        // 位置必须在两 store 的 sync **之前**：sync 是增量 union，看着"已被判删"的记录照样原样留在文件里
+        // ⇒ 下一帧记忆侧回放又把方块复活（告示牌/箱子/床的根因，§1.1）。
+        // 入参 = deletions ∪ signalLossDeletions（决策 H）：只覆盖 deletions 会让"信号缺失表加进来的
+        // 方块"删了方块却留下负载，§14.4 的加表路线就此失效。
+        // ⚠ v2.37（§7.14）：entityDeletions **刻意不进这里**，也不进任何方块删除通道。它证明的是
+        // "这格现实中没有实体"，与"这格有没有方块"正交——实体占据的格常常是**仍然存在**的方块
+        // （掉落物落在营火上、生物站在耕地上），并进去就是对活方块做整格删除（§1.3 那类误删）。
+        final Map<BlockPos, String> pruneTargets = buildPruneTargets(deletions, signalLossDeletions, cells);
+        final Map<String, Integer> bePrune = VisionCollector.getStore().applyDeletions(dimensionId, pruneTargets);
+        final Map<String, Integer> containerPrune =
+                ContainerMemoryStore.get().applyDeletions(dimensionId, pruneTargets, terrain.keySet());
+        // 诊断（§10 第 15 条）：F1 的实际落点。只在**有事发生**时打：pruned/kept/pending/cancelled
+        // 任一非零。missing 单列——它恒是"该格在持久层本就没有记录"（遍历绝大多数格，不是异常）。
+        if (bePrune.getOrDefault("pruned", 0) > 0 || bePrune.getOrDefault("kept", 0) > 0
+                || containerPrune.getOrDefault("pruned", 0) > 0
+                || containerPrune.getOrDefault("pending", 0) > 0
+                || containerPrune.getOrDefault("cancelled", 0) > 0) {
+            LOGGER.info("[Vision] prune(F1): targets={} | be: pruned={}, keptByIdentity={}, noRecord={} "
+                            + "| container: pruned={}, pending={}, cancelled={}, keptByIdentity={} (K={})",
+                    pruneTargets.size(),
+                    bePrune.get("pruned"), bePrune.get("kept"), bePrune.get("missing"),
+                    containerPrune.get("pruned"), containerPrune.get("pending"),
+                    containerPrune.get("cancelled"), containerPrune.get("kept"),
+                    ContainerMemoryStore.get().pruneGenerations());
+        }
+
         final Map<String, Integer> beStats = VisionCollector.getStore().sync(
                 blockEntities, agentPos, agentYaw, agentPitch, agentFov, worldTime, dimensionId);
         final Map<String, Object> entityStats = VisionCollector.getEntityStore().sync(
@@ -351,6 +433,78 @@ public final class ObjectResolver {
         return new ResolveResult(terrain, blockEntities, entities, deletions, dimensionId,
                 terrainStats, beStats, entityStats,
                 Map.of("cells", biomeStats.cells(), "added", biomeStats.added()));
+    }
+
+    /**
+     * v2.38（§4.1 F1 / §7.1 决策 H·I）从本帧的判删结果构造<b>持久层修剪目标</b>：
+     * {@code deletions ∪ signalLossDeletions} → 该格由记忆侧上报的 blockId。
+     *
+     * <p><b>为什么取并集（决策 H）</b>：两条判删通道是并列的（{@link DeletionJudge} 的几何/整格判据、
+     * {@code SignalLossCorrector} 的状态直读），各有独立守卫；但对"这格已被证明消失"这一事实而言两者
+     * 等价——持久层只关心"要不要删记录"。只取 {@code deletions} 会让信号缺失通道（含 §14.4 加进来的
+     * 148 个 BE 载体方块）删了方块却留下负载 ⇒ 下一帧复活，加表路线整体失效。
+     *
+     * <p><b>blockId 从哪来（决策 I 的 I′ 实现）</b>：只有携带方块 id 的段能给出身份——信号缺失段
+     * （{@link MemoryCellsReader.SignalLossCell}）与几何段（{@link ShapedCellData.ShapedCell}）；
+     * main / translucent 段在 cells 文件里只有裸坐标（零足迹设计），故填空串。持久层对空串<b>不作</b>身份
+     * 要求（"上报即持有"：这些段的上报谓词与记忆侧执行守卫同族，构造性地保证记忆侧确实持有该方块）。
+     *
+     * <p>同 pos 出现在多段时保留<b>非空</b>身份（段之间按设计互斥，此处只为防御）。返回表可为空
+     * （无判删 / 记忆侧离线 / 跨维）。
+     */
+    private static Map<BlockPos, String> buildPruneTargets(
+            final List<BlockPos> deletions,
+            final List<BlockPos> signalLossDeletions,
+            final MemoryCellsReader.CellsData cells
+    ) {
+        if (deletions.isEmpty() && signalLossDeletions.isEmpty()) return Map.of();
+
+        final Map<BlockPos, String> idByPos = new HashMap<>();
+        for (ShapedCellData.ShapedCell sc : cells.shapedCells()) {
+            if (sc.blockId() != null && !sc.blockId().isBlank()) idByPos.putIfAbsent(sc.pos(), sc.blockId());
+        }
+        for (MemoryCellsReader.SignalLossCell sc : cells.signalLossCells()) {
+            if (sc.blockId() != null && !sc.blockId().isBlank()) idByPos.putIfAbsent(sc.pos(), sc.blockId());
+        }
+
+        final Map<BlockPos, String> targets = new HashMap<>(deletions.size() + signalLossDeletions.size());
+        for (BlockPos pos : deletions) {
+            targets.put(pos, idByPos.getOrDefault(pos, ""));
+        }
+        for (BlockPos pos : signalLossDeletions) {
+            // 不能覆盖已有的非空身份：deletions 侧若已给出 id 就沿用（同一格两段同判时以有身份者为准）
+            targets.merge(pos, idByPos.getOrDefault(pos, ""),
+                    (a, b) -> (a == null || a.isBlank()) ? b : a);
+        }
+        return targets;
+    }
+
+    /**
+     * 本帧可见实体快照的 AABB 覆盖格（v2.37 §7.14），供 {@link EntityPresenceCorrector} 作<b>恒不应
+     * 触发</b>的跨源双保险：可见实体必然在 {@code level} 的实体表里 ⇒ 对它的格做实体检查询必非空。
+     * 格枚举与记忆侧 {@code MemoryCellReporter} 的实体段同口径（{@code floor(min)..floor(max)}），
+     * 否则两边对同一实体的格集不一致，双保险会假触发。
+     *
+     * <p>注意快照盒是<b>渲染帧插值</b>后的盒（{@code DepthCapture} 在采集帧按 partialTick 移动），
+     * 而查询读的是 tick 位置——快移实体可能因此多覆盖一格，落在该格的候选会被判"矛盾"而跳过
+     * （欠删，方向安全）。这是 {@code entityPresence} 日志里 {@code visibleSkipped} 零星非零的良性来源。
+     */
+    private static Set<BlockPos> visibleEntityCells(final DepthCapture.DepthSnapshot snap) {
+        final Set<BlockPos> out = new HashSet<>();
+        for (DepthCapture.EntitySnapshotData e : snap.entities()) {
+            final AABB box = e.box();
+            final int minX = Mth.floor(box.minX), maxX = Mth.floor(box.maxX);
+            final int minY = Mth.floor(box.minY), maxY = Mth.floor(box.maxY);
+            final int minZ = Mth.floor(box.minZ), maxZ = Mth.floor(box.maxZ);
+            for (int x = minX; x <= maxX; x++) {
+                for (int y = minY; y <= maxY; y++) {
+                    for (int z = minZ; z <= maxZ; z++) {
+                        out.add(new BlockPos(x, y, z));
+                    }
+                }
+            }
+        }
+        return out;
     }
 
     /** 由实体快照构建 SectionPos 桶（§5.3 粗过滤；桶与命中盒统一 inflate 0.5，v2.10）。 */

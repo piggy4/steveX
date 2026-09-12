@@ -66,13 +66,33 @@ public class TerrainRestorer {
     private static final String KEY_DELETIONS = "deletions";
     /**
      * v2.37 七次修订（§15.3）<b>信号缺失族</b>删除证据：采集侧 {@code SignalLossCorrector} 用
-     * <b>真实世界状态直读</b>（而非深度推断）证明消失的绊线 / 绊线钩格（同型 LongArrayTag）。
+     * <b>真实世界状态直读</b>（而非深度推断）证明消失的信号缺失族格（同型 LongArrayTag）。
+     *
+     * <p><b>该族的范围在 v2.38 扩过两次</b>（族定义只在 {@code BlockStateUtil.SIGNAL_LOSS_BLOCKS}）：
+     * v2.37 = 绊线 / 绊线钩；v2.38 批 2（§14.4）= 再入 148 个 BE 载体方块（箱子族 / 告示牌 / 床 / 旗帜…）；
+     * v2.38 §17 补遗 = 再入 6 个乙1（{@code brewing_stand} / {@code hopper} / {@code comparator} /
+     * {@code daylight_detector} / {@code sculk_sensor} / {@code calibrated_sculk_sensor}）。
+     * <b>本键的内容随族定义自动变宽，此处不需改动。</b>
      *
      * <p>与 {@link #KEY_DELETIONS} <b>并列为两个键</b>：两者证据类型不同、记忆侧执行时各用各的守卫
      * （{@code deletions} 走 {@code isDeletableContent ∪ isShapedDeletableContent}，本键走
      * {@code isSignalLossBlock}）。合并成一键就只能挂一道守卫，双保险失效（§15.2）。
      */
     private static final String KEY_SIGNAL_LOSS_DELETIONS = "signalLossDeletions";
+    /**
+     * v2.37（§7.14）<b>实体在场</b>删除证据：采集侧 {@code EntityPresenceCorrector} 直读真实世界，
+     * 证明"该格现实中已无实体"的冻结实体占用格（同型 LongArrayTag）。
+     *
+     * <p><b>又是并列键，且是三条通道里最不能合流的一条</b>：本键承载的证据与"这格有没有方块"正交。
+     * 并入 {@code deletions} 有两个各自足够的理由（详见采集侧 {@code VisionTerrainStore} 同键说明）：
+     * ① 实体占据的格常常是<b>仍然存在</b>的方块（掉落物落在营火上、生物站在耕地上）⇒ 合流即对活方块
+     * 整格删除；② {@code deletions} 对实体是错的代理（实体几何 ≪ AABB）⇒ 合流就等于把实体裁决又交回
+     * 那条既欠删又误删活体的旧通道，本次修正等于白做。
+     *
+     * <p>与 {@link #KEY_DELETIONS} 的关系是<b>替换而非并列</b>：{@code DeletionApplier} 的实体通道
+     * 只吃本键 + 相机格，<b>不再</b>吃 {@code deletions}（§7.14.1）。
+     */
+    private static final String KEY_ENTITY_DELETIONS = "entityDeletions";
     /** v2.22（§7.11）采集时相机（眼睛）位置 —— 相机格快路径 + 距离球参考（DeletionApplier 用）。 */
     private static final String KEY_AGENT_POS = "agentPos";
 
@@ -289,7 +309,8 @@ public class TerrainRestorer {
         }
     }
 
-    /** 解析一个维桶（正文形态与旧版文件顶层逐字一致）：blocks + deletions + signalLossDeletions + cameraPos。 */
+    /** 解析一个维桶（正文形态与旧版文件顶层逐字一致）：blocks + deletions + signalLossDeletions +
+     *  entityDeletions + cameraPos。 */
     private static TerrainData parseBucket(final CompoundTag bucket) {
         Map<BlockPos, TerrainBlock> blocks = new LinkedHashMap<>();
         CompoundTag blocksTag = bucket.getCompoundOrEmpty(KEY_BLOCKS);
@@ -306,9 +327,12 @@ public class TerrainRestorer {
         // v2.37 七次修订（§15）：信号缺失族（状态直读证明消失的绊线 / 绊线钩）。
         // 旧采集侧 / 旧文件无该键 → 空列表 → 该通道静默不删（只增不删，方向安全，且不影响 deletions）。
         final List<BlockPos> signalLossDeletions = readPosLongArray(bucket, KEY_SIGNAL_LOSS_DELETIONS);
+        // v2.37（§7.14）：实体在场通道（直读证明"该格现实中已无实体"）。旧采集侧 / 旧文件无该键 →
+        // 空列表 → 实体通道无证据 → **实体恒欠删**（宁可不删，方向安全；升级后自愈）。
+        final List<BlockPos> entityDeletions = readPosLongArray(bucket, KEY_ENTITY_DELETIONS);
         // 相机位置（DeletionApplier 相机格快路径用）。旧文件无该键 → null，兼容
         Vec3 cameraPos = parseVec3(bucket.getStringOr(KEY_AGENT_POS, ""));
-        return new TerrainData(blocks, deletions, signalLossDeletions, cameraPos);
+        return new TerrainData(blocks, deletions, signalLossDeletions, entityDeletions, cameraPos);
     }
 
     /** 读一个 BlockPos long 数组键（缺失 / 类型不符 → 空列表）。 */
@@ -381,19 +405,29 @@ public class TerrainRestorer {
      * {@code deletions}（深度推断证明消失的记忆格）与 {@code signalLossDeletions}（状态直读证明
      * 消失的信号缺失族格，绊线 / 绊线钩）。二者<b>定义域不相交且守卫不同</b>，故在执行侧分两个
      * 通道，绝不合流（§15.2）。
+     *
+     * <p>v2.37（§7.14）：再加第三条并列证据 {@code entityDeletions}（直读证明"该格现实中已无实体"）。
+     * 它<b>不喂方块通道</b>（与"有没有方块"正交），只喂实体通道——并且是实体通道的<b>全部</b>证据
+     * （连同相机格），把原先由 {@code deletions} 派生的实体证据整条替换掉。
      */
     record TerrainData(
             Map<BlockPos, TerrainBlock> blocks,
             List<BlockPos> deletions,
             /** v2.37 七次修订（§15）：状态直读证明消失的信号缺失族格（绊线 / 绊线钩）。 */
             List<BlockPos> signalLossDeletions,
+            /** v2.37（§7.14）：直读证明"该格现实中已无实体"的冻结实体占用格（只喂实体通道）。 */
+            List<BlockPos> entityDeletions,
             Vec3 cameraPos
     ) {
-        /** 内容指纹 = 方块表 + 两条删除清单（任一变化都须触发重新读取 / 应用，§7.11 / §15.7 第 8 条）。
+        /** 内容指纹 = 方块表 + 三条删除清单（任一变化都须触发重新读取 / 应用，§7.11 / §15.7 第 8 条）。
          *  <p>漏掉 {@code signalLossDeletions} → 镜像里绊线被拆而其余键未变 → 本侧判定"文件没变"
-         *  → 该通道静默空转（安全但功能全无，且无任何错误迹象）。 */
+         *  → 该通道静默空转（安全但功能全无，且无任何错误迹象）。
+         *  <p>同理，v2.37 起<b>绝不能</b>漏掉 {@code entityDeletions}：本次修正的现场恰恰是"镜像里
+         *  只有实体变了"（掉落物被拾取），方块表与另两条清单<b>多半原样未变</b> ⇒ 漏掉本项则文件
+         *  永不重读 ⇒ 实体通道静默空转，缺陷以"完全没修"的形态复现。 */
         String fingerprint() {
-            return blocks.toString() + "|" + deletions.toString() + "|" + signalLossDeletions.toString();
+            return blocks.toString() + "|" + deletions.toString() + "|" + signalLossDeletions.toString()
+                    + "|" + entityDeletions.toString();
         }
     }
 

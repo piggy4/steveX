@@ -91,6 +91,22 @@ public class VisionTerrainStore {
      * 两条保险各自完整（§15.2）。
      */
     private static final String KEY_SIGNAL_LOSS_DELETIONS = "signalLossDeletions";
+    /**
+     * v2.37（§7.14）：<b>被证明"现实中已无实体"的冻结实体占用格</b>（同型 long 数组，采集侧
+     * {@link EntityPresenceCorrector} 产出）。
+     *
+     * <p><b>为什么又是并列键（不并进 {@code deletions}）</b>：本键承载的证据类型与前两键都不同——
+     * "这格现实中还有没有实体"，与"这格有没有方块"正交。两条理由各自独立足够：
+     * <ol>
+     *   <li><b>并入会误删方块</b>：实体占据的格完全可以是<b>仍然存在</b>的方块（掉落物落在营火上、
+     *       生物站在耕地上）。把"格内无实体"当作"格内无方块"的证据 ⇒ §1.3 的"活本体被整格置空"
+     *       误删原样复现。故本键<b>绝不进</b> {@code buildPruneTargets}（持久负载修剪）也不走方块删除通道。</li>
+     *   <li><b>并入会保留旧缺陷</b>：{@code deletions} 对实体是错的代理（实体渲染几何 ≪ AABB，格内空余区
+     *       的射线投票"越过"，既欠删又误删活体）。本键与它分家之后，记忆侧实体裁决只吃本键 + 相机格，
+     *       §7.14.1"替换而非并列"的裁决才真正落地。</li>
+     * </ol>
+     */
+    private static final String KEY_ENTITY_DELETIONS = "entityDeletions";
 
     private final Path filePath;
 
@@ -119,18 +135,22 @@ public class VisionTerrainStore {
      * @param signalLossDeletions v2.37（§15）：被证明消失的<b>信号缺失族</b>格（采集侧
      *        {@code SignalLossCorrector} 状态直读产出，可空）。<b>恒不与 {@code deletions} 合并</b>，
      *        理由见 {@link #KEY_SIGNAL_LOSS_DELETIONS}
+     * @param entityDeletions v2.37（§7.14）：被证明"现实中已无实体"的冻结实体占用格（采集侧
+     *        {@code EntityPresenceCorrector} 直读产出，可空）。<b>只喂记忆侧的实体删除通道</b>，
+     *        恒不与 {@code deletions} 合并、恒不进持久负载修剪（理由见 {@link #KEY_ENTITY_DELETIONS}）
      * @param agentPos 采集时观察者的相机（眼睛）双精度坐标（游戏精度），可为 null
      * @param agentYaw 采集时观察者水平朝向（度）
      * @param agentPitch 采集时观察者俯仰朝向（度）
      * @param agentFov 采集时观察者基础视场角（整数度，游戏精度）
      * @param worldTime 采集时世界时间（dayTime，游戏时间单位；无世界时 -1，v2.21）
      * @param dimensionId v2.32：采集时所在维 id（{@code level.dimension().identifier()}），决定写哪个桶
-     * @return 统计信息 { "blocks": n, "deletions": n, "signalLossDeletions": n }
+     * @return 统计信息 { "blocks": n, "deletions": n, "signalLossDeletions": n, "entityDeletions": n }
      */
     public Map<String, Object> sync(
             final Map<BlockPos, VisionCollector.TerrainBlockSnapshot> blocks,
             final List<BlockPos> deletions,
             final List<BlockPos> signalLossDeletions,
+            final List<BlockPos> entityDeletions,
             final Vec3 agentPos,
             final float agentYaw,
             final float agentPitch,
@@ -171,11 +191,20 @@ public class VisionTerrainStore {
         }
         bucket.put(KEY_SIGNAL_LOSS_DELETIONS, new LongArrayTag(slArr));
 
+        // v2.37（§7.14）：实体裁决恒写并列键（空 = 本帧无实体删除证据）。记忆侧读不到该键 → 空列表
+        // （旧文件 / 旧版采集侧）→ 实体通道静默不删，只增不删，方向安全。
+        final long[] eArr = new long[entityDeletions.size()];
+        for (int i = 0; i < entityDeletions.size(); i++) {
+            eArr[i] = entityDeletions.get(i).asLong();
+        }
+        bucket.put(KEY_ENTITY_DELETIONS, new LongArrayTag(eArr));
+
         worlds.put(dimensionId, bucket);
         writeFile();
 
         return Map.of("blocks", blocks.size(), "deletions", deletions.size(),
-                "signalLossDeletions", signalLossDeletions.size());
+                "signalLossDeletions", signalLossDeletions.size(),
+                "entityDeletions", entityDeletions.size());
     }
 
     // ==================== 内部 ====================

@@ -38,6 +38,12 @@ import net.minecraft.world.phys.Vec3;
  * <p>v2.36（§7.12）{@link #testTranslucent}：main 场判据的<b>同构镜像</b>，逐像素深度换读 translucent
  * 目标（"首个半透明面"，主拷贝 = 无半透明在前）。只判记忆侧 translucent 段（水 / 满格透明）；
  * 由 {@code ObjectResolver} 按图形配置路由（Fabulous && hasTranslucentDepth 时调用）。
+ *
+ * <p>v2.38（§7.1 <b>决策 G2</b>）：三条判据入口（{@link #test} / {@link #testTranslucent} /
+ * {@link #testShaped}）各多一个<b>渲染距离闸门</b> {@code maxDistBlocks}。理由：客户端只渲染渲染距离
+ * <b>之内</b>的区块，界外方块<b>存在却没写深度</b>，其深度场与"真消失"<b>逐位同形</b>——判据再精确也
+ * 无法区分（§1.1 对称性断裂的判据侧）。故闸门必须在<b>判据之外</b>按格提前跳过。门限的算法见
+ * {@link #renderDistanceGate}，度量见 {@link #nearestDist}。
  */
 public final class DeletionJudge {
 
@@ -133,6 +139,49 @@ public final class DeletionJudge {
         return DELTA_NOISE_C * QUANTUM_PER_Z2 * z * z;
     }
 
+    /**
+     * v2.38（§7.1 决策 G2）<b>渲染距离闸门</b>的门限算法 —— 三条判据入口共用，<b>公式只此一份</b>。
+     *
+     * <p>{@code maxDistBlocks = max(0, min(removalMaxRayDist, (renderDistanceChunks − 2) × 16))}：
+     * <ul>
+     *   <li>{@code removalMaxRayDist} 侧：判据的 δ / 1 ULP 只在近距可靠（§5.4 / §14.5，removalMaxRayDist=96
+     *       本就钉在可靠区），闸门不得放宽它；</li>
+     *   <li>{@code (rd − 2) × 16} 侧：<b>2 区块余量</b>是安全性的全部来源 —— 客户端按区块渲染，渲染距离
+     *       的边界区块画或不画由实现细节决定，向内收 2 个区块后"门限内的格必已渲染"才有保证
+     *       （配合 {@link #nearestDist} 的最近点度量）；</li>
+     *   <li>{@code max(0, …)}：rd ≤ 2 时门限为 <b>0 ⇒ 全格不可判（全欠删）</b>。这是<b>有意保留</b>的
+     *       保守退化（"宁可什么都不删，也不能删掉界外的活体"），不是待修的 bug；</li>
+     *   <li>rd ≤ 0（未解析到 / 无客户端选项）⇒ 同样退化为 0。</li>
+     * </ul>
+     *
+     * @param renderDistanceChunks 客户端有效渲染距离（区块，{@code getEffectiveRenderDistance()}）
+     * @param removalMaxRayDist    记忆侧下发的判定距离上限（格，{@code cells.maxRayDist()}，double）
+     */
+    public static double renderDistanceGate(final int renderDistanceChunks, final double removalMaxRayDist) {
+        return Math.max(0.0, Math.min(removalMaxRayDist, (renderDistanceChunks - 2) * 16.0));
+    }
+
+    /**
+     * v2.38（§7.1 决策 G2）：相机到<b>格最近点</b>的欧氏距离 —— 渲染距离闸门的度量。
+     *
+     * <p><b>为什么取最近点而非中心 / 远点</b>：闸门要回答的是"这个格<b>有没有被画出来</b>"。方块按
+     * <b>区块</b>渲染，一个格整体落在同一区块内 ⇒ 该区块在渲染距离内，则含其远面的<b>整个格</b>都被画了。
+     * 最近点距离是全格各点距离的<b>下界</b>：最近点 ∈ 门内而中心 / 远点超出的格，正是"区块被画了、格贴着
+     * 外沿"的情形 —— 这类格仍可判（值得判）；改用远点会把它们连同大量真格一起误跳，是无谓的欠删。
+     *
+     * <p><b>安全性从哪来</b>：<b>不</b>来自"最近 / 最远"的取舍，而来自门限里的 2 区块余量
+     * （{@link #renderDistanceGate}）—— 最近点都在门内的格，其所在区块必然落在 {@code rd} 区块的渲染
+     * 范围内（格内跨度 ≤ √3 格 < 1 区块）。故"最近点 + 余量"= 只判<b>确定已渲染</b>的格。
+     *
+     * <p>相机在格内 ⇒ 返 0（调用方另有"相机在格内 ⇒ 格必然存在"的早跳，本函数不重复该语义）。
+     */
+    static double nearestDist(final Vec3 cam, final BlockPos pos) {
+        final double dx = cam.x - Math.min(Math.max(cam.x, pos.getX()), pos.getX() + 1.0);
+        final double dy = cam.y - Math.min(Math.max(cam.y, pos.getY()), pos.getY() + 1.0);
+        final double dz = cam.z - Math.min(Math.max(cam.z, pos.getZ()), pos.getZ() + 1.0);
+        return Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
     /** 命中点必须落在格内的容差（0：命中点与格面同源计算，不需要额外余量）。 */
     private static final double TINCELL_EPS = 0.0;
 
@@ -153,6 +202,8 @@ public final class DeletionJudge {
      * @param memoryCells 记忆侧上报的待判定格（已按距离球过滤）
      * @param pixelThreshold 越过像素阈值（默认 2）
      * @param currentTerrain 本次可见方块集（这些格绝不判删，省一次投影 + 双保险）
+     * @param maxDistBlocks v2.38 决策 G2：渲染距离闸门（{@link #renderDistanceGate}）；格最近点距离超出
+     *                      ⇒ 本帧不可判（跳过，欠删）。{@code Double.POSITIVE_INFINITY} = 不作门控
      * @return 被证明消失的格列表（可为空）
      */
     public static List<BlockPos> test(
@@ -160,9 +211,10 @@ public final class DeletionJudge {
             final Unprojector unproj,
             final List<BlockPos> memoryCells,
             final int pixelThreshold,
-            final Set<BlockPos> currentTerrain
+            final Set<BlockPos> currentTerrain,
+            final double maxDistBlocks
     ) {
-        return judge(snap, unproj, memoryCells, pixelThreshold, currentTerrain, false);
+        return judge(snap, unproj, memoryCells, pixelThreshold, currentTerrain, false, maxDistBlocks);
     }
 
     /**
@@ -184,6 +236,7 @@ public final class DeletionJudge {
      * @param memoryCells translucent 段待判定格（水 / 满格透明，已按距离球过滤）
      * @param pixelThreshold 越过像素阈值（默认 2）
      * @param currentTerrain 本次可见方块集（这些格绝不判删，双保险）
+     * @param maxDistBlocks v2.38 决策 G2：渲染距离闸门（{@link #renderDistanceGate}），语义同 {@link #test}
      * @return 被证明表层消失的格列表（可为空）
      */
     public static List<BlockPos> testTranslucent(
@@ -191,10 +244,11 @@ public final class DeletionJudge {
             final Unprojector unproj,
             final List<BlockPos> memoryCells,
             final int pixelThreshold,
-            final Set<BlockPos> currentTerrain
+            final Set<BlockPos> currentTerrain,
+            final double maxDistBlocks
     ) {
         if (!snap.hasTranslucentDepth()) return List.of(); // 防御：无 translucent 目标 → 不可判（宁欠勿删）
-        return judge(snap, unproj, memoryCells, pixelThreshold, currentTerrain, true);
+        return judge(snap, unproj, memoryCells, pixelThreshold, currentTerrain, true, maxDistBlocks);
     }
 
     /** 共享判定主循环；{@code translucentField} 决定逐像素读 main 场还是 translucent 场。 */
@@ -204,7 +258,8 @@ public final class DeletionJudge {
             final List<BlockPos> memoryCells,
             final int pixelThreshold,
             final Set<BlockPos> currentTerrain,
-            final boolean translucentField
+            final boolean translucentField,
+            final double maxDistBlocks
     ) {
         if (memoryCells.isEmpty()) return List.of();
 
@@ -219,6 +274,9 @@ public final class DeletionJudge {
         for (BlockPos pos : memoryCells) {
             // 可见格由 §5.1 放置/更新路径处理，不参与减量（§7.11 双保险 + 优化）
             if (currentTerrain.contains(pos)) continue;
+            // v2.38 决策 G2（§7.1）：渲染距离闸门 —— 界外方块存在却没写深度，其深度场与"真消失"同形，
+            // 判据无法区分 ⇒ 必须在判据之外提前跳过。见 renderDistanceGate / nearestDist 的两处说明。
+            if (nearestDist(cam, pos) > maxDistBlocks) continue;
             // 相机在格内 → 格必然存在（游泳/站在格内；防御性跳过）
             if (pos.getX() <= camX && camX <= pos.getX() + 1.0
                     && pos.getY() <= camY && camY <= pos.getY() + 1.0
@@ -352,6 +410,7 @@ public final class DeletionJudge {
      * @param shapedCells 几何段解引用后的可判格（alpha 阈值 / 判据场已由 {@code ObjectResolver} 定好）
      * @param pixelThreshold 越过像素阈值（默认 2）
      * @param currentTerrain 本次可见方块集（这些格绝不判删）
+     * @param maxDistBlocks v2.38 决策 G2：渲染距离闸门（{@link #renderDistanceGate}），语义同 {@link #test}
      * @return 被证明消失的格列表（可为空）
      */
     public static List<BlockPos> testShaped(
@@ -359,9 +418,10 @@ public final class DeletionJudge {
             final Unprojector unproj,
             final List<ShapedCellData.ResolvedCell> shapedCells,
             final int pixelThreshold,
-            final Set<BlockPos> currentTerrain
+            final Set<BlockPos> currentTerrain,
+            final double maxDistBlocks
     ) {
-        return testShaped(snap, unproj, shapedCells, pixelThreshold, currentTerrain, null);
+        return testShaped(snap, unproj, shapedCells, pixelThreshold, currentTerrain, maxDistBlocks, null);
     }
 
     /**
@@ -372,7 +432,9 @@ public final class DeletionJudge {
      * 从删除数<b>反推不出来</b>——不记账的话，远距贴花集体失明会被误读成"识别准确"。跳过本身是
      * <b>欠删</b>方向（安全），但必须是<b>可见</b>的欠删。
      *
-     * @param unjudgedOut 可选出参（{@code null} 或长度 ≥ 1）：{@code [0]} <b>累加</b>跳过格数
+     * @param unjudgedOut 可选出参（{@code null} 或长度 ≥ 1）：{@code [0]} <b>累加</b>跳过格数。
+     *                    <b>只记 δ 窗口闭合</b>，渲染距离闸门跳过的格<b>不</b>计入（两者的诊断含义不同：
+     *                    前者是"判据不可判"，后者是"本就不该判"，混在一起会让 §10 第 18 条的读数失真）
      */
     public static List<BlockPos> testShaped(
             final DepthCapture.DepthSnapshot snap,
@@ -380,6 +442,7 @@ public final class DeletionJudge {
             final List<ShapedCellData.ResolvedCell> shapedCells,
             final int pixelThreshold,
             final Set<BlockPos> currentTerrain,
+            final double maxDistBlocks,
             final int[] unjudgedOut
     ) {
         if (shapedCells.isEmpty()) return List.of();
@@ -400,6 +463,10 @@ public final class DeletionJudge {
             final BlockPos pos = cell.pos();
             if (cell.quads().length == 0) continue;                 // 形状为空 → 无足迹 → 不可判（欠删）
             if (currentTerrain.contains(pos)) continue;
+            // v2.38 决策 G2（§7.1）：渲染距离闸门 —— 与 judge 同款同度量。几何段尤其需要它：非满格
+            // 方块的"没写深度"里有一部分本来只可能是"没被画"，判据在此处比整格判据更容易假阳性。
+            // 注意：本闸门的跳过<b>不</b>计入 unjudgedOut（只记 δ 窗口闭合，见该出参说明）。
+            if (nearestDist(cam, pos) > maxDistBlocks) continue;
             if (cell.translucentField() && !hasTranslucentField) continue;
             // 相机在格内 → 格必然存在（与 judge 同款防御）
             if (pos.getX() <= camX && camX <= pos.getX() + 1.0

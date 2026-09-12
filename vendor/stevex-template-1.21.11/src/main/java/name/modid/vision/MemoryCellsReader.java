@@ -24,7 +24,17 @@ import org.slf4j.Logger;
  *   [4]      version（1 字节）：1 = 旧版（无维标签）；2 = v2.32 起（带 UTF-8 维 id）；
  *                              3 = v2.36 起（追加 translucent 段）；
  *                              4 = v2.37 起（追加 spriteEpoch + 非满形状几何段）；
- *                              5 = v2.37 七次修订起（追加信号缺失段，见下）
+ *                              5 = v2.37 七次修订起（追加信号缺失段，见下）；
+ *                              6 = v2.37 起（追加实体占用格段，见下）
+ *
+ *   version = 6（v2.37，§7.14 实体减量欠删修正）：在 version=5 全布局之后追加
+ *   [..]     int entityCellCount（镜像中冻结实体占用格数；空段恒写 0）
+ *   entityCellCount × 8 字节 long（BlockPos.asLong）
+ *   <b>本段是 v6 的最后一段</b>。裁决者是 {@code EntityPresenceCorrector}（直读真实世界），
+ *   <b>不走深度判据</b>——本段因此不含 blockId/实体 id：判据是"这格还有没有实体"，
+ *   与是哪个实体、那格有没有方块全无关（详见该类的守卫说明）。
+ *   version=5 文件按 length 自洽解析：{@code entityCells} 恒空 → 该通道无候选 → 实体恒欠删
+ *   （方向安全、行为可辨识：旧版本文件不会让新逻辑误判）。
  *
  *   version = 5（v2.37 七次修订，§15.3）：在 version=4 全布局之后追加
  *   [..]     int signalLossCount（镜像中当前在场的信号缺失族格数；空段恒写 0）
@@ -33,7 +43,7 @@ import org.slf4j.Logger;
  *     ushort blockIdLen + UTF-8 block 注册 id（如 minecraft:tripwire；诊断 + 族扩展用，
  *            {@link SignalLossCorrector} 不依赖它做裁决——裁决只看"真实世界读到什么"）
  *   }
- *   <b>本段是 v5 的最后一段</b>。写入方 {@code MemoryCellReporter} 恒写该段（空也写 4 字节计数）。
+ *   <b>v5 的末段</b>（v6 起其后还有实体段）。写入方 {@code MemoryCellReporter} 恒写该段（空也写 4 字节计数）。
  *   version=4 文件按 length 自洽解析：{@code signalLossCells} 恒空、其余逐位不变（无迁移负担）。
  *
  *   version = 4（v2.37，§4.3.2）：在 version=3 全布局之后追加
@@ -59,7 +69,7 @@ import org.slf4j.Logger;
  *   之后与 version=1 相同（整体偏移 +L+4）：
  *   [..]     int removalPixelThreshold（删除判定像素阈值，采集侧读取）
  *   [..]     double removalMaxRayDist（记忆侧距离球过滤半径，信息性）
- *   [..]     int opaqueCount（main/opaque 段格数：实心不透明 + 冻结实体占用格 + 岩浆）
+ *   [..]     int opaqueCount（main/opaque 段格数：实心不透明 + 岩浆；v6 起<b>不含</b>实体占用格）
  *   [..]     opaqueCount × 8 字节 long（BlockPos.asLong，小端）
  *   [..]     byte removalTranslucentEnabled（记忆侧 translucent 场开关，采集侧据此路由）
  *   [..]     int translucentCount（translucent 段格数：水 + 满格透明）
@@ -101,12 +111,14 @@ public final class MemoryCellsReader {
     private static final String FILE_NAME = "memory_cells.bin";
     private static final byte[] MAGIC = {'S', 'C', 'E', 'L'};
     /** 格式版本——1 = 旧版无维标签；2 = v2.32 起带 UTF-8 维 id；3 = v2.36 起带 translucent 段；
-     *  4 = v2.37 起带 spriteEpoch + 非满形状几何段；5 = v2.37 七次修订起带信号缺失段（§15）。 */
+     *  4 = v2.37 起带 spriteEpoch + 非满形状几何段；5 = v2.37 七次修订起带信号缺失段（§15）；
+     *  6 = v2.37 起带实体占用格段（§7.14）。 */
     private static final int VERSION_1 = 1;
     private static final int VERSION_2 = 2;
     private static final int VERSION_3 = 3;
     private static final int VERSION_4 = 4;
     private static final int VERSION_5 = 5;
+    private static final int VERSION_6 = 6;
     /** 解析失败 / 文件缺失时的默认阈值（与设计 §7.11 默认一致；正常由文件头提供）。 */
     public static final int DEFAULT_PIXEL_THRESHOLD = 2;
     public static final double DEFAULT_MAX_RAY_DIST = 96.0;
@@ -114,7 +126,7 @@ public final class MemoryCellsReader {
     /**
      * 一帧 cells 数据：待判定记忆格（v2.36 分两段）+ 记忆侧下发的删除阈值 + v2.32 维标签。
      *
-     * @param cells             main/opaque 段记忆格（实心不透明 + 冻结实体占用格 + 岩浆；main 场判）
+     * @param cells             main/opaque 段记忆格（实心不透明 + 岩浆；main 场判。v6 起<b>不含</b>实体占用格）
      * @param translucentCells  v2.36 translucent 段记忆格（水 + 满格透明；按采集侧配置路由场判定，
      *                          version ≤ 2 旧文件 → 恒空）
      * @param translucentEnabled v2.36 记忆侧 translucent 场开关（随文件头下发；version ≤ 2 旧文件 → false）。
@@ -131,6 +143,10 @@ public final class MemoryCellsReader {
      * @param signalLossCells   v2.37 七次修订（§15）信号缺失族格（镜像中当前在场的绊线/绊线钩；
      *                          version ≤ 4 旧文件 → 空 = 该族不判删）。判据由
      *                          {@link SignalLossCorrector} 用"真实世界状态直读"给出，**不走深度场**
+     * @param entityCells       v2.37（§7.14）实体段：镜像中冻结实体 AABB 覆盖的格（version ≤ 5 → 空 =
+     *                          实体不判删）。判据由 {@link EntityPresenceCorrector} 直读真实世界给出，
+     *                          <b>不走深度场</b>——本段格可能同时是可见方块格，深度判据对它们恒不成立
+     *                          （§7.14 缺陷根因），故必须换判据
      */
     public record CellsData(
             List<BlockPos> cells,
@@ -141,11 +157,12 @@ public final class MemoryCellsReader {
             String dimension,
             long spriteEpoch,
             List<ShapedCellData.ShapedCell> shapedCells,
-            List<SignalLossCell> signalLossCells
+            List<SignalLossCell> signalLossCells,
+            List<BlockPos> entityCells
     ) {
         static final CellsData EMPTY = new CellsData(
                 List.of(), List.of(), false, DEFAULT_PIXEL_THRESHOLD, DEFAULT_MAX_RAY_DIST, "", 0L,
-                List.of(), List.of());
+                List.of(), List.of(), List.of());
     }
 
     /**
@@ -216,7 +233,7 @@ public final class MemoryCellsReader {
             }
             final int ver = bytes[4];
             if (ver != VERSION_1 && ver != VERSION_2 && ver != VERSION_3 && ver != VERSION_4
-                    && ver != VERSION_5) {
+                    && ver != VERSION_5 && ver != VERSION_6) {
                 LOGGER.warn("[Vision] Cells file unsupported version {}", ver);
                 return null;
             }
@@ -251,7 +268,8 @@ public final class MemoryCellsReader {
                 // v2.36：version ≤ 2 旧文件无 translucent 段 → translucentCells 空、开关 false（行为等同 v2.23）
                 return new CellsData(cells, List.of(), false,
                         threshold <= 0 ? DEFAULT_PIXEL_THRESHOLD : threshold,
-                        maxDist > 0 ? maxDist : DEFAULT_MAX_RAY_DIST, dimension, 0L, List.of(), List.of());
+                        maxDist > 0 ? maxDist : DEFAULT_MAX_RAY_DIST, dimension, 0L, List.of(), List.of(),
+                        List.of());
             }
             // v2.36：version=3 → opaque longs 之后追加 translucentEnabled byte + translucentCount + longs
             int p = bodyOffset + count * 8;
@@ -275,7 +293,8 @@ public final class MemoryCellsReader {
             if (ver < VERSION_4) {
                 return new CellsData(cells, translucentCells, translucentEnabled,
                         threshold <= 0 ? DEFAULT_PIXEL_THRESHOLD : threshold,
-                        maxDist > 0 ? maxDist : DEFAULT_MAX_RAY_DIST, dimension, 0L, List.of(), List.of());
+                        maxDist > 0 ? maxDist : DEFAULT_MAX_RAY_DIST, dimension, 0L, List.of(), List.of(),
+                        List.of());
             }
             // v2.37：version=4 → spriteEpoch(8) + shapedCount(4) + 几何段
             final int gStart = tBodyOffset + tCount * 8;
@@ -373,9 +392,35 @@ public final class MemoryCellsReader {
                 }
                 signalLoss = parsed;
             }
+            // v2.37（§7.14）：version=6 → 实体段（信号缺失段之后、本文件最后一段）
+            //   int entityCellCount × long pos.asLong
+            // 定长段（每格恒 8 字节）→ 与 opaque/translucent 段同款的一次性长度检查即可。
+            // 该段裁决者是 EntityPresenceCorrector（直读真实世界），不喂深度判据 ⇒ 不需要任何
+            // 逐格元数据，故是全场唯一"只存格"的段。
+            List<BlockPos> entityCells = List.of();
+            if (ver >= VERSION_6) {
+                if (bytes.length < sp + 4) { // int entityCellCount
+                    LOGGER.warn("[Vision] Cells file truncated before entity segment (len={})", bytes.length);
+                    return null;
+                }
+                final int eCount = buf.getInt(sp);
+                sp += 4;
+                if (eCount < 0 || bytes.length < sp + (long) eCount * 8) {
+                    LOGGER.warn("[Vision] Cells file truncated in entity segment (eCount={}, len={})",
+                            eCount, bytes.length);
+                    return null;
+                }
+                final List<BlockPos> parsed = new ArrayList<>(eCount);
+                buf.position(sp);
+                for (int i = 0; i < eCount; i++) {
+                    parsed.add(BlockPos.of(buf.getLong()));
+                }
+                sp += eCount * 8;
+                entityCells = parsed;
+            }
             // 自检：顺序解析必须恰好吃掉整个文件。不等即"游标与写方错位"——本类最危险的一类 bug
             // （顶点/UV 会被解释成别人的字段，几何 G ≠ R）。整文件作废并高声告警，绝不带病使用。
-            // v5 起最后一段是信号缺失段（v4 文件 sp 停在几何段末，此处逐位等价于旧检查）。
+            // v6 起最后一段是实体段（v5 文件 sp 停在信号缺失段末，此处逐位等价于旧检查）。
             // （若将来再追加段落，须同时升版并按版本分支，勿放宽此检查。）
             if (sp != bytes.length) {
                 LOGGER.warn("[Vision] Cells file format desync: consumed {} of {} bytes (ver={})",
@@ -384,7 +429,8 @@ public final class MemoryCellsReader {
             }
             return new CellsData(cells, translucentCells, translucentEnabled,
                     threshold <= 0 ? DEFAULT_PIXEL_THRESHOLD : threshold,
-                    maxDist > 0 ? maxDist : DEFAULT_MAX_RAY_DIST, dimension, spriteEpoch, shaped, signalLoss);
+                    maxDist > 0 ? maxDist : DEFAULT_MAX_RAY_DIST, dimension, spriteEpoch, shaped, signalLoss,
+                    entityCells);
         } catch (IOException e) {
             LOGGER.warn("[Vision] Failed to read cells file {}: {}", path, e.getMessage());
             return null;

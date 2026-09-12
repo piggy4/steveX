@@ -27,8 +27,10 @@ import org.slf4j.LoggerFactory;
  *       （flags 818）并清除该位置旧方块实体记录（{@link MemoryRestorer#clearStale}）；</li>
  *   <li><b>相机格快路径</b>：相机所在格无条件尝试删除（受当前可见集防护）——DeletionJudge 跳过
  *       "相机在格内"的 cell，故相机格不在 deletions 里，须单独处理（保留 v2.22 语义）；</li>
- *   <li><b>冻结实体清理</b>：不在当前帧实体快照内、且<b>全部 AABB 占用格</b> ∈ deletions ∪
- *       {相机格}（= 采集侧已逐块证明消失）→ {@link EntityRestorer#discard}。</li>
+ *   <li><b>冻结实体清理</b>：不在当前帧实体快照内、且<b>全部 AABB 占用格</b> ∈
+ *       {@code entityDeletions} ∪ {相机格}（v2.37 §7.14 起；采集侧<b>直读真实世界</b>证明"该格现实中
+ *       已无实体"）→ {@link EntityRestorer#discard}。旧证据 {@code deletions}（方块深度推断）自本版
+ *       <b>整条撤出</b>实体判定，理由见 {@code apply} ③。</li>
  * </ol>
  *
  * <p>关键正确性约束（§7.11 / v2.32）：
@@ -54,6 +56,12 @@ import org.slf4j.LoggerFactory;
  * {@code isSignalLossBlock}）定义域互不相交，合并成一条就会把守卫一并放宽、让双保险失效（§15.2）。
  * 唯一的交叉点是冻结实体清理用的"已证空格集"，而该集<b>刻意不含</b>本通道的裁决（绊线可与实体同格
  * 共存，"绊线没了"对实体占用零信息量，并进去会误删活实体）——见 {@code apply} ③。
+ *
+ * <p><b>v2.37（§7.14）第三条并列通道 —— 实体在场</b>：源键 {@code terrain.entityDeletions}
+ * （terrain.nbt 与另两条并列的键），证据 = 采集侧 {@code EntityPresenceCorrector} 对真实世界的
+ * <b>实体检查询</b>。它<b>只喂实体清理</b>（③），不喂方块删除（①②）：实体占据的格常常是仍然存在的
+ * 方块（掉落物落在营火上、生物站在耕地上），并进方块通道就是对活方块整格删除。而与③的关系是
+ * <b>替换</b>而非并列——③ 的证据集自本版起不再含 {@code deletions}（§7.14.1）。
  */
 public final class DeletionApplier {
 
@@ -72,19 +80,22 @@ public final class DeletionApplier {
 
     /** 服务器（世界）启动 / 切换时调用，清空状态。 */
     public void onServerStart() {
+        // v2.38（§7.1 决策 J）：墓碑集是<b>会话态</b>、不落盘——重启后清空（最坏只是容器通道回放一次
+        // 记录，与 v2.37 行为相同；不会造成永久性差异）。见 {@link RemovalTombstones}。
+        RemovalTombstones.get().clearAll();
         LOGGER.info("[MemoryWorld] Deletion applier ready");
     }
 
     /**
-     * 对一帧 TerrainData 的两条删除清单执行删除（{@code deletions} + v2.37 的
-     * {@code signalLossDeletions}，各走各的守卫，见类 javadoc）。terrain 为 null（本轮无新数据）或
-     * 减量关闭 → 直接返回（空闲成本≈0）。
+     * 对一帧 TerrainData 的三条删除清单执行删除（{@code deletions} + v2.37 的
+     * {@code signalLossDeletions} + v2.37 §7.14 的 {@code entityDeletions}，各走各的守卫与落点，
+     * 见类 javadoc）。terrain 为 null（本轮无新数据）或减量关闭 → 直接返回（空闲成本≈0）。
      *
      * <p>v2.32：只对传入 level（= 活动维，见 {@link MemoryWorldManager}）执行——删除 / 清 BE /
      * 实体清理全部限定在该维内。
      *
-     * @param terrain 本次读取的 TerrainData（含 deletions / signalLossDeletions / blocks / cameraPos）；
-     *                null → 跳过
+     * @param terrain 本次读取的 TerrainData（含 deletions / signalLossDeletions / entityDeletions /
+     *                blocks / cameraPos）；null → 跳过
      * @param currentEntityUuids 当前帧实体快照 uuid 集（当前可见实体，删除跳过集）
      */
     public void apply(final ServerLevel level, final TerrainRestorer.TerrainData terrain,
@@ -98,14 +109,12 @@ public final class DeletionApplier {
         final Vec3 cam = terrain.cameraPos();
         final BlockPos cameraCell = cam != null ? BlockPos.containing(cam.x, cam.y, cam.z) : null;
 
-        // 采集侧已逐块证明消失的格 = 删除证据全集（实体清理用它判"占用格全空"）
-        final Set<BlockPos> provenEmpty = new HashSet<>(deletions);
-        if (cameraCell != null) {
-            // 相机就在格内，最强证据（保留 v2.22 语义）；DeletionJudge 跳过格内 cell，故须单独处理。
-            provenEmpty.add(cameraCell);
-        }
-
         int deleted = 0;
+        // v2.38（§7.1 决策 I 的兜底诊断）：② 主循环的逐档记账。**必须不含相机格快路径**——快路径的
+        // 成功数并进 deleted 会把失配数掩盖掉 1，而这条告警的全部价值就在于"收了清单但没删成"必须
+        // 精确可见（半态 = 采集侧已修剪记录、记忆侧却没删方块）。
+        int deletionVisibleSkipped = 0;
+        int deletedByDeletions = 0;
 
         // ① 相机格快路径：无条件尝试删除，当前可见集防护防抖振（贴墙时格内方块在当前可见集，删除会被增量重建）
         if (cameraCell != null && !currentTerrain.contains(cameraCell)) {
@@ -114,8 +123,24 @@ public final class DeletionApplier {
 
         // ② 对每个 deletion 格：假阳性防护 + 按内容放行（§7.12 放宽至流体/满格透明）→ 静默置空 + 清 BE
         for (BlockPos pos : deletions) {
-            if (currentTerrain.contains(pos)) continue;
-            if (deleteBlock(level, dimension, pos, true)) deleted++;
+            if (currentTerrain.contains(pos)) {
+                deletionVisibleSkipped++;
+                continue;
+            }
+            if (deleteBlock(level, dimension, pos, true)) {
+                deleted++;
+                deletedByDeletions++;
+            }
+        }
+
+        // v2.38（§7.1 决策 I）**失配告警**：候选非空、既未被可见集跳过、又没删成 ⇒ 守卫拒删。两个可能的
+        // 原因方向相反，故必须响：(a) 假阳性（记忆侧守卫正确挡下，采集侧若也修剪了记录 = 半态，见决策 I）；
+        // (b) 镜像该格已被前一轮 / 玩家改成别的东西（同理）。采集侧"已修剪数"= 0 时是 (b)，> 0 时是 (a)。
+        final int refused = deletions.size() - deletionVisibleSkipped - deletedByDeletions;
+        if (refused > 0) {
+            LOGGER.warn("[MemoryWorld] Deletion mismatch [{}]: {} candidates, {} visible-skipped, "
+                            + "{} deleted, {} REFUSED by guard (half-state risk if vision pruned them; §7.1 I)",
+                    dimension, deletions.size(), deletionVisibleSkipped, deletedByDeletions, refused);
         }
 
         // ②b v2.37 七次修订（§15.2 段③）信号缺失族**并列通道**：绊线 / 绊线钩的"状态直读证明消失"
@@ -144,19 +169,41 @@ public final class DeletionApplier {
         }
 
         // ③ 冻结实体清理：不在当前可见集、且全部占用格已证空 → 移除（限活动维）
-        //    **provenEmpty 刻意不含 signalLossDeletions**（看似该加，实则会误删活实体）：本通道证明的是
-        //    "该格现实里没有绊线了"，而 provenEmpty 的语义是"该格已无任何占用物"、用于判定冻结实体是否
-        //    整体消失。绊线不阻挡实体（可同格共存），故"该格绊线没了"对实体占用**零信息量**——若并进去，
-        //    站在原地的活实体只要脚下那格曾被绊线占过，就会被判"占用格全空"而遭 {@code discard}。
-        //    这也是 §15.5 那条硬边界（本通道不得溢出到其它判定）的一个具体落点。
+        //    证据集 = **entityDeletions ∪ {相机格}**（v2.37 §7.14；旧为 deletions ∪ {相机格}）。
+        //    - **为什么必须换证据**：deletions 证明的是"这格没有实心不透明方块"，而实体可以存在于空气格
+        //      ——它本来就不是实体占用的证据。更要命的是源头：非满方块（营火 / 耕地 / 雪层 / 台阶…）所在格
+        //      **永不入 deletions**（采集侧 DeletionJudge 首句 currentTerrain.contains(pos) → continue，而
+        //      currentTerrain 是本快照的可见方块）⇒ 与非满方块共格的冻结实体<b>永久残留</b>；落点在整方块顶
+        //      则落入空气格、可证明为空、正常删——现场"营火弹出的掉落物消失判定有概率失效"的全部含义
+        //      （§7.14 根因）。
+        //    - **为什么不再并列保留 deletions**：实体裁决已由采集侧 EntityPresenceCorrector 直读"该格
+        //      现实中还有没有实体"独占（实体占用格自 cells v6 起不再进 main 段、不再喂深度判据）。保留旧
+        //      证据只会把那两条老毛病留在原地：既欠删（上面那条），又可能误删活体（实体渲染几何 ≪ AABB，
+        //      格内空余区的射线会投票"越过"）。
+        //    - **为什么仍含相机格**：v2.22 语义，相机就在格内是最强证据。采集侧的实体查询<b>排除 agent
+        //      自身</b>（"我站在这儿"对"我那个冻结副本还在不在"零信息量），故实体通道的证据里永远不会有
+        //      这一格，必须在此单独补——否则站在冻结实体上的实体永远删不掉。
+        //    - **为什么不含 signalLossDeletions**（看似该加，实则会误删活实体）：那条通道证明的是"该格
+        //      现实里没有绊线了"，而绊线不阻挡实体（可同格共存）⇒ 对实体占用**零信息量**；并进去会让站在
+        //      原地的活实体因脚下那格曾被绊线占过而被判"占用格全空"遭 {@code discard}（§15.5 硬边界）。
+        final Set<BlockPos> provenEmpty = new HashSet<>(terrain.entityDeletions());
+        if (cameraCell != null) {
+            provenEmpty.add(cameraCell);
+        }
 
-        // ③ 冻结实体清理：不在当前可见集、且全部占用格已证空 → 移除（限活动维）
         int discarded = 0;
+        int entityVisibleSkipped = 0;
+        int entityKept = 0;
         for (UUID uuid : entities.uuids(dimension)) {
-            if (currentEntityUuids.contains(uuid)) continue;
+            if (currentEntityUuids.contains(uuid)) {
+                entityVisibleSkipped++;
+                continue;
+            }
             if (entities.allCellsEmpty(dimension, uuid, provenEmpty)) {
                 entities.discard(dimension, uuid);
                 discarded++;
+            } else {
+                entityKept++;
             }
         }
 
@@ -164,12 +211,34 @@ public final class DeletionApplier {
             LOGGER.info("[MemoryWorld] Deletion apply [{}]: deleted {} blocks, discarded {} entities ({} deletions from judge)",
                     dimension, deleted, discarded, deletions.size());
         }
+        // v2.37（§7.14）诊断：实体通道单独打（与①②/②b 分开——四条通道的证据类型、守卫、失败含义全不同，
+        // 混一行就无法判断是哪条在动）。候选非空才打（无冻结实体时该段恒空，打了就是每 tick 一行零）。
+        // 关键读数：candidates>0 而 discarded=0 → 实体通道没在动，三种原因按概率：
+        //   ① kept>0：镜像副本仍「未被证空」（常态——活着的副本，或采集侧 occupied 档）；
+        //   ② 采集侧 unloaded 档（区块未加载，欠删；看采集侧 entityPresence 行）；
+        //   ③ 采集侧版本 < cells v6 / 本侧读不到 entityDeletions 键（升级未配套 ⇒ 通道静默空转）。
+        final List<BlockPos> entityDeletions = terrain.entityDeletions();
+        if (!entityDeletions.isEmpty()) {
+            LOGGER.info("[MemoryWorld] Entity-presence channel [{}]: {} candidate cells → {} discarded, "
+                            + "{} kept, {} visible-skipped (frozen entities in dim: {})",
+                    dimension, entityDeletions.size(), discarded, entityKept, entityVisibleSkipped,
+                    discarded + entityKept + entityVisibleSkipped);
+        }
         // v2.37 七次修订（§15.7）诊断：信号缺失通道单独打（与②的主日志分开——两条通道的证据类型、
         // 守卫、失败含义全不同，混在一行就无法判断是哪条在动）。候选非空才打：本通道常态是空段，
         // 打了就是每 tick 一行零。候选非空而删除数为 0 时该行尤其重要（守卫挡下 / 可见集跳过 / 停摆）。
         if (!signalLossDeletions.isEmpty()) {
             LOGGER.info("[MemoryWorld] Signal-loss channel [{}]: {} candidates → {} deleted, {} visible-skipped",
                     dimension, signalLossDeletions.size(), deletedSignalLoss, signalLossVisibleSkipped);
+            final int slRefused = signalLossDeletions.size() - signalLossVisibleSkipped - deletedSignalLoss;
+            if (slRefused > 0) {
+                // 与②同款失配告警（决策 I）：守卫只删"镜像里当前确实是该族方块"的格。非零 = 镜像该格
+                // 已是空气 / 已被换成别的东西 —— 若采集侧同时修剪了记录，就是半态；本版批 2 加表后
+                // 这条通道承载箱子族，故它的失配比②更值得看。
+                LOGGER.warn("[MemoryWorld] Signal-loss mismatch [{}]: {} candidates, {} visible-skipped, "
+                                + "{} deleted, {} REFUSED by guard (half-state risk if vision pruned them; §7.1 I)",
+                        dimension, signalLossDeletions.size(), signalLossVisibleSkipped, deletedSignalLoss, slRefused);
+            }
         }
     }
 
@@ -242,6 +311,10 @@ public final class DeletionApplier {
     private boolean clearBlock(final ServerLevel level, final String dimension, final BlockPos pos) {
         level.setBlock(pos, Blocks.AIR.defaultBlockState(), Block.UPDATE_CLIENTS | Block.UPDATE_SKIP_ALL_SIDEEFFECTS);
         beRestorer.clearStale(dimension, pos);
+        // v2.38（§7.1 决策 J）：登记会话级墓碑——容器通道据此跳过"世界为空气 → 自足回放记录"的路径，
+        // 否则它与本通道按 poll 周期对打（箱子闪烁）。写入点收敛在此处 = 两条删除通道共用同一个置空点，
+        // 新增通道时不可能只做一半（与上面"置空与清 BE 必须成对"同一约定）。
+        RemovalTombstones.get().record(dimension, pos);
         return true;
     }
 }
