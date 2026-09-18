@@ -1,7 +1,7 @@
 /**
  * 采集端 mod（stevex-template-1.21.11）WebSocket API 方法清单。
  *
- * 共 50 个方法，分组与参数 schema 已按 mod Java 源码逐条核实
+ * 共 51 个方法，分组与参数 schema 已按 mod Java 源码逐条核实
  * （见 steveX_改进方案.md 附录 §十一；websocket 分发在 AgentWebSocketServer /
  * api\*Api.java 各 handler 内，方法名注册与参数读取是两套并存的 ad hoc 逻辑）。
  * 上层通过 POST /api/mod/:method 原样透传，mod 侧对未知方法会返回
@@ -122,7 +122,7 @@ const METHODS = [
       { name: 'fov', type: 'int', def: 70, hint: '视野（出现才改）', sample: 80 }
     ] },
 
-  // ── 容器（7）──
+  // ── 容器（8）──
   { method: 'container/get', category: 'container', description: 'Get open container contents',
     zh: '读取当前打开的容器：类型/槽位物品/携带物品，及熔炉/附魔台/箱子等专用字段，无参数', paramDefs: [] },
   { method: 'container/slot', category: 'container', description: 'Interact with a container slot',
@@ -152,6 +152,11 @@ const METHODS = [
     paramDefs: [
       { name: 'primary', type: 'string', def: '', hint: '主效果注册 id，如 minecraft:haste（缺省/空=不设）', sample: 'minecraft:haste' },
       { name: 'secondary', type: 'string', def: '', hint: '副效果注册 id（信标≥4 级才可用；缺省/空=不设）', sample: 'minecraft:regeneration' }
+    ] },
+  { method: 'container/select-trade', category: 'container', description: 'Select a villager trade (fills payment slot)',
+    zh: '选中村民交易列表第 index 笔（等价点交易界面第 index 行，直接发 SelectTrade 包）。只选中、不消耗物品；服务端会顺手把付款物从背包搬进支付格（填到满叠），随后用 container/slot { slot:2 } 点结算格完成交易（可连点，结算格自动补货）。params 填 { index }：交易下标，与 container/get 的 trades[] 同一套编号（0 起，越界报错并返回 size）。前置：交易界面已开；村民失效时服务端只写日志，表现为包发了但支付格没变',
+    paramDefs: [
+      { name: 'index', type: 'int', def: -1, hint: '交易下标（container/get 的 trades[] 序号，0 起）', sample: 1 }
     ] },
 
   // ── 聊天（3）──

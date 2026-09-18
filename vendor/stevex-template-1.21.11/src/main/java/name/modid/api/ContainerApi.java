@@ -13,6 +13,7 @@ import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.inventory.BeaconScreen;
 import net.minecraft.core.Holder;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.protocol.game.ServerboundSelectTradePacket;
 import net.minecraft.network.protocol.game.ServerboundSetBeaconPacket;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.effect.MobEffect;
@@ -20,7 +21,7 @@ import net.minecraft.world.inventory.*;
 
 /**
  * 容器 API —— 读取/操作当前打开的容器 GUI。
- * 包含方法：get / slot / button / close / text / drag / beacon
+ * 包含方法：get / slot / button / close / text / drag / beacon / select-trade
  */
 public class ContainerApi {
 
@@ -39,6 +40,7 @@ public class ContainerApi {
         handlers.put("container/slot",   params -> slotClick(params));
         handlers.put("container/drag",   params -> drag(params));
         handlers.put("container/beacon", params -> setBeacon(params));
+        handlers.put("container/select-trade", params -> selectTrade(params));
         handlers.put("container/button", params -> buttonClick(params));
         handlers.put("container/close",  params -> closeContainer());
         handlers.put("container/text",   params -> setText(params));
@@ -255,6 +257,52 @@ public class ContainerApi {
         var holder = BuiltInRegistries.MOB_EFFECT.get(id);
         if (holder.isEmpty()) return null;
         return Optional.of(holder.get());
+    }
+
+    // ==================== select trade（村民交易） ====================
+
+    /**
+     * 选中村民交易列表中第 index 笔（container/select-trade）。等价 vanilla 交易界面点击第 index 行：
+     * ① 本地 setSelectionHint（对齐结算格预览）+ ② 发 ServerboundSelectTradePacket，服务端在
+     * handleSelectTrade 里做 setSelectionHint + tryMoveItems（把付款物从背包搬进支付格，填到满叠）。
+     * 本方法**只选中、不消耗物品**——真正的交易仍由 container/slot { slot:2 } 完成（可连续点，结算格会自动补货）。
+     * params: index = 交易下标，与 container/get 的 trades[] 同一套编号（0 起，越界报错）。
+     * 前置（调用方负责）：交易界面已开；村民未走远/未失效——服务端 stillValid 失败只写日志、客户端无回执，
+     * 表现为"包发了但支付格没变"。
+     */
+    private static Map<String, Object> selectTrade(Map<String, Object> params) {
+        int index = AgentWebSocketServer.num(params, "index", -1);
+        Map<String, Object> result = AgentWebSocketServer.runOnClient(1_000, "Container select trade", ref -> {
+            var mc = Minecraft.getInstance();
+            var p = mc.player;
+            if (p == null || !(mc.screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) {
+                ref.value = Map.of("status", "error", "message", "no screen");
+                return;
+            }
+            if (!(p.containerMenu instanceof MerchantMenu menu)) {
+                ref.value = Map.of("status", "error", "message", "not a merchant menu");
+                return;
+            }
+            if (index < 0 || index >= menu.getOffers().size()) {
+                ref.value = Map.of("status", "error", "message", "index out of range",
+                                   "index", index, "size", menu.getOffers().size());
+                return;
+            }
+            var conn = mc.getConnection();
+            if (conn == null) {
+                ref.value = Map.of("status", "error", "message", "no connection to server");
+                return;
+            }
+            menu.setSelectionHint(index);                               // ① 本地对齐（§3.1 ①）
+            conn.send(new ServerboundSelectTradePacket(index));         // ② 服务端 setSelectionHint + tryMoveItems
+
+            Map<String, Object> ok = new LinkedHashMap<>();
+            ok.put("status", "ok");
+            ok.put("index",  index);
+            ok.put("result", InventoryApi.slotItem(-1, menu.getOffers().get(index).getResult()));
+            ref.value = ok;
+        });
+        return result != null ? result : Map.of("status", "error", "message", "select trade timed out");
     }
 
     // ==================== button click ====================
