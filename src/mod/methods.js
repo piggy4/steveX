@@ -124,7 +124,7 @@ const METHODS = [
 
   // ── 容器（8）──
   { method: 'container/get', category: 'container', description: 'Get open container contents',
-    zh: '读取当前打开的容器：类型/槽位物品/携带物品，及熔炉/附魔台/箱子等专用字段，无参数', paramDefs: [] },
+    zh: '读取当前打开的容器：类型/槽位物品/携带物品，及熔炉/附魔台/切石机/箱子等专用字段，无参数。**附魔台**额外给 costs/enchantClue/enchantName/levelClue/goldCount/bookshelves，三个选项按同一套下标对齐（enchantName 是附魔注册名如 "minecraft:sharpness"，选项不可用时为 null；enchantClue 是原始注册表数字 id，仅供排查）；bookshelves=有效书架数，是**世界状态**——靠准星所指方块定位附魔台，界面开着时用 camera/turn 转视角会让它失效，该键**缺席＝未知**（不是 0），且给的是原始计数（vanilla 算附魔等级时会 clamp 到 15）。**切石机**额外给 selectedRecipe/visibleRecipes/recipes——recipes 是方案列表的具体内容（每项是该方案在 GUI 上显示的图标物品，**下标与 container/button 的 button 号一一对应**，条目数应恒等于 visibleRecipes；输入物不是合法切割材料时为空数组）。注意 slots[] 只列非空格', paramDefs: [] },
   { method: 'container/slot', category: 'container', description: 'Interact with a container slot',
     zh: '点击容器格；params 填 { slot, button?, clickType? }：slot=格下标（先 container/get 看布局），button=0左键/1右键，clickType=0拾取 1快捷移动 2交换 4丢弃…',
     paramDefs: [
@@ -133,7 +133,7 @@ const METHODS = [
       { name: 'clickType', type: 'int', def: 0, hint: '0=拾取 1=快捷移动 2=交换 4=丢弃 5=合成…', sample: 0 }
     ] },
   { method: 'container/button', category: 'container', description: 'Click a container button',
-    zh: '点击容器界面顶部的按钮（如熔炉开关/附魔选项）；params 填 { button }：按钮序号（从 0 起），返回 {status, accepted}',
+    zh: '点击容器界面按钮（如附魔台的第 N 个附魔选项，N 从 0 起）；params 填 { button }：按钮序号。返回 {status, accepted}——accepted 只表示本地预检通过且已发包，**不是执行结果**（服务端无论成功失败都不回包），是否真的生效须用 container/get 观察（如附魔位物品是否长出 enchantments、青金石是否被扣、stateId 是否变化）',
     paramDefs: [{ name: 'button', type: 'int', def: 0, hint: '界面按钮序号（从 0 起）', sample: 0 }] },
   { method: 'container/close', category: 'container', description: 'Close container screen',
     zh: '关闭打开的容器界面，无参数', paramDefs: [] },

@@ -11,13 +11,19 @@ import name.modid.vision.ContainerMemoryTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.inventory.BeaconScreen;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.network.protocol.game.ServerboundSelectTradePacket;
 import net.minecraft.network.protocol.game.ServerboundSetBeaconPacket;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.effect.MobEffect;
 import net.minecraft.world.inventory.*;
+import net.minecraft.world.item.crafting.display.SlotDisplayContext;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.EnchantingTableBlock;
+import net.minecraft.world.phys.BlockHitResult;
 
 /**
  * 容器 API —— 读取/操作当前打开的容器 GUI。
@@ -95,15 +101,36 @@ public class ContainerApi {
                         List<Integer> costs = new ArrayList<>();
                         List<Integer> clues = new ArrayList<>();
                         List<Integer> levels = new ArrayList<>();
+                        // v2.43 enchantName：把 enchantClue 的注册表数值 id 解成可读附魔名。
+                        // 客户端 menu 的 enchantClue 是 holders.getId(ench.enchantment())
+                        // （EnchantmentMenu:98），裸数字 id 对 agent 无意义——"第 3 个选项是什么附魔"
+                        // 必须靠反查。vanilla 的 EnchantmentScreen:158-161 正是用同一句 lookupOrThrow
+                        // 反查 Holder，此处逐句对齐。
+                        // 取注册名而非 Enchantment.getFullname 的本地化显示名：与本 API 其余部分
+                        // （slotItem 的 enchantments、视觉侧 equipment/effects）一律用注册名的惯例一致。
+                        // 选项不可用（costs[i]==0 ⇒ enchantClue[i]==-1）时解不出 ⇒ 该项为 null，
+                        // 保持与 costs/levelClue 同长同序，下标一一对应。
+                        var enchantLookup = mc.level == null ? null
+                                : mc.level.registryAccess().lookupOrThrow(Registries.ENCHANTMENT);
+                        List<String> names = new ArrayList<>();
                         for (int i = 0; i < 3; i++) {
                             costs.add(em.costs[i]);
                             clues.add(em.enchantClue[i]);
                             levels.add(em.levelClue[i]);
+                            names.add(enchantLookup == null ? null
+                                    : enchantLookup.get(em.enchantClue[i])
+                                            .map(h -> h.getRegisteredName())
+                                            .orElse(null));
                         }
                         data.put("costs",        costs);
                         data.put("enchantClue",  clues);
+                        data.put("enchantName",  names);
                         data.put("levelClue",    levels);
                         data.put("goldCount",    em.getGoldCount());
+                        // v2.44 bookshelves：有效书架数。**不是菜单状态，是世界状态**——菜单不持有
+                        // 附魔台坐标（客户端 ContainerLevelAccess 是 NULL），只能靠准星定位。
+                        final Integer bookshelves = countBookshelves(mc);
+                        if (bookshelves != null) data.put("bookshelves", bookshelves);
                         data.put("enchantSeed",  em.getEnchantmentSeed());
                     }
                     case BeaconMenu bm -> {
@@ -140,6 +167,32 @@ public class ContainerApi {
                     case StonecutterMenu sm -> {
                         data.put("selectedRecipe", sm.getSelectedRecipeIndex());
                         data.put("visibleRecipes", sm.getNumberOfVisibleRecipes());
+                        // v2.45 recipes：切割方案列表的**具体内容**（此前只有 visibleRecipes 这个数量）。
+                        // 列表本来就在客户端：它是 StonecutterMenu 的 recipesForInput **字段**（不是
+                        // DataSlot），由客户端自己的 level.recipeAccess().stonecutterRecipes()
+                        // .selectByInput(...) 算出——vanilla 的 StonecutterScreen:82-91 正是从客户端
+                        // menu 读它画那 12 个按钮，并用同一句 optionDisplay().resolveForFirstStack(...)
+                        // 解析出图标。故这里不是新开同步通道，只是把已有数据接出来。
+                        //
+                        // 取 GUI 上显示的**图标**（optionDisplay）而非 Recipe#assemble 的结果：
+                        // 与所见一致，且对任何 SlotDisplay 变体都成立。
+                        //
+                        // **下标必须与 button 号一一对应**（agent 用 container/button {button:i} 选
+                        // 第 i 个方案），故**逐个输出、绝不跳过**——即使某个图标解析为空气
+                        // （SlotDisplay.Empty → count:0）也照占一位，否则下标会错位。
+                        // 条目数应恒等于 visibleRecipes。
+                        //
+                        // mc.level 为 null 时**不写该键**（缺席=未知，与 bookshelves/effects 同口径）：
+                        // 写 [] 会被读成"没有方案"这一断言，而 visibleRecipes 才是那个事实的权威来源。
+                        if (mc.level != null) {
+                            final var slotCtx = SlotDisplayContext.fromLevel(mc.level);
+                            final List<Map<String, Object>> recipes = new ArrayList<>();
+                            for (var entry : sm.getVisibleRecipes().entries()) {
+                                recipes.add(InventoryApi.slotItem(-1,
+                                        entry.recipe().optionDisplay().resolveForFirstStack(slotCtx)));
+                            }
+                            data.put("recipes", recipes);
+                        }
                     }
                     default -> {}
                 }
@@ -147,6 +200,46 @@ public class ContainerApi {
             ref.value = data;
         });
         return container != null ? container : Map.of("type", "none", "slots", List.of());
+    }
+
+    /**
+     * 附魔台的有效书架数（v2.44，{@code container/get} 的 {@code bookshelves} 键）。
+     *
+     * <p><b>为何要自己算</b>：vanilla 把这个数当**局部变量**用（{@code EnchantmentMenu.slotsChanged}
+     * 里的 {@code int bookcases}），既不存字段也不进 DataSlot ⇒ <b>根本不上同步链路</b>，
+     * 客户端副本里没有这个值，只能重算。
+     *
+     * <p><b>但不是"复刻服务端算法"</b>：直接用 vanilla 自己的公开判定
+     * {@link EnchantingTableBlock#isValidBookShelf}——同一句在客户端的
+     * {@code EnchantingTableBlock.animateTick} 里本来就每帧跑（算附魔粒子），读的正是客户端自己
+     * 的世界副本。所以这里没有"与服务端逐字节对齐"的负担，也不随版本偏移。
+     *
+     * <p><b>坐标从哪来</b>：只能来自准星。客户端 menu 的 {@code ContainerLevelAccess} 是
+     * {@code NULL}（见 {@code buttonClick} 的说明），拿不到 pos；{@code ContainerMemoryTracker.bind}
+     * 定位方块容器用的是同一手法。附魔界面锁鼠标视角 ⇒ 实际恒命中，但<b>不假定它成立</b>：
+     * {@code camera/turn} 可以在界面开着时转动视角，那时准星已经是别的方块，照算就会给出
+     * "别的方块周围的书架数"＝假事实。故必须验证方块类型。
+     *
+     * <p><b>取不到返回 {@code null}，由调用方不写该键</b>——缺席＝<b>未知</b>，与 v2.42 的
+     * {@code effects} 同口径。绝不返回 0：0 是一个断言（"周围没有书架"），而这里的事实是
+     * "没法判定"。
+     *
+     * <p>注意本值是**原始计数**；vanilla 在 {@code EnchantmentTableBlock.getEnchantmentCost}
+     * 里把它 clamp 到 15，所以 &gt;15 与 15 对附魔等级等效。
+     *
+     * @return 有效书架数；准星非方块 / 世界未加载 / 准星所指不是附魔台 → {@code null}
+     */
+    private static Integer countBookshelves(final Minecraft mc) {
+        if (!(mc.hitResult instanceof BlockHitResult bhr)) return null;
+        final var level = mc.level;
+        if (level == null) return null;
+        final BlockPos pos = bhr.getBlockPos();
+        if (!level.getBlockState(pos).is(Blocks.ENCHANTING_TABLE)) return null;
+        int count = 0;
+        for (BlockPos offset : EnchantingTableBlock.BOOKSHELF_OFFSETS) {
+            if (EnchantingTableBlock.isValidBookShelf(level, pos, offset)) count++;
+        }
+        return count;
     }
 
     // ==================== slot click ====================
@@ -307,6 +400,25 @@ public class ContainerApi {
 
     // ==================== button click ====================
 
+    /**
+     * 点击容器按钮（container/button）——必须发服务端包，本地调用不产生任何效果。
+     *
+     * <p>本地 {@code menu.clickMenuButton} <b>只当预检闸门用</b>：客户端 menu 的
+     * {@code ContainerLevelAccess} 是 {@code NULL}（{@code MenuType} 的 create 走
+     * {@code ContainerLevelAccess.NULL}），其 {@code evaluate} 直接返回 {@code Optional.empty()}，
+     * 于是 {@code clickMenuButton} 里那段真正干活的 {@code this.access.execute(...)} 在客户端空转；
+     * 只有服务端 menu 持有带 level/pos 的 access。vanilla 的附魔界面正是这么用的
+     * （{@code EnchantmentScreen} 把返回值当"要不要发包"的判断，真正生效的是紧随其后的发包），
+     * 故此处逐句对齐。
+     *
+     * <p>{@code handleInventoryButtonClick} 发 {@code ServerboundContainerButtonClickPacket}，
+     * 服务端 {@code handleContainerButtonClick} 在服务端 menu 上跑 {@code clickMenuButton} 并
+     * {@code broadcastChanges()}。
+     *
+     * <p><b>返回值语义</b>：{@code accepted} 只表示"本地预检通过且已发包"，<b>不是</b>执行结果
+     * ——服务端无论成功失败都不回包。判定是否真的生效必须靠随后的 {@code container/get} 观察
+     * （例：附魔台看附魔位物品是否长出 enchantments、青金石是否被扣）。
+     */
     private static Map<String, Object> buttonClick(Map<String, Object> params) {
         Boolean accepted = AgentWebSocketServer.runOnClient(1_000, "Container button", ref -> {
             var mc = Minecraft.getInstance();
@@ -314,7 +426,9 @@ public class ContainerApi {
             if (!(mc.screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
             var menu = p.containerMenu;
             int btn = AgentWebSocketServer.num(params, "button", 0);
-            ref.value = menu.clickMenuButton(p, btn);
+            if (!menu.clickMenuButton(p, btn)) return; // 预检不通过：vanilla 同样不发包
+            mc.gameMode.handleInventoryButtonClick(menu.containerId, btn);
+            ref.value = true;
         });
         return Map.of("status", "ok", "accepted", Boolean.TRUE.equals(accepted));
     }
