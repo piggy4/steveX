@@ -707,12 +707,14 @@ public final class ObjectResolver {
         // v2.34：item（掉落物物品栈 tag，快照帧已编码）随轻量快照一并上报，null 为非 item 实体。
         // v2.35：payload/content（展示实体整份 NBT + 薄摘要）同样在采集帧已编码、随快照透传，
         //         ObjectResolver 只做纯数据搬运（不触游戏，§8）。
+        // v2.41：living/livingView（活体全量属性 + 可见薄摘要）同款搬运，见 docs/实体属性观测面设计方案.md §6。
         out.add(new VisionCollector.EntityLightSnapshot(
                 e.id(), e.uuid(), e.typeId(),
                 e.x(), e.y(), e.z(),
                 e.yaw(), e.pitch(),
                 e.vx(), e.vy(), e.vz(),
-                e.onGround(), e.health(), e.item(), e.payload(), e.content()));
+                e.onGround(), e.health(), e.item(), e.payload(), e.content(),
+                e.living(), e.livingView()));
     }
 
     // ==================== §5.3.1 半透明掉落物（工序 D，v2.25） ====================

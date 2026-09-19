@@ -199,8 +199,11 @@ public final class DecorativeSummary {
      *
      * <p>纯 tag 读：不解码 ItemStack、不碰 registry、不产生对象分配（沿用本类零解码风格）。
      * 任一环节不是预期的 compound 形状 → 一律判 false（内容字段失效不阻塞主链路）。
+     *
+     * <p>v2.40：包级开放 —— {@code vision/snapshot} 的掉落物 {@code entities[].item} 判据与展示实体
+     * {@code content} 共用此实现（同一份判据不漂移），故不设 {@code private}。
      */
-    private static boolean isEnchanted(final CompoundTag stackTag) {
+    static boolean isEnchanted(final CompoundTag stackTag) {
         final Tag componentsTag = stackTag.get(KEY_COMPONENTS);
         if (!(componentsTag instanceof CompoundTag components)) return false;
         if (components.contains(COMPONENT_REMOVED_PREFIX + COMPONENT_ENCHANTMENTS)) return false;

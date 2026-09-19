@@ -20,9 +20,12 @@ import org.slf4j.Logger;
 /**
  * 实体 NBT 持久化存储 —— 每次采集整体覆写<b>当前维</b>的桶（快照式，仿 {@link VisionTerrainStore}）。
  *
- * <p><b>只存轻量物理状态，不存每实体全量 NBT</b>——全量 NBT 走
- * {@link VisionCollector#collectEntityNbt} 按需查询，避免 GC 风暴。
+ * <p><b>不存每实体全量 NBT</b>——只存轻量物理态，外加三类特例的<b>复原必需</b>载荷
+ * （掉落物整份物品栈 / 展示实体整份可装载 payload / 活体全量属性）。改用按需直读会引发 GC 风暴（v2 决策）。
  * 记忆世界侧用这份文件 + {@code scannedSections} 权威集做新增 / 移动 / 移除。
+ *
+ * <p>v2.40：本文件同时是 {@code vision/entity} 的<b>唯一数据源</b>（{@link #findEntity}）——
+ * 该端点不再直读活体实体，范围因此自动收敛为"本帧被渲染 + 当前维"。
  *
  * <p>v2.32（世界类型区分，见 docs/世界类型区分与镜像复原设计方案.md）：文件按维度分桶，顶层
  * {@code { "currentDimension", "worlds": { <dim>: <本维正文> } }}；正文形态与旧版逐字一致、每维一份，
@@ -44,8 +47,14 @@ import org.slf4j.Logger;
  *         "<uuid>": { "id": 42, "type": "minecraft:zombie", "pos": [x, y, z],
  *                     "motion": [vx, vy, vz], "rotation": [yaw, pitch],
  *                     "onGround": 1b, "health": 20.0f },
+ *         // v2.34（掉落物）：额外携带 "item": { id, count, components… } 整份物品栈
  *         // v2.35（展示实体）：额外携带 "nbt": { id, ...saveWithoutId } 整份可装载 payload
  *         // （type ∈ 采集白名单时有；帧画/展示实体/盔甲架等）
+ *         // v2.41（活体）：额外携带 "living": { equipment?, customName?, customNameVisible?,
+ *         //   baby?, pose?, onFire? } 全量属性。**每个 LivingEntity 恒有该键**（可为空 compound {}）
+ *         //   ——键的存在性只编码"是不是活体"；applyLiving 走全量对齐（子键缺席即回缺省），
+ *         //   否则"属性从有变无"与"本来就没有"无法区分。
+ *         //   注：其中 effects? 子键**当前不会出现**（源头缺失，见 LivingSummary.collectEffects）
  *       }
  *     },
  *     "minecraft:the_nether": { ... }
@@ -80,6 +89,13 @@ public class VisionEntityStore {
     private static final String KEY_ITEM = "item";
     /** v2.35（展示实体内容记忆）：展示实体条目整份可装载 NBT payload（{id, ...saveWithoutId}）；仅白名单类型且有。 */
     private static final String KEY_NBT = "nbt";
+    /**
+     * v2.41（实体属性观测面，见 docs/实体属性观测面设计方案.md §4）：活体条目<b>复原口径</b>的全量属性
+     * （装备整份物品栈 / customName Component / 完整药水效果 / 幼年 / 姿态 / 着火）；仅 {@code LivingEntity}
+     * 且有内容时有。落盘厚不构成越界——边界只在读取面执行，本键永不由 {@code vision/entity} 之外的
+     * 读取面消费（该端点原样返回条目，属刻意的已知态，见 {@link VisionApi}）。
+     */
+    private static final String KEY_LIVING = "living";
 
     private final Path filePath;
 
@@ -148,6 +164,11 @@ public class VisionEntityStore {
             if (e.payload() != null) {
                 entry.put(KEY_NBT, e.payload());
             }
+            // v2.41：活体条目携带全量属性（复原口径）——记忆侧 applyLiving 据此复原装备/名字/效果/体型/
+            // 姿态/着火。此 tag 也天然承担"属性变更"指纹（EntityData.fingerprint = records.toString）。
+            if (e.living() != null) {
+                entry.put(KEY_LIVING, e.living());
+            }
             entitiesTag.put(e.uuid().toString(), entry);
         }
         bucket.put(KEY_ENTITIES, entitiesTag);
@@ -156,6 +177,33 @@ public class VisionEntityStore {
         writeFile();
 
         return Map.of("entities", entities.size());
+    }
+
+    // ==================== 查询（v2.40） ====================
+
+    /**
+     * 按 uuid 查<b>当前维</b>桶里最近一次采集落盘的实体条目（v2.40，{@code vision/entity} 的唯一数据源）。
+     *
+     * <p>纯内存镜像查询（{@link #worlds}，构造时已灌入既有文件）：不解析文件、不触任何游戏对象。
+     * 返回的即条目<b>原样</b>——物理态 8 字段，掉落物另带 {@code item}（整份物品栈）、展示实体另带
+     * {@code nbt}（整份可装载 payload）。语义是"<b>回忆上一帧看见过的对象</b>"而非实时直读。
+     *
+     * <p>桶是<b>整体覆写</b>的（{@link #sync}）⇒ 只含本帧仍被渲染的实体：移出视锥 / 实体消失 /
+     * 不在当前维 → 返回 null。跨会话不会被误命中（当前维桶每次采集即替换）。
+     *
+     * <p>必须在渲染线程调用（与 {@link #sync} 同线程，避免覆写 {@code worlds} 时读到半更新态）。
+     *
+     * @param uuid 实体 UUID 的规范字符串（{@code UUID#toString()} 形态，即 store 的键形态）
+     * @return 条目 NBT（{@code {id, type, pos, motion, rotation, onGround, health, item?, nbt?, living?}}）；
+     *         当前维桶缺失该 uuid → null
+     */
+    public CompoundTag findEntity(final String uuid) {
+        if (uuid == null) return null;
+        final CompoundTag bucket = worlds.get(currentDimension);
+        if (bucket == null) return null;
+        final CompoundTag entities = bucket.getCompoundOrEmpty(KEY_ENTITIES);
+        if (!entities.contains(uuid)) return null;
+        return entities.getCompoundOrEmpty(uuid);
     }
 
     // ==================== 内部 ====================

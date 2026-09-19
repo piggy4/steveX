@@ -21,17 +21,28 @@ import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.NbtAccounter;
 import net.minecraft.nbt.NbtIo;
 import net.minecraft.nbt.NbtOps;
+import net.minecraft.nbt.Tag;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.ComponentSerialization;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.Mth;
 import net.minecraft.util.ProblemReporter;
+import net.minecraft.util.StringRepresentable;
+import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.level.storage.TagValueInput;
 import net.minecraft.world.level.storage.ValueInput;
+import net.minecraft.world.entity.AgeableMob;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.entity.monster.Zoglin;
+import net.minecraft.world.entity.monster.piglin.Piglin;
+import net.minecraft.world.entity.monster.zombie.Zombie;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
@@ -69,6 +80,11 @@ import org.slf4j.LoggerFactory;
  *
  * <p>{@code applied} 是纯累积的：已放置的实体一直保留，永不因"本次没看到"而移除（删除只走
  * 几何证据路径）。
+ *
+ * <p>v2.41（实体属性观测面，见 docs/实体属性观测面设计方案.md §5）：条目可另带 {@code living}
+ * 全量属性（装备 / 名字牌 / 药水效果 / 幼年 / 姿态 / 着火，{@code LivingSummary#buildSave} 写出）。
+ * 应用走 {@link #applyLiving}：新建 / 重建时在 {@code construct} 内应用；已存在实体属性变化时
+ * <b>就地重应用</b>（{@link #move}，只走 setter，不重建）。因冻结实体不 tick（§5.1），一次应用即永久保持。
  */
 public class EntityRestorer {
 
@@ -87,6 +103,35 @@ public class EntityRestorer {
      *  NBT payload（{id, ...saveWithoutId}，采集端 serializeEntityFull 写出）；非白名单类型 / 旧文件无该键。 */
     private static final String KEY_NBT = "nbt";
 
+    // ==================== v2.41 活体属性键（见 docs/实体属性观测面设计方案.md §4） ====================
+
+    /** 活体属性复合键（复原口径全量 tag，采集端 {@code LivingSummary#buildSave} 写出）；仅 LivingEntity 且有。 */
+    private static final String KEY_LIVING = "living";
+    /** 装备槽表：{@code {<slot.getName()>: <ItemStack.CODEC tag>}}，仅非空槽。 */
+    private static final String KEY_EQUIPMENT = "equipment";
+    /** 自定义名 Component tag（{@code ComponentSerialization.CODEC}）；仅 {@code hasCustomName()} 时。 */
+    private static final String KEY_CUSTOM_NAME = "customName";
+    /** 名字牌可见标志，与 {@link #KEY_CUSTOM_NAME} 配对。 */
+    private static final String KEY_CUSTOM_NAME_VISIBLE = "customNameVisible";
+    /**
+     * 激活效果列表（完整 {@code MobEffectInstance} tag，与 vanilla {@code active_effects} 同格式）。
+     *
+     * <p>⚠️ <b>当前恒缺席</b>：采集端 {@code LivingSummary.collectEffects} 已置空（药水效果不在客户端
+     * 同步链路上，见设计 §3.2）⇒ 本条目的效果段每次都走 {@code removeAllEffects()}（对新建实体是空操作）。
+     * 复原路径本身<b>完整保留</b>，源头解决时采集端只改那一个方法。
+     */
+    private static final String KEY_EFFECTS = "effects";
+    /** 幼年（仅 true 时写）。 */
+    private static final String KEY_BABY = "baby";
+    /** 姿态（{@code Pose#getSerializedName()}；仅非 standing 时写）。 */
+    private static final String KEY_POSE = "pose";
+    /** 是否正在渲染火焰（仅 true 时写）。 */
+    private static final String KEY_ON_FIRE = "onFire";
+
+    /** v2.41：{@code Pose} 名 → 枚举（{@code byName} 未命中回落到 {@code STANDING}）。 */
+    private static final StringRepresentable.EnumCodec<Pose> POSE_CODEC =
+            StringRepresentable.fromEnum(Pose::values);
+
     /** v2.32：已放置的实体按维隔离：维度 → uuid → 实体引用。累积，永不因"本次没看到"而移除。 */
     private final Map<String, Map<UUID, Entity>> appliedByDim = new LinkedHashMap<>();
 
@@ -98,6 +143,18 @@ public class EntityRestorer {
      * 内容变了 ⇒ 整份重建，保证记忆世界内容始终与源一致。位置单独由轻量 pos 走传送。
      */
     private final Map<String, Map<UUID, CompoundTag>> appliedPayloadByDim = new LinkedHashMap<>();
+
+    /**
+     * v2.41（见 docs/实体属性观测面设计方案.md §5.2）：已放置实体<b>当时应用的 living 属性</b>按维隔离：
+     * 维度 → uuid → living tag。
+     *
+     * <p>用途：属性变化检测——新快照 living 与该记录不等 ⇒ 装备换了 / 着火灭了 / 姿态变了 ⇒
+     * <b>就地重应用</b>（{@link #applyLiving}，只走 setter），<b>不重建实体</b>。这与 {@code payload}
+     * 的整份重建语义刻意不同：姿态/着火是快变状态，整份重建代价过高且会打断其它已应用状态。
+     *
+     * <p>与 payload 记录一样，{@code discard} / 重建 / 失效清理时一并移除（防 uuid 复用后误判未变）。
+     */
+    private final Map<String, Map<UUID, CompoundTag>> appliedLivingByDim = new LinkedHashMap<>();
 
     /**
      * v2.21 冻结标记（§7.9 陷阱 ②）：本类放置并冻结的实体集合（跨全部维）。
@@ -155,6 +212,7 @@ public class EntityRestorer {
             FROZEN.remove(e);
             // v2.35：连同 payload 记录一起移除，防 uuid 复用后误判内容未变
             removeAppliedPayload(dimension, uuid);
+            removeAppliedLiving(dimension, uuid); // v2.41：同理
             e.discard();
             LOGGER.info("[MemoryWorld] Removed stale entity {} ({}) in [{}]", uuid,
                     e.position().x + "," + e.position().y + "," + e.position().z, dimension);
@@ -209,6 +267,7 @@ public class EntityRestorer {
     public void onServerStart() {
         appliedByDim.clear();
         appliedPayloadByDim.clear();
+        appliedLivingByDim.clear();
         FROZEN.clear();
         lastSnapshotUuidsByDim.clear();
         appliedFingerprintByDim.clear();
@@ -305,10 +364,12 @@ public class EntityRestorer {
                 // v2.21：旧引用已失效（实体被外力移除）→ 从冻结集合清理，防 IdentityHashMap 泄漏
                 if (existing != null) FROZEN.remove(existing);
                 removeAppliedPayload(dimension, uuid);
+                removeAppliedLiving(dimension, uuid);
                 Entity created = spawn(level, uuid, es);
                 if (created != null) {
                     nextApplied.put(uuid, created);
                     if (es.nbt() != null) setAppliedPayload(dimension, uuid, es.nbt());
+                    if (es.living() != null) setAppliedLiving(dimension, uuid, es.living());
                     spawned++;
                 }
             } else if (payloadChanged(es, appliedPayload(dimension, uuid))) {
@@ -317,24 +378,26 @@ public class EntityRestorer {
                 final Entity created = construct(level, uuid, es); // 先构造、不碰世界：失败可保留旧实体
                 if (created == null) {
                     // 新 payload 无法装载 → 保留现状（内容保持旧值），下个快照变化再试；不丢弃已放置实体
-                    if (move(level, existing, es)) moved++;
+                    if (move(level, dimension, existing, es)) moved++;
                     LOGGER.warn("[MemoryWorld] Content rebuild failed for {} ({}) — keeping existing",
                             uuid, es.type());
                 } else {
                     FROZEN.remove(existing);
                     existing.discard();
                     removeAppliedPayload(dimension, uuid);
+                    removeAppliedLiving(dimension, uuid); // construct 内已按新 living 应用，记录在下方重设
                     freeze(created);
                     if (level.addFreshEntity(created)) {
                         nextApplied.put(uuid, created);
                         if (es.nbt() != null) setAppliedPayload(dimension, uuid, es.nbt());
+                        if (es.living() != null) setAppliedLiving(dimension, uuid, es.living());
                         rebuilt++;
                     } else {
                         LOGGER.warn("[MemoryWorld] Failed to add rebuilt entity {} ({})", uuid, es.type());
                     }
                 }
             } else {
-                if (move(level, existing, es)) moved++;
+                if (move(level, dimension, existing, es)) moved++;
             }
         }
 
@@ -382,6 +445,7 @@ public class EntityRestorer {
                 if (es.health() >= 0 && loaded instanceof LivingEntity living) {
                     living.setHealth(es.health());
                 }
+                applyLiving(loaded, es.living()); // v2.41：活体属性（payload 不含的装备槽之外的属性）
                 return loaded;
             }
             LOGGER.warn("[MemoryWorld] Payload load failed for {} ({}) — falling back to default construct",
@@ -414,6 +478,7 @@ public class EntityRestorer {
             }
             item.setItem(stack);
         }
+        applyLiving(entity, es.living()); // v2.41：活体属性（普通生物走默认构造路径）
         return entity;
     }
 
@@ -455,8 +520,116 @@ public class EntityRestorer {
         if (payloads != null) payloads.remove(uuid);
     }
 
-    /** 位置变化时传送到新坐标；并重新断言冻结状态。返回是否移动了（含 v2.34 物品栈内容变化）。 */
-    private boolean move(final ServerLevel level, final Entity entity, final EntitySnapshot es) {
+    // ==================== v2.41 活体属性应用 ====================
+
+    /** v2.41：记录该实体当前生效的 living 属性。 */
+    private void setAppliedLiving(final String dimension, final UUID uuid, final CompoundTag living) {
+        appliedLivingByDim.computeIfAbsent(dimension, k -> new LinkedHashMap<>()).put(uuid, living);
+    }
+
+    /** v2.41：读该实体当前生效的 living 属性；从未应用 → null。 */
+    private CompoundTag appliedLiving(final String dimension, final UUID uuid) {
+        Map<UUID, CompoundTag> livings = appliedLivingByDim.get(dimension);
+        return livings == null ? null : livings.get(uuid);
+    }
+
+    /** v2.41：删除该实体的 living 记录（discard / 重建 / 失效清理时调用）。 */
+    private void removeAppliedLiving(final String dimension, final UUID uuid) {
+        Map<UUID, CompoundTag> livings = appliedLivingByDim.get(dimension);
+        if (livings != null) livings.remove(uuid);
+    }
+
+    /**
+     * v2.41（见 docs/实体属性观测面设计方案.md §5.3）：把采集端写出的 {@code living} 全量属性应用到实体。
+     *
+     * <p><b>全量对齐语义</b>：本方法是"把实体置成 tag 描述的样子"，故每个子键<b>缺席即回到缺省</b>
+     * （姿态回 standing、火灭、名字清空、效果清空、无记录的槽位清空）——因为落盘侧遵循"缺省即常态"
+     * 只写非缺省值。若只在有值时设置，快照里"火灭了"这个事实就永远传不过来。
+     *
+     * <p>调用点有两处：新建 / 重建（{@link #construct}）与属性变化时的就地重应用（{@link #move}）。
+     * 冻结实体不 tick（§5.1），所以一次应用即永久保持：药水效果不倒计时、火不熄灭、姿态不回弹。
+     *
+     * @param entity 目标实体；非 {@link LivingEntity} 或 {@code living} 为 null → 直接返回
+     * @param living 采集端 {@code LivingSummary#buildSave} 写出的 tag
+     */
+    static void applyLiving(final Entity entity, final CompoundTag living) {
+        if (living == null || !(entity instanceof LivingEntity le)) return;
+        final HolderLookup.Provider registries = entity.registryAccess();
+
+        // 装备：8 槽逐一比对后写入（无记录的槽位 = 空槽）。ItemStack.matches 避免无变化时的无谓同步包。
+        final CompoundTag equipment = living.getCompoundOrEmpty(KEY_EQUIPMENT);
+        for (EquipmentSlot slot : EquipmentSlot.VALUES) {
+            final ItemStack want = equipment.contains(slot.getName())
+                    ? parseItemStack(equipment.getCompoundOrEmpty(slot.getName()), registries)
+                    : ItemStack.EMPTY;
+            if (!ItemStack.matches(le.getItemBySlot(slot), want)) {
+                le.setItemSlot(slot, want);
+            }
+        }
+
+        // 名字牌：Component 原样解码（颜色/格式保留）。缺席 ⇒ 清空——否则快照里"名字牌被摘掉"传不过来。
+        if (living.contains(KEY_CUSTOM_NAME)) {
+            final Component name = ComponentSerialization.CODEC
+                    .parse(registries.createSerializationContext(NbtOps.INSTANCE), living.get(KEY_CUSTOM_NAME))
+                    .resultOrPartial(err -> LOGGER.warn("[MemoryWorld] Name decode error: {}", err))
+                    .orElse(null);
+            le.setCustomName(name);
+            le.setCustomNameVisible(living.getBooleanOr(KEY_CUSTOM_NAME_VISIBLE, false));
+        } else {
+            le.setCustomName(null);
+            le.setCustomNameVisible(false);
+        }
+
+        // 药水效果：先清后加（全量对齐）。完整 MobEffectInstance 解码 → addEffect，与 vanilla
+        // active_effects 存档同一格式。
+        // 注意：采集端当前不下发 effects（源头缺失，见 KEY_EFFECTS javadoc），故本段实际是空操作——
+        // 但 removeAllEffects 必须留在原位：链路解通后它才是"效果被摘掉"能传过来的那一半。
+        le.removeAllEffects();
+        for (Tag t : living.getListOrEmpty(KEY_EFFECTS)) {
+            MobEffectInstance.CODEC
+                    .parse(registries.createSerializationContext(NbtOps.INSTANCE), t)
+                    .resultOrPartial(err -> LOGGER.warn("[MemoryWorld] Effect decode error: {}", err))
+                    .ifPresent(le::addEffect);
+        }
+
+        applyBaby(le, living.getBooleanOr(KEY_BABY, false));
+
+        // 姿态：缺席 ⇒ standing（构造出的实体默认即站立）。
+        final String poseName = living.getStringOr(KEY_POSE, "");
+        le.setPose(poseName.isEmpty() ? Pose.STANDING : POSE_CODEC.byName(poseName, Pose.STANDING));
+
+        // 着火：直接设 synched 标志（Entity#setSharedFlagOnFire），不依赖 remainingFireTicks 递减。
+        // 记忆世界是服务端，isOnFire() 在服务端只看 remainingFireTicks，但渲染走的是这个同步标志，
+        // 而冻结实体不 tick ⇒ 标志不会被 baseTick 冲掉。
+        le.setSharedFlagOnFire(living.getBooleanOr(KEY_ON_FIRE, false));
+    }
+
+    /**
+     * v2.41：幼年状态应用。**必须走 instanceof 阶梯**——{@code Mob.setBaby} 是<b>空实现</b>
+     * （{@code Mob.java:1297}），用它兜底会造成"以为设上了"的静默失败。
+     *
+     * <p>{@code ArmorStand} 除外：它的小型体是 payload 的 {@code Small} 键（走展示实体整份装载路径），
+     * 且 {@code setSmall} 是 private，故此处跳过（其 {@code isBaby()} = {@code isSmall()}，
+     * 采集端仍会写 {@code baby}，属冗余而非缺失）。
+     */
+    private static void applyBaby(final LivingEntity le, final boolean baby) {
+        if (le instanceof AgeableMob ageable) {
+            ageable.setBaby(baby);
+        } else if (le instanceof Zombie zombie) {
+            zombie.setBaby(baby);
+        } else if (le instanceof Piglin piglin) {
+            piglin.setBaby(baby);
+        } else if (le instanceof Zoglin zoglin) {
+            zoglin.setBaby(baby);
+        } else if (le.isBaby() != baby) {
+            // 无法设置的活体类型且当前状态与快照不符 → 记一次（不刷屏：只在真的不一致时）
+            LOGGER.debug("[MemoryWorld] Cannot set baby={} on {} — no setter available",
+                    baby, le.getType());
+        }
+    }
+
+    /** 位置变化时传送到新坐标；并重新断言冻结状态。返回是否有实质变更（位置 / 掉落物栈 / v2.41 活体属性）。 */
+    private boolean move(final ServerLevel level, final String dimension, final Entity entity, final EntitySnapshot es) {
         double x = es.pos()[0];
         double y = es.pos()[1];
         double z = es.pos()[2];
@@ -476,9 +649,17 @@ public class EntityRestorer {
                 itemChanged = true;
             }
         }
+        // v2.41（§5.2）：活体属性变化（换甲 / 着火熄灭 / 姿态变了…）→ 就地重应用，<b>不重建实体</b>。
+        // 与 payload 的整份重建刻意不同：姿态/着火是快变状态，重建代价高且会打断其它已应用状态。
+        boolean livingChanged = false;
+        if (es.living() != null && !es.living().equals(appliedLiving(dimension, entity.getUUID()))) {
+            applyLiving(entity, es.living());
+            setAppliedLiving(dimension, entity.getUUID(), es.living());
+            livingChanged = true;
+        }
         // v2.35：payload 实体（展示类）若位置未变无需内容处理——内容变化由 payloadChanged 分支整份重建。
         freeze(entity); // 重新断言，防止被外力解锁
-        return positionChanged || itemChanged;
+        return positionChanged || itemChanged || livingChanged;
     }
 
     /**
@@ -554,8 +735,11 @@ public class EntityRestorer {
             // v2.35：展示实体可选携带整份可装载 payload（{id, ...saveWithoutId}）；非白名单/旧文件
             // 无该键 → null。同样不在 parseBucket 解码（装载需 level 上下文，延后到 construct）。
             CompoundTag nbt = entry.contains(KEY_NBT) ? entry.getCompoundOrEmpty(KEY_NBT) : null;
+            // v2.41：活体属性可选携带（仅 LivingEntity 且非全缺省时有）；旧文件无该键 → null。
+            // 同样不在 parseBucket 解码（解码需 registryAccess，延后到 construct / move）。
+            CompoundTag living = entry.contains(KEY_LIVING) ? entry.getCompoundOrEmpty(KEY_LIVING) : null;
 
-            entities.put(uuid, new EntitySnapshot(type, pos, motion, rot, onGround, health, item, nbt));
+            entities.put(uuid, new EntitySnapshot(type, pos, motion, rot, onGround, health, item, nbt, living));
         }
         return new EntityData(entities);
     }
@@ -608,14 +792,18 @@ public class EntityRestorer {
      *
      * <p>v2.35：{@code nbt} = 展示实体的整份可装载 payload（{@code {id, ...saveWithoutId}}）；
      * 非白名单类型 / 旧文件无该键 → null。装载延后到 construct（需 level 上下文）。
+     *
+     * <p>v2.41：{@code living} = 活体实体的全量属性（装备 / 名字 / 效果 / 幼年 / 姿态 / 着火）；
+     * 非 LivingEntity / 全缺省 / 旧文件无该键 → null。应用延后到 construct / move（需 registryAccess）。
      */
     private record EntitySnapshot(
             String type, double[] pos, double[] motion, float[] rot,
-            boolean onGround, float health, CompoundTag item, CompoundTag nbt
+            boolean onGround, float health, CompoundTag item, CompoundTag nbt, CompoundTag living
     ) {
         String fingerprint() {
             return type + "|" + Arrays.toString(pos) + "|" + Arrays.toString(motion)
-                    + "|" + Arrays.toString(rot) + "|" + onGround + "|" + health + "|" + item + "|" + nbt;
+                    + "|" + Arrays.toString(rot) + "|" + onGround + "|" + health + "|" + item + "|" + nbt
+                    + "|" + living;
         }
     }
 

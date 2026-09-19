@@ -198,12 +198,12 @@ const METHODS = [
 
   // ── 视觉（2，对应视觉系统方案 §6.2）──
   { method: 'vision/snapshot', category: 'vision', description: 'Depth capture + visible blocks/entities + store stats',
-    zh: '深度采集 + 可见方块/方块实体/实体快照并落盘 NBT（首次最久约 15s），无参数', paramDefs: [] },
-  { method: 'vision/entity', category: 'vision', description: 'Full NBT of a single entity by uuid',
-    zh: '按 uuid 查询单个实体全量 NBT；params 填 { uuid(必填), force? }：uuid=实体 UUID（来自 f3 准星目标或 vision/snapshot），force=true 跳过缓存强制重扫',
+    zh: '深度采集 + 可见方块/方块实体/实体快照并落盘 NBT（首次最久约 15s），无参数；掉落物实体带 item{id,count,enchanted?}（enchanted 仅真附魔时出现）；活体实体（生物/玩家）另带 equipment{槽:{id,count?,enchanted?}}（槽 mainhand/offhand/feet/legs/chest/head/body/saddle）、name（仅名字牌可见时）、effects（效果种类 id，不含持续/等级；过滤不可见粒子的效果；数据源为单机集成服务器——连真实服务器时该键恒缺席，此时"缺席"是**未知**而非"没有效果"，须看顶层 effectsSource）、baby（仅幼年）、maxHealth、pose、onFire（仅着火）',
+    paramDefs: [] },
+  { method: 'vision/entity', category: 'vision', description: 'Stored entity entry by uuid (from last capture frame)',
+    zh: '按 uuid 查该实体的落盘条目（数据源 = 上次采集帧的 entities.nbt，非实时直读；不在本帧可见范围或不在当前维度则报错）；params 填 { uuid(必填) }：uuid=实体 UUID（来自 f3 准星目标或 vision/snapshot）。返回物理态 + 掉落物整份物品栈 item / 展示实体整份 payload nbt',
     paramDefs: [
-      { name: 'uuid', type: 'string', required: true, hint: '实体 UUID（来自 f3 准星目标或 vision/snapshot）', sample: '00000000-0000-0000-0000-000000000000' },
-      { name: 'force', type: 'bool', def: false, hint: 'true=跳过缓存强制重扫', sample: false }
+      { name: 'uuid', type: 'string', required: true, hint: '实体 UUID（来自 f3 准星目标或 vision/snapshot）', sample: '00000000-0000-0000-0000-000000000000' }
     ] },
 ]
 
