@@ -11,6 +11,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -22,6 +23,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.core.SectionPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.resources.Identifier;
 import net.minecraft.util.Mth;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.WallBannerBlock;
@@ -35,6 +37,7 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
+import org.jetbrains.annotations.Nullable;
 import org.joml.Vector3f;
 import org.slf4j.Logger;
 
@@ -62,9 +65,30 @@ public final class ObjectResolver {
 
     private static final Logger LOGGER = LogUtils.getLogger();
 
-    private static final double EPSILON = 0.05;
+    /**
+     * <b>沿射线推的探针距离</b>（实体盒相交探针 / 薄方块三连判的 {@code W ± dir·ε} / 前向扫描的
+     * 最小长度）。值 0.05。
+     *
+     * <p><b>它不再承担 {@code W} 的还原</b>：{@code W = nudged − dir·ε} 是落格推移的逆运算，
+     * 必须使用<b>落格时实际传入的 ε</b>（现由 {@link Unprojector.UnprojectResult#landingEpsilon()}
+     * 携带）。两者同值时代码看不出差别，一旦落格量单独下调，拿本常量去还原就会沿射线偏
+     * {@code 0.05 − 1/128 = 0.0422} 格——薄几何体（1/64）上直接穿到它后面那块。
+     *
+     * <p><b>为什么不随落格量一起下调</b>（v2.39 决策 R-1，设计 §4.2.1 四常量表）：落格量的约束来自
+     * "面到本格出口的厚度"（薄贴花 1/64 ⇒ 必须小），而本常量的作用是"从表面点探到相邻格"。实体盒
+     * 膨胀 0.5 与 0.05 是同一把尺的两处，改动会让 v2.10 的穿透防护出现假阳性回归。两者失效面
+     * 不相交，故拆成两个常量、各自演进。
+     */
+    private static final double PROBE_EPSILON = 0.05;
     /** §5.4 深度比较容差（float32 量化，v2.11：仅 ≤~100 格内成立）。 */
     private static final double DELTA = 0.05;
+    /**
+     * {@link #forwardScanIsAir} 的迭代步长（v2.11 肢体判别 b/c 项的前向空扫）。
+     * <b>同值不同义</b>：下调它只让扫描更细，代价是迭代数线性上升（扫描长 {@code |W−cam|+1} 格
+     * ⇒ 0.05 时约 20 次、1/128 时约 128 次，6.4×）。故它与 {@link #PROBE_EPSILON} 分开登记，
+     * 免得将来"全局调小 ε"顺手把这条热循环也乘上 6.4×。
+     */
+    private static final double SCAN_STEP = 0.05;
     /** §5.4 屏幕空间栅格合并的栅格尺寸（像素）；v2.26 主路径（区间射线推进）已删除该有损合并，仅降级回退沿用。 */
     private static final double GRID = 8.0;
 
@@ -113,14 +137,22 @@ public final class ObjectResolver {
                     ? queryFirstTranslucent(level, snap, unproj, cam, terrain, timestamp)
                     : new LongOpenHashSet();
             final int terrainBefore = terrain.size();
+            final TripwireDiag tripwireDiag = new TripwireDiag();
             if (hasInterval) {
-                queryTranslucent(level, snap, unproj, cam, terrain, timestamp, firstSurface);
+                queryTranslucent(level, snap, unproj, cam, terrain, timestamp, firstSurface, tripwireDiag);
             } else {
                 queryTranslucentFallback(level, snap, unproj, cam, terrain, timestamp, firstSurface);
             }
             // v2.24 诊断：工序 B 放了多少首层半透明、工序 C 补了多少（嵌套 + 绊线）。
             LOGGER.info("[Vision] translucent: firstSurface(B)={}, refinedAdded(C)={}, terrainTotal={}, hasTranslucentDepth={}",
                     firstSurface.size(), terrain.size() - terrainBefore, terrain.size(), hasInterval);
+            // v2.37 八次修订（§15.10）诊断：区间外单绊线候选通道（§5.4）逐闸门计数。本通道此前
+            // **完全静默**——采集不到绊线时无法区分"某道闸门挡下"与"根本没进循环"，也无法区分
+            // "形状与渲染模型不符"（noShapeHit）与"被遮挡/判据不过"（occluded）。一行一帧（本行与
+            // 上面那行同频，均按采集帧而非渲染帧打）。
+            LOGGER.info("[Vision] tripwire: {}", hasInterval
+                    ? tripwireDiag.summary()
+                    : "channel skipped（无 translucent 深度 → 降级路径 queryTranslucentFallback 接管，绊线随其候选枚举采集）");
         }
 
         // ③ 实体正向像素归属
@@ -155,32 +187,184 @@ public final class ObjectResolver {
         //     水/满格透明绝不可喂 main 场——恒假消失，优雅降级、恢复后自愈）；岩浆走 main 段不受影响。
         final boolean dimensionOk = cells.dimension() != null && !cells.dimension().isEmpty()
                 && cells.dimension().equals(dimensionId);
+        // v2.38（§7.1 决策 G2）：渲染距离闸门。客户端只画渲染距离内的区块，界外方块"存在但没写深度"
+        // ⇒ 判据在那儿是恒假阳性（§1.1 判据侧对称性断裂）。门限 = min(removalMaxRayDist, (rd−2)×16)，
+        // 公式与安全余量的全部说明只在 DeletionJudge.renderDistanceGate 一处，此处只取值。
+        // 注：rd ≤ 2 时门限为 0 ⇒ 本帧所有记忆格都不可判（全欠删）——这是有意的保守退化，不是缺陷。
+        final double maxDistBlocks = DeletionJudge.renderDistanceGate(
+                Minecraft.getInstance().options.getEffectiveRenderDistance(), cells.maxRayDist());
         final List<BlockPos> deletions = new ArrayList<>();
         final List<BlockPos> translucentDeletions = new ArrayList<>();
         if (dimensionOk) {
             // main 段 → main 场（§7.11 原样判据）
-            deletions.addAll(DeletionJudge.test(snap, unproj, cells.cells(), cells.pixelThreshold(), terrain.keySet()));
+            deletions.addAll(DeletionJudge.test(snap, unproj, cells.cells(), cells.pixelThreshold(),
+                    terrain.keySet(), maxDistBlocks));
             // translucent 段 → 按当前图形配置路由（与 §5.4 采集通道同口径，不得混用）
             if (!cells.translucentCells().isEmpty()) {
                 if (fabulous) {
                     if (snap.hasTranslucentDepth() && cells.translucentEnabled()) {
                         translucentDeletions.addAll(DeletionJudge.testTranslucent(
-                                snap, unproj, cells.translucentCells(), cells.pixelThreshold(), terrain.keySet()));
+                                snap, unproj, cells.translucentCells(), cells.pixelThreshold(),
+                                terrain.keySet(), maxDistBlocks));
                     }
                     // Fabulous && (!hasTranslucentDepth || !translucentEnabled) → translucent 段空集
                 } else {
                     // Fancy/Fast：水/满格透明写 main → 并入现有 main 场判据
                     translucentDeletions.addAll(DeletionJudge.test(
-                            snap, unproj, cells.translucentCells(), cells.pixelThreshold(), terrain.keySet()));
+                            snap, unproj, cells.translucentCells(), cells.pixelThreshold(),
+                            terrain.keySet(), maxDistBlocks));
                 }
             }
             deletions.addAll(translucentDeletions);
         }
-        // v2.36 诊断：main/translucent 两段各自判删数（读 translucent 场用 testTranslucent 路径时）
-        LOGGER.info("[Vision] deletions: main={}, translucent={} (total={}, fabulous={}, hasTranslucentDepth={}, "
-                        + "translucentEnabled={})",
-                deletions.size() - translucentDeletions.size(), translucentDeletions.size(), deletions.size(),
-                fabulous, snap.hasTranslucentDepth(), cells.translucentEnabled());
+
+        // v2.37（§3.2 / §5.2）几何段：非满形状方块（栅栏 / 铁栏杆 / 墙 / 玻璃板 / 十字植物…）走
+        // "射线 ∩ 记忆形状 + sprite 掩码" 的精确判据（DeletionJudge.testShaped），替代整格判据——
+        // 整格判据会把"射线只穿过格内空余区"也计为一票越过，对方块还在的情形造成误删（§1）。
+        //
+        // 两处 fail-closed（全部走欠删）：
+        //   ① cells 的 spriteEpoch 与本地已载入的 memory_sprites.bin 不符（记忆侧刚换 epoch / 文件
+        //      尚未落盘 / 本端还没读到）⇒ 整段不作判——下标→掩码的对应关系不可信，宁可不判；
+        //   ② 单格解引用失败（方块 id 未知 / 渲染层不可判 / 该格 quad 全不可用）⇒ 该格跳过。
+        final List<BlockPos> shapedDeletions = new ArrayList<>();
+        final int shapedJudged;
+        // 诊断（设计 §10 第 16 条）：本轮几何段的 h_max → δ_cell 直方图。
+        // 判据 2b 的 δ 是**逐格**的（§3.2 2b-δ）：δ ≥ h_max 时该格按构造永不投票，而"删了几个"
+        // 完全反推不出这件事（不删既可能是"真没删"也可能是"判据不可满足"）⇒ 必须直接打出来，
+        // 并与 §3.2 的表逐行核对。按 h_max 分组而非逐格打：h_max 是模型属性，同种方块必然同值，
+        // 故一"组"恰好就是那张表的一"行"——既等价又不会刷屏（712 格 → 个位数行）。
+        final Map<Float, Integer> deltaHist = new TreeMap<>();
+        // 诊断（设计 §10 第 18 条 / 决策 Q）：本轮因 δ 可行窗口闭合而跳过的格数。跳过恒是欠删
+        // （安全），但它<b>永不投票</b>——不记账就与"判了但没删"无法区分，会被误读成识别准确。
+        final int[] shapedUnjudged = new int[1];
+        if (dimensionOk && !cells.shapedCells().isEmpty()) {
+            final SpriteTableCache sprites = SpriteTableCache.get();
+            if (sprites.hasEpoch(cells.spriteEpoch())) {
+                final List<ShapedCellData.ResolvedCell> resolved = new ArrayList<>(cells.shapedCells().size());
+                for (ShapedCellData.ShapedCell sc : cells.shapedCells()) {
+                    final ShapedCellData.ResolvedCell rc = resolveShapedCell(sc, sprites, fabulous,
+                            snap.hasTranslucentDepth(), cells.translucentEnabled());
+                    if (rc != null) {
+                        resolved.add(rc);
+                        deltaHist.merge(rc.shapeMaxY(), 1, Integer::sum);
+                    }
+                }
+                shapedJudged = resolved.size();
+                shapedDeletions.addAll(DeletionJudge.testShaped(
+                        snap, unproj, resolved, cells.pixelThreshold(), terrain.keySet(),
+                        maxDistBlocks, shapedUnjudged));
+            } else {
+                shapedJudged = -1; // 整段作废（epoch 不符 / sprite 表不可得）
+                // local=0 表示本端**没有**可用的 sprite 表（文件缺失 / 解析失败——多为格式错位），
+                // 而非"只是还没刷新"；两者都会让本轮所有非满形状方块判不出消失，故必须能一眼区分。
+                LOGGER.info("[Vision] shaped geometry skipped: sprite epoch mismatch (cells={}, local={}{})",
+                        cells.spriteEpoch(), sprites.epoch(),
+                        sprites.epoch() == 0L ? " = 本端无可用 sprite 表（缺失/解析失败）" : "");
+            }
+        } else {
+            shapedJudged = 0;
+        }
+        deletions.addAll(shapedDeletions);
+
+        // v2.37 七次修订（§15）信号缺失族校正通道：绊线 / 绊线钩在 Fabulous 下画进 weather 目标、
+        // 不写任何已读深度场（§10.8）⇒ 深度判据对它们"活体无信号"：判"活着"与"消失了"不可区分，
+        // 故自 v2.23 起整族排除出几何判据（§2.2 行 1）。但该族缺的不是"可判性"而是**判据的输入**——
+        // "该格现实里还是不是绊线"在真实世界侧可以直接读。本通道把判据由**深度推断**换成**状态直读**：
+        //   区块未加载 / VOID_AIR ⇒ 不裁决（读不到 ≠ 不存在，P1，默认方向 = 保留）；
+        //   非空气 ⇒ 不裁决（在场，或换成了别的东西——后者由正向观测通道覆盖，P3）；
+        //   空气 ⇒ 缺席。
+        // **并列**而非并入 deletions：两条通道各有独立守卫（deletions 走 isDeletableContent ∪
+        // isShapedDeletableContent；本通道走记忆侧的 isSignalLossBlock），合并会让记忆侧只能用一道
+        // 守卫、同时放宽两道保险（§15.2 的核心结构决定）。本通道对渲染帧零依赖——不读深度、不读 PBO、
+        // 与 Fabulous / translucentEnabled 全无关，故不受此处任何图形配置分支影响。
+        // 采集侧**刻意不持**信号缺失族名单：族由记忆侧上报什么定义，"以状态为准"这一条与方块种类无关。
+        final List<BlockPos> signalLossDeletions = new ArrayList<>();
+        final SignalLossCorrector.Stats signalLossStats;
+        if (dimensionOk && !cells.signalLossCells().isEmpty()) {
+            final SignalLossCorrector.Result slr =
+                    SignalLossCorrector.correct(level, cells.signalLossCells(), terrain.keySet());
+            signalLossDeletions.addAll(slr.absent());
+            signalLossStats = slr.stats();
+        } else {
+            signalLossStats = null; // 记忆侧离线 / 空段 / 跨维 → 无候选，无话可说
+        }
+
+        // v2.37（§7.14）实体在场校正通道：对记忆侧上报的**冻结实体占用格**直读真实世界（同 §15 的路线：
+        // 换证据类型，而非修补谓词）。旧判据要求实体 AABB 覆盖的**全部**格都被证明为空，而 deletions 证明
+        // 的是"这格没有实心不透明方块"——实体格含"当前可见方块"（营火 / 耕地 / 雪层 / 台阶…）时该格
+        // 永不入 deletions ⇒ 与非满方块共格的冻结实体**永久残留**（§7.14 根因）。
+        //   未加载 ⇒ 不裁决（读不到 ≠ 不存在，P1——本通道唯一的新增前提）；
+        //   查到实体（除 agent 自身，见 EntityPresenceCorrector 的承重说明）⇒ 不裁决（P3）；
+        //   已加载 ∧ 查询为空 ⇒ 缺席。
+        // **并列**而非并入 deletions：deletions 对实体是错的代理（实体渲染几何 ≪ AABB，格内空余区的射线
+        // 投票"越过"——既是欠删来源、也是误删活体的隐蔽通道）。实体格本版已整段撤出 main 段，实体裁决
+        // 由本通道独占（§7.14.1"替换而非并列"）。本通道对渲染帧零依赖：不读深度 / PBO / Fabulous。
+        final List<BlockPos> entityDeletions = new ArrayList<>();
+        final EntityPresenceCorrector.Stats entityPresenceStats;
+        if (dimensionOk && !cells.entityCells().isEmpty()) {
+            final EntityPresenceCorrector.Result epr =
+                    EntityPresenceCorrector.correct(level, cells.entityCells(), visibleEntityCells(snap));
+            entityDeletions.addAll(epr.absent());
+            entityPresenceStats = epr.stats();
+        } else {
+            entityPresenceStats = null; // 记忆侧离线 / 空段 / 跨维 → 无候选，无话可说
+        }
+
+        // v2.36/v2.37 诊断：main/translucent/shaped 三段各自判删数 + 几何段可判格数
+        // v2.38 追加 maxDist：G2 闸门的实际取值（欠删方向的"可见的盲目"——rd 调小 / 门限收缩会让
+        // 判删数下降，不打出这个数就会被误读成"识别变准了"，与 §10 第 18 条同一条原则）。
+        LOGGER.info("[Vision] deletions: main={}, translucent={}, shaped={}/{} judged (total={}, fabulous={}, "
+                        + "hasTranslucentDepth={}, translucentEnabled={}, maxDist={})",
+                deletions.size() - translucentDeletions.size() - shapedDeletions.size(),
+                translucentDeletions.size(), shapedDeletions.size(), shapedJudged,
+                deletions.size(), fabulous, snap.hasTranslucentDepth(), cells.translucentEnabled(), maxDistBlocks);
+
+        // v2.37 七次修订（§15.7 / §10 第 19 条）诊断：信号缺失族校正通道逐格记账。
+        // 本通道的四档跳过全部**方向安全**（跳过 = 不裁决 = 欠删），但它们的含义完全不同，混在一起就
+        // 无法与"判了但没删"区分——尤其这三档：
+        //   unloaded：P1 守卫真的在干活。非零正常且必需（玩家走远即发生）；候选非空却恒为 0，反而要查。
+        //   voidAir ：守卫未覆盖到的环境差异。**正常应恒 0**，非零即 P1 那个坑露出了新路径。
+        //   visibleSkipped：恒不应触发的双保险。非零即"可见集与状态直读不一致"，唯一在线矛盾指示器。
+        // 空段（无候选）时 signalLossStats 为 null，不打——否则每帧一行零。
+        if (signalLossStats != null) {
+            LOGGER.info("[Vision] signalLoss: candidates={}, absent={}, unloaded={}, voidAir={}, "
+                            + "stillPresent={}, visibleSkipped={}",
+                    signalLossStats.candidates(), signalLossDeletions.size(), signalLossStats.unloaded(),
+                    signalLossStats.voidAir(), signalLossStats.stillPresent(), signalLossStats.visibleSkipped());
+        }
+
+        // v2.37（§7.14 / §10 第 19 条同款）诊断：实体在场校正通道逐格记账。四档全部方向安全（跳过 =
+        // 不裁决 = 欠删），但含义完全不同，混在一起就无法与"判了但没删"区分：
+        //   unloaded：P1 守卫真的在干活。非零正常且必需（玩家走远即发生）；候选非空却恒为 0，反而要查。
+        //   occupied：常态档（活着的镜像副本每轮都落在这里）。它恒等于候选数 = 当前没有可删的实体。
+        //   visibleSkipped：恒不应触发的**跨源**双保险（可见实体必然在 level 实体表里）。
+        //                  零星非零有一个良性来源：快照 AABB 是渲染帧**插值**盒，快移实体的插值盒可能
+        //                  多覆盖一格而该格此刻已空——这不是矛盾。持续 / 大面积非零才是要查的信号。
+        //   absent：本通道唯一被授权证明的事实（= 上面 absent 方括号里的数）。
+        if (entityPresenceStats != null) {
+            LOGGER.info("[Vision] entityPresence: candidates={}, absent={}, unloaded={}, occupied={}, "
+                            + "visibleSkipped={}",
+                    entityPresenceStats.candidates(), entityPresenceStats.absent(),
+                    entityPresenceStats.unloaded(), entityPresenceStats.occupied(),
+                    entityPresenceStats.visibleSkipped());
+        }
+
+        // v2.37 诊断（设计 §10 第 16 条）：δ 逐格化的实际落点。判据 2b 为 Z ≥ t_shape_exit + δ_cell，
+        // 而 δ_cell = min(0.05, 0.5·h_max) —— h_max ≤ 0.05 的"贴地平铺贴花"（红石粉 / 落叶）在旧口径
+        // 下按构造不可满足。此行直接给出"本轮每类高度各拿多少 δ"，用于和 §3.2 的表逐行核对——
+        // 尤其确认红石粉/落叶落在 0.0078 而不是 0.0500。整段作废时（shapedJudged<0）无话可说，不打。
+        if (!deltaHist.isEmpty()) {
+            final StringBuilder sb = new StringBuilder();
+            for (Map.Entry<Float, Integer> e : deltaHist.entrySet()) {
+                if (sb.length() > 0) sb.append(", ");
+                // Locale.ROOT：默认 locale 用逗号作小数点（如 de_DE）时，"0,0156" 会与分组间的
+                // 逗号分隔符混淆，日志失去可读性（且这条日志是给人逐行核对 §3.2 表的）。
+                sb.append(String.format(java.util.Locale.ROOT, "h_max=%.4f→δ_cell=%.4f×%d格",
+                        e.getKey(), DeletionJudge.deltaFor(e.getKey()), e.getValue()));
+            }
+            LOGGER.info("[Vision] shaped δ breakdown (δ_global={}, noise_c={}): {}; 窗口闭合跳过={}格（欠删，§14.5）",
+                    DeletionJudge.DELTA_GLOBAL, DeletionJudge.DELTA_NOISE_C, sb, shapedUnjudged[0]);
+        }
 
         // v2.31（生物群系，见 docs/生物群系复原设计方案.md）：在三 store 落盘前为群系通道采样。
         // 候选 = 本帧全部可见方块（此刻 terrain 已含 §5.4 半透明/绊线补采）+ 相机 cell 锚点
@@ -203,8 +387,44 @@ public final class ObjectResolver {
         // v2.21：采集时刻世界时间一并落盘（§7.10），记忆世界据此 setDayTime 对齐昼夜。
         final long worldTime = snap.dayTime();
         // v2.23：deletions 随 terrain.nbt 顶层落盘，记忆世界 DeletionApplier 据此减量（§7.11）。
+        // v2.37 七次修订（§15.3）：signalLossDeletions 作为**并列键**随同一份 terrain.nbt 落盘
+        // （不并入 deletions，见上）；记忆侧 DeletionApplier 用并列通道按各自的守卫执行。
         final Map<String, Object> terrainStats = VisionCollector.getTerrainStore().sync(
-                terrain, deletions, agentPos, agentYaw, agentPitch, agentFov, worldTime, dimensionId);
+                terrain, deletions, signalLossDeletions, entityDeletions, agentPos, agentYaw, agentPitch,
+                agentFov, worldTime, dimensionId);
+
+        // v2.38（§4.1 F1 / §7.1 决策 G·H·I）唯一删除原语 —— 同一 resolve 内、terrain.nbt 落盘之后，
+        // 把"判据证明已消失"这一事实落到两份**持久负载**上（§1.1 的对称性断裂正因为负载只增不删）：
+        //   VisionBlockEntityStore：**即时**修剪（决策 G 不对称的 BE 侧——NBT 载荷每帧可观测、可重建，
+        //                           误剪代价 = 一轮闪烁且自愈）；
+        //   ContainerMemoryStore  ：**延迟 K 代际**修剪 + 观测到活体即撤销（决策 G 的容器侧——Items
+        //                           是交互事件产物、观测层面拿不回来 ⇒ 必须给可撤销窗口）。
+        // 位置必须在两 store 的 sync **之前**：sync 是增量 union，看着"已被判删"的记录照样原样留在文件里
+        // ⇒ 下一帧记忆侧回放又把方块复活（告示牌/箱子/床的根因，§1.1）。
+        // 入参 = deletions ∪ signalLossDeletions（决策 H）：只覆盖 deletions 会让"信号缺失表加进来的
+        // 方块"删了方块却留下负载，§14.4 的加表路线就此失效。
+        // ⚠ v2.37（§7.14）：entityDeletions **刻意不进这里**，也不进任何方块删除通道。它证明的是
+        // "这格现实中没有实体"，与"这格有没有方块"正交——实体占据的格常常是**仍然存在**的方块
+        // （掉落物落在营火上、生物站在耕地上），并进去就是对活方块做整格删除（§1.3 那类误删）。
+        final Map<BlockPos, String> pruneTargets = buildPruneTargets(deletions, signalLossDeletions, cells);
+        final Map<String, Integer> bePrune = VisionCollector.getStore().applyDeletions(dimensionId, pruneTargets);
+        final Map<String, Integer> containerPrune =
+                ContainerMemoryStore.get().applyDeletions(dimensionId, pruneTargets, terrain.keySet());
+        // 诊断（§10 第 15 条）：F1 的实际落点。只在**有事发生**时打：pruned/kept/pending/cancelled
+        // 任一非零。missing 单列——它恒是"该格在持久层本就没有记录"（遍历绝大多数格，不是异常）。
+        if (bePrune.getOrDefault("pruned", 0) > 0 || bePrune.getOrDefault("kept", 0) > 0
+                || containerPrune.getOrDefault("pruned", 0) > 0
+                || containerPrune.getOrDefault("pending", 0) > 0
+                || containerPrune.getOrDefault("cancelled", 0) > 0) {
+            LOGGER.info("[Vision] prune(F1): targets={} | be: pruned={}, keptByIdentity={}, noRecord={} "
+                            + "| container: pruned={}, pending={}, cancelled={}, keptByIdentity={} (K={})",
+                    pruneTargets.size(),
+                    bePrune.get("pruned"), bePrune.get("kept"), bePrune.get("missing"),
+                    containerPrune.get("pruned"), containerPrune.get("pending"),
+                    containerPrune.get("cancelled"), containerPrune.get("kept"),
+                    ContainerMemoryStore.get().pruneGenerations());
+        }
+
         final Map<String, Integer> beStats = VisionCollector.getStore().sync(
                 blockEntities, agentPos, agentYaw, agentPitch, agentFov, worldTime, dimensionId);
         final Map<String, Object> entityStats = VisionCollector.getEntityStore().sync(
@@ -213,6 +433,78 @@ public final class ObjectResolver {
         return new ResolveResult(terrain, blockEntities, entities, deletions, dimensionId,
                 terrainStats, beStats, entityStats,
                 Map.of("cells", biomeStats.cells(), "added", biomeStats.added()));
+    }
+
+    /**
+     * v2.38（§4.1 F1 / §7.1 决策 H·I）从本帧的判删结果构造<b>持久层修剪目标</b>：
+     * {@code deletions ∪ signalLossDeletions} → 该格由记忆侧上报的 blockId。
+     *
+     * <p><b>为什么取并集（决策 H）</b>：两条判删通道是并列的（{@link DeletionJudge} 的几何/整格判据、
+     * {@code SignalLossCorrector} 的状态直读），各有独立守卫；但对"这格已被证明消失"这一事实而言两者
+     * 等价——持久层只关心"要不要删记录"。只取 {@code deletions} 会让信号缺失通道（含 §14.4 加进来的
+     * 148 个 BE 载体方块）删了方块却留下负载 ⇒ 下一帧复活，加表路线整体失效。
+     *
+     * <p><b>blockId 从哪来（决策 I 的 I′ 实现）</b>：只有携带方块 id 的段能给出身份——信号缺失段
+     * （{@link MemoryCellsReader.SignalLossCell}）与几何段（{@link ShapedCellData.ShapedCell}）；
+     * main / translucent 段在 cells 文件里只有裸坐标（零足迹设计），故填空串。持久层对空串<b>不作</b>身份
+     * 要求（"上报即持有"：这些段的上报谓词与记忆侧执行守卫同族，构造性地保证记忆侧确实持有该方块）。
+     *
+     * <p>同 pos 出现在多段时保留<b>非空</b>身份（段之间按设计互斥，此处只为防御）。返回表可为空
+     * （无判删 / 记忆侧离线 / 跨维）。
+     */
+    private static Map<BlockPos, String> buildPruneTargets(
+            final List<BlockPos> deletions,
+            final List<BlockPos> signalLossDeletions,
+            final MemoryCellsReader.CellsData cells
+    ) {
+        if (deletions.isEmpty() && signalLossDeletions.isEmpty()) return Map.of();
+
+        final Map<BlockPos, String> idByPos = new HashMap<>();
+        for (ShapedCellData.ShapedCell sc : cells.shapedCells()) {
+            if (sc.blockId() != null && !sc.blockId().isBlank()) idByPos.putIfAbsent(sc.pos(), sc.blockId());
+        }
+        for (MemoryCellsReader.SignalLossCell sc : cells.signalLossCells()) {
+            if (sc.blockId() != null && !sc.blockId().isBlank()) idByPos.putIfAbsent(sc.pos(), sc.blockId());
+        }
+
+        final Map<BlockPos, String> targets = new HashMap<>(deletions.size() + signalLossDeletions.size());
+        for (BlockPos pos : deletions) {
+            targets.put(pos, idByPos.getOrDefault(pos, ""));
+        }
+        for (BlockPos pos : signalLossDeletions) {
+            // 不能覆盖已有的非空身份：deletions 侧若已给出 id 就沿用（同一格两段同判时以有身份者为准）
+            targets.merge(pos, idByPos.getOrDefault(pos, ""),
+                    (a, b) -> (a == null || a.isBlank()) ? b : a);
+        }
+        return targets;
+    }
+
+    /**
+     * 本帧可见实体快照的 AABB 覆盖格（v2.37 §7.14），供 {@link EntityPresenceCorrector} 作<b>恒不应
+     * 触发</b>的跨源双保险：可见实体必然在 {@code level} 的实体表里 ⇒ 对它的格做实体检查询必非空。
+     * 格枚举与记忆侧 {@code MemoryCellReporter} 的实体段同口径（{@code floor(min)..floor(max)}），
+     * 否则两边对同一实体的格集不一致，双保险会假触发。
+     *
+     * <p>注意快照盒是<b>渲染帧插值</b>后的盒（{@code DepthCapture} 在采集帧按 partialTick 移动），
+     * 而查询读的是 tick 位置——快移实体可能因此多覆盖一格，落在该格的候选会被判"矛盾"而跳过
+     * （欠删，方向安全）。这是 {@code entityPresence} 日志里 {@code visibleSkipped} 零星非零的良性来源。
+     */
+    private static Set<BlockPos> visibleEntityCells(final DepthCapture.DepthSnapshot snap) {
+        final Set<BlockPos> out = new HashSet<>();
+        for (DepthCapture.EntitySnapshotData e : snap.entities()) {
+            final AABB box = e.box();
+            final int minX = Mth.floor(box.minX), maxX = Mth.floor(box.maxX);
+            final int minY = Mth.floor(box.minY), maxY = Mth.floor(box.maxY);
+            final int minZ = Mth.floor(box.minZ), maxZ = Mth.floor(box.maxZ);
+            for (int x = minX; x <= maxX; x++) {
+                for (int y = minY; y <= maxY; y++) {
+                    for (int z = minZ; z <= maxZ; z++) {
+                        out.add(new BlockPos(x, y, z));
+                    }
+                }
+            }
+        }
+        return out;
     }
 
     /** 由实体快照构建 SectionPos 桶（§5.3 粗过滤；桶与命中盒统一 inflate 0.5，v2.10）。 */
@@ -251,6 +543,9 @@ public final class ObjectResolver {
             final Map<BlockPos, VisionCollector.BlockEntitySnapshot> blockEntities,
             final long timestamp
     ) {
+        // 落格推移的实际用量（= 逐像素 nudged 的推进量）：回退还原 W 必须用它，不能用 PROBE_EPSILON
+        // ——见 PROBE_EPSILON 的 javadoc（两者同值时代码无差别，落格量单独下调后立刻致命）。
+        final double landingEps = hits.landingEpsilon();
         for (var e : hits.blockHits().long2ObjectEntrySet()) {
             final BlockPos pos = BlockPos.of(e.getLongKey());
             final Vec3 nudged = e.getValue();
@@ -263,10 +558,10 @@ public final class ObjectResolver {
                 final double len = diff.length();
                 if (len < 1e-9) continue;
                 final Vec3 dir = diff.scale(1.0 / len);
-                // 恢复原始表面点 W = nudged − dir·ε
-                final double wx = nudged.x - dir.x * EPSILON;
-                final double wy = nudged.y - dir.y * EPSILON;
-                final double wz = nudged.z - dir.z * EPSILON;
+                // 恢复原始表面点 W = nudged − dir·ε（ε = 落格时的实际推进量，见上）
+                final double wx = nudged.x - dir.x * landingEps;
+                final double wy = nudged.y - dir.y * landingEps;
+                final double wz = nudged.z - dir.z * landingEps;
                 // v2.10 实体相交验证：W 落在桶内任一实体盒内 ⇒ 记录面是实体表面（薄实体贴墙/肢体）
                 // ⇒ 跳过回退，防穿透采集后方被遮挡方块。
                 if (intersectsAnyEntity(wx, wy, wz, bucket)) continue;
@@ -343,7 +638,7 @@ public final class ObjectResolver {
     ) {
         for (List<DepthCapture.EntitySnapshotData> list : bucket.values()) {
             for (DepthCapture.EntitySnapshotData e : list) {
-                if (containsInflated(e, wx, wy, wz, EPSILON)) return true;
+                if (containsInflated(e, wx, wy, wz, PROBE_EPSILON)) return true;
             }
         }
         return false;
@@ -412,12 +707,14 @@ public final class ObjectResolver {
         // v2.34：item（掉落物物品栈 tag，快照帧已编码）随轻量快照一并上报，null 为非 item 实体。
         // v2.35：payload/content（展示实体整份 NBT + 薄摘要）同样在采集帧已编码、随快照透传，
         //         ObjectResolver 只做纯数据搬运（不触游戏，§8）。
+        // v2.41：living/livingView（活体全量属性 + 可见薄摘要）同款搬运，见 docs/实体属性观测面设计方案.md §6。
         out.add(new VisionCollector.EntityLightSnapshot(
                 e.id(), e.uuid(), e.typeId(),
                 e.x(), e.y(), e.z(),
                 e.yaw(), e.pitch(),
                 e.vx(), e.vy(), e.vz(),
-                e.onGround(), e.health(), e.item(), e.payload(), e.content()));
+                e.onGround(), e.health(), e.item(), e.payload(), e.content(),
+                e.living(), e.livingView()));
     }
 
     // ==================== §5.3.1 半透明掉落物（工序 D，v2.25） ====================
@@ -531,13 +828,13 @@ public final class ObjectResolver {
         // a. 非他体：W 不在桶内任一其他实体盒内
         if (!notOtherEntity(w, self, list)) return false;
         // b. 非薄方块：cell(W − dir·ε) 与 cell(W) 均非薄方块（空气不算薄），且 cell(W + dir·ε) 为空气
-        final BlockPos minus = BlockPos.containing(w.x - dir.x * EPSILON, w.y - dir.y * EPSILON, w.z - dir.z * EPSILON);
+        final BlockPos minus = BlockPos.containing(w.x - dir.x * PROBE_EPSILON, w.y - dir.y * PROBE_EPSILON, w.z - dir.z * PROBE_EPSILON);
         final BlockPos at = BlockPos.containing(w.x, w.y, w.z);
-        final BlockPos plus = BlockPos.containing(w.x + dir.x * EPSILON, w.y + dir.y * EPSILON, w.z + dir.z * EPSILON);
+        final BlockPos plus = BlockPos.containing(w.x + dir.x * PROBE_EPSILON, w.y + dir.y * PROBE_EPSILON, w.z + dir.z * PROBE_EPSILON);
         if (isThinBlock(level, minus) || isThinBlock(level, at)) return false;
         if (!level.getBlockState(plus).isAir()) return false;
         // c. 前向空扫：W 向远处，上限 |W−camPos| + max(2ε, 1 格)
-        return forwardScanIsAir(level, w, dir, lenW + Math.max(2.0 * EPSILON, 1.0));
+        return forwardScanIsAir(level, w, dir, lenW + Math.max(2.0 * PROBE_EPSILON, 1.0));
     }
 
     /** v2.11 肢体判别 B：记录面在盒前（伸过洞口的肢体）。 */
@@ -568,16 +865,104 @@ public final class ObjectResolver {
         return !Block.isShapeFullBlock(st.getShape(level, pos));
     }
 
-    /** 前向空扫：沿 dir 从 W 向远处扫（步长 ε）到 limitDist，一路空气返回 true。 */
+    /** 前向空扫：沿 dir 从 W 向远处扫（步长 {@link #SCAN_STEP}）到 limitDist，一路空气返回 true。 */
     private static boolean forwardScanIsAir(final ClientLevel level, final Vec3 w, final Vec3 dir, final double limitDist) {
-        double d = EPSILON;
+        double d = SCAN_STEP;
         while (d <= limitDist + 1e-6) {
             if (!level.getBlockState(BlockPos.containing(w.x + dir.x * d, w.y + dir.y * d, w.z + dir.z * d)).isAir()) {
                 return false;
             }
-            d += EPSILON;
+            d += SCAN_STEP;
         }
         return true;
+    }
+
+    // ==================== v2.37 非满形状几何段路由（§5.2） ====================
+
+    /**
+     * 把一条几何段记录解引用成可判形态：查方块注册 id → 定渲染层 → 定 {@code ALPHA_CUTOUT} 阈值与
+     * 判据场 → 逐 quad 解引用 sprite 掩码。
+     *
+     * <p><b>为什么路由必须在采集侧做（§4.3.4）</b>：渲染层的选择依赖<b>本端</b>的图形设置
+     * （尤其 {@code cutoutLeaves}：树叶在 CUTOUT 与 SOLID 之间切换），记忆侧无从得知。方块 id 因此是
+     * <b>承重字段</b>而非诊断字段。
+     *
+     * <p><b>逐层阈值（§3.2 2a 第 2 条 / §5.2）</b>——即 {@code terrain.fsh} 里 {@code ALPHA_CUTOUT}
+     * 宏的实际取值：
+     * <ul>
+     *   <li>{@link ChunkSectionLayer#SOLID}：无 {@code ALPHA_CUTOUT} define → 阈值 0（任何 texel 都写深度）；</li>
+     *   <li>{@link ChunkSectionLayer#CUTOUT}：0.5；</li>
+     *   <li>{@link ChunkSectionLayer#TRANSLUCENT}：0.01；</li>
+     *   <li>{@link ChunkSectionLayer#TRIPWIRE}：<b>不可判</b>——绊线画进 weather 目标，既不写 main 深度
+     *       也不写 translucent 深度，没有任何一条深度场能反映它（§7.12 边界）。</li>
+     * </ul>
+     *
+     * <p><b>TRANSLUCENT 的判据场（与 §5.4 同口径，不得混用）</b>：Fabulous 且两路深度可用且记忆侧
+     * 开了 translucent 场 → 该格写的是 translucent 场，读 translucent 深度；Fancy/Fast（无独立
+     * 半透明目标，半透明写 main 深度）→ 读 main 场；Fabulous 但第二路 PBO 降级 → <b>不可判</b>
+     * （绝不回退 main 场：判据场不同源时读到的深度不是该方块的表层深度，比较无意义 → 恒假消失）。
+     *
+     * @return 可判形态；该格不可判 / 无一条 quad 可用 → null（欠删，调用方跳过）
+     */
+    private static ShapedCellData.@Nullable ResolvedCell resolveShapedCell(
+            final ShapedCellData.ShapedCell cell,
+            final SpriteTableCache sprites,
+            final boolean fabulous,
+            final boolean hasTranslucentDepth,
+            final boolean translucentEnabled
+    ) {
+        final Identifier id = Identifier.tryParse(cell.blockId());
+        if (id == null) return null;
+        final Block block = BuiltInRegistries.BLOCK.getValue(id);
+        if (block == null) return null; // 本端没有这个方块（版本/模组不一致）→ 不可判
+
+        final ChunkSectionLayer layer;
+        try {
+            layer = ItemBlockRenderTypes.getChunkRenderType(block.defaultBlockState());
+        } catch (Throwable t) {
+            return null;
+        }
+
+        final float alphaThr;
+        final boolean translucentField;
+        if (layer == ChunkSectionLayer.SOLID) {
+            alphaThr = 0.0f;
+            translucentField = false;
+        } else if (layer == ChunkSectionLayer.CUTOUT) {
+            alphaThr = 0.5f;
+            translucentField = false;
+        } else if (layer == ChunkSectionLayer.TRANSLUCENT) {
+            alphaThr = 0.01f;
+            if (fabulous) {
+                if (!hasTranslucentDepth || !translucentEnabled) return null;
+                translucentField = true;
+            } else {
+                translucentField = false;
+            }
+        } else {
+            return null; // TRIPWIRE（不写任何深度场）/ 未知层
+        }
+
+        final List<ShapedCellData.ResolvedQuad> quads = new ArrayList<>(cell.quads().length);
+        // 设计 §3.2 2b-δ：取**该格全部已解析 quad** 顶点在格局部的最大 y（不是"可用 quad"的）。
+        // 用全部而非过滤后的，是取更保守的一侧：被掩码剔除的 quad 会让"可用几何"变矮，若据它缩 δ
+        // 就等于"因数据缺失而放宽判据"，方向不安全。全部顶点的 max 与"该方块模型的高度"同义，
+        // 且它与判据的实际语义自洽——形状越矮，§3.2 2b 能拿到的深度跳变上限就越小，余量必须同步缩小。
+        float shapeMaxY = 0.0f;
+        for (ShapedCellData.Quad q : cell.quads()) {
+            for (int vi = 0; vi < 4; vi++) {
+                final float y = q.vy(vi);
+                if (y > shapeMaxY) shapeMaxY = y;
+            }
+        }
+        for (ShapedCellData.Quad q : cell.quads()) {
+            final SpriteTableCache.Mask mask = sprites.maskForIndex(q.spriteIndex());
+            if (mask == null) continue; // 掩码不可得（越界 / 占位 / 动画 / 损坏）→ 该 quad 不参与
+            quads.add(new ShapedCellData.ResolvedQuad(q, mask.alpha(), mask.width(), mask.height()));
+        }
+        if (quads.isEmpty()) return null; // 全部 quad 不可用 → 该格不可判（欠删）
+        return new ShapedCellData.ResolvedCell(cell.pos(), alphaThr, translucentField,
+                quads.toArray(new ShapedCellData.ResolvedQuad[0]), shapeMaxY);
     }
 
     // ==================== §5.4 半透明 / 绊线方块（仅 Fabulous） ====================
@@ -681,7 +1066,8 @@ public final class ObjectResolver {
             final Vec3 cam,
             final Map<BlockPos, VisionCollector.TerrainBlockSnapshot> terrain,
             final long timestamp,
-            final LongSet firstSurfacePlaced
+            final LongSet firstSurfacePlaced,
+            final TripwireDiag diag
     ) {
         final int width = snap.width();
         final int height = snap.height();
@@ -717,7 +1103,7 @@ public final class ObjectResolver {
 
         // 区间外的独立绊线候选（v2.26 保留 v2.12/v2.24 采集能力）：绊线稀疏，palette 驱动枚举 +
         // 统一判定式精筛，无需 8px 有损合并。
-        queryTripwireCandidates(level, snap, unproj, cam, terrain, timestamp);
+        queryTripwireCandidates(level, snap, unproj, cam, terrain, timestamp, diag);
     }
 
     /**
@@ -968,6 +1354,34 @@ public final class ObjectResolver {
     }
 
     /**
+     * v2.37 九次修订（§15.11.5，2026-09-12）：<b>世界坐标</b>形状盒的唯一来源 —— 把格内方块的"实际
+     * 渲染形状"平移到该格的世界位置。流体按 {@code fluid.getHeight} 缩放 Y_max（{@code getShape} 对
+     * 流体返回满格，满格盒会让"射线穿过格内空气部分"在天空背景下误判可见，v2.10 语义）。
+     *
+     * <p><b>为什么必须由本方法统一提供</b>：{@code state.getShape(level, pos)} 返回的是<b>格局部</b>
+     * 坐标——vanilla {@code BlockBehaviour.getShape} 直接转发 {@code block.getShape(state,level,pos,ctx)}，
+     * 不含 {@code move(pos)}；补这一下是调用方的责任（vanilla 自己在 {@code TripWireBlock:168} 写
+     * {@code getShape(...).bounds().move(pos)}）。本类下方三处都与<b>世界空间</b>的相机/射线求交，
+     * 直接用局部盒等于在<b>世界原点</b>摆一个 y≈0.1 的单位盒：沙漠里 y=65 的绊线因此被判成"距相机
+     * 74 格、而场景深度只有 1.8 格" → 永远 {@code occluded}。这正是 §5.4 两个通道长期静默的根因
+     * （§15.11.2 四环证据链），也是半透明族（水/玻璃/睡莲）自 v2.10 起从未真正生效的原因（§15.11.4）。
+     *
+     * <p><b>不要合并进来的两处</b>：{@link #isThinBlock} 与记忆侧 {@code BlockStateUtil} 的
+     * {@code Block.isShapeFullBlock(getShape(...))} —— 它们把形状与<b>局部</b>的 {@code Shapes.block()}
+     * 比较，口径本就是局部；搬到世界坐标反而会错（§15.11.7 表）。判定式与阈值（δ 等）不在本方法职责内。
+     */
+    private static List<AABB> worldShapeAabbs(final ClientLevel level, final BlockPos pos, final BlockState state) {
+        final FluidState fluid = state.getFluidState();
+        if (!fluid.isEmpty()) {
+            final float h = fluid.getHeight(level, pos);
+            return List.of(new AABB(
+                    pos.getX(), pos.getY(), pos.getZ(),
+                    pos.getX() + 1.0, pos.getY() + h, pos.getZ() + 1.0));
+        }
+        return state.getShape(level, pos).move(pos.getX(), pos.getY(), pos.getZ()).toAabbs();
+    }
+
+    /**
      * v2.26 统一判定式（§5.4）：单个透明格对给定射线是否可见——射线实际穿过该格"实际渲染形状"
      * （水按 fluid.getHeight 缩放 Y_max、普通透明块按 getShape，v2.10 同款）且
      * {@code t_entry ≤ Z_opaque − δ}（带符号 slab，相机在形状内 → t_entry 为负 → 可见）。
@@ -979,14 +1393,9 @@ public final class ObjectResolver {
             final BlockState state, final double zOpaque
     ) {
         final BlockPos pos = new BlockPos(x, y, z);
-        final List<AABB> shapes;
-        final FluidState fluid = state.getFluidState();
-        if (!fluid.isEmpty()) {
-            final float h = fluid.getHeight(level, pos);
-            shapes = List.of(new AABB(x, y, z, x + 1.0, y + h, z + 1.0));
-        } else {
-            shapes = state.getShape(level, pos).toAabbs();
-        }
+        // v2.37 九次修订（§15.11.5）：形状盒必须是世界坐标（origin/dir 都是世界空间；zOpaque 是相机
+        // 到首个不透明面的距离），由 worldShapeAabbs 统一提供。局部盒会让本判定恒不成立（§15.11.2）。
+        final List<AABB> shapes = worldShapeAabbs(level, pos, state);
         if (shapes.isEmpty()) return false;
         final double tEntry = minSlabEntry(origin, dir, shapes);
         return tEntry != Double.MAX_VALUE && tEntry <= zOpaque - DELTA;
@@ -1004,33 +1413,45 @@ public final class ObjectResolver {
             final Unprojector unproj,
             final Vec3 cam,
             final Map<BlockPos, VisionCollector.TerrainBlockSnapshot> terrain,
-            final long timestamp
+            final long timestamp,
+            final TripwireDiag diag
     ) {
         final int renderDist = Minecraft.getInstance().options.getEffectiveRenderDistance();
         final SectionPos camSec = SectionPos.of(BlockPos.containing(cam));
         final int minSecY = level.getMinSectionY();
         final int maxSecY = level.getMaxSectionY();
         final LevelRenderer lr = Minecraft.getInstance().levelRenderer;
+        diag.camSection = camSec;
+        diag.renderDist = renderDist;
 
         for (int sz = camSec.z() - renderDist; sz <= camSec.z() + renderDist; sz++) {
             for (int sx = camSec.x() - renderDist; sx <= camSec.x() + renderDist; sx++) {
                 final var chunk = level.getChunkSource().getChunkNow(sx, sz);
                 if (chunk == null) continue;
+                diag.chunks++;
                 final LevelChunkSection[] sections = chunk.getSections();
                 for (int sy = minSecY; sy <= maxSecY; sy++) {
                     final int idx = level.getSectionIndexFromSectionY(sy);
                     if (idx < 0 || idx >= sections.length) continue;
                     final LevelChunkSection section = sections[idx];
                     if (section == null || section.hasOnlyAir()) continue;
+                    diag.nonAirSections++;
                     if (!section.getStates().maybeHas(ObjectResolver::isTripwireLayer)) continue;
+                    diag.paletteHit++;
                     final BlockPos sectionOrigin = SectionPos.of(sx, sy, sz).origin();
-                    if (!lr.isSectionCompiledAndVisible(sectionOrigin)) continue;
+                    if (!lr.isSectionCompiledAndVisible(sectionOrigin)) {
+                        diag.notVisible++;
+                        diag.sampleSection(sectionOrigin);
+                        continue;
+                    }
                     for (int ly = 0; ly < 16; ly++) {
                         for (int lz = 0; lz < 16; lz++) {
                             for (int lx = 0; lx < 16; lx++) {
                                 final BlockState st = section.getBlockState(lx, ly, lz);
                                 if (!isTripwireLayer(st)) continue;
-                                fineFilterTranslucent(level, snap, unproj, sectionOrigin.offset(lx, ly, lz), cam, terrain, timestamp);
+                                diag.cells++;
+                                tripwireProbe(level, snap, unproj, sectionOrigin.offset(lx, ly, lz),
+                                        cam, terrain, timestamp, diag);
                             }
                         }
                     }
@@ -1039,7 +1460,115 @@ public final class ObjectResolver {
         }
     }
 
-    private static void fineFilterTranslucent(
+    /**
+     * v2.37 八次修订（§15.10 诊断）：绊线候选的"精筛 + 记账"包装 —— 逻辑与直接调
+     * {@link #fineFilterTranslucent} 完全一致，只是把终止原因码计入 {@link TripwireDiag}，
+     * 并给未采到的候选留样本（位置 + 形状 y 区间 + 原因）。仅绊线通道用：
+     * 本通道此前<b>完全静默</b>，"一个都没采到"既可能是闸门挡下、也可能是根本没进循环，
+     * 不记账就无法区分。记账本身不改判定（半透明网格通道仍走原路径）。
+     */
+    private static void tripwireProbe(
+            final ClientLevel level,
+            final DepthCapture.DepthSnapshot snap,
+            final Unprojector unproj,
+            final BlockPos pos,
+            final Vec3 cam,
+            final Map<BlockPos, VisionCollector.TerrainBlockSnapshot> terrain,
+            final long timestamp,
+            final TripwireDiag diag
+    ) {
+        final int code = fineFilterTranslucent(level, snap, unproj, pos, cam, terrain, timestamp);
+        if (code == FR_VISIBLE || code == FR_CAM_INSIDE) {
+            diag.added++;
+            return;
+        }
+        switch (code) {
+            case FR_SHAPE_EMPTY: diag.shapeEmpty++; break;
+            case FR_PROJ_NONE: diag.projNone++; break;
+            case FR_NO_SHAPE_HIT: diag.noShapeHit++; break;
+            case FR_OCCLUDED: diag.occluded++; break;
+            default: diag.rayNull++; break;
+        }
+        // 样本（至多 3 条）：未采到的格打印其形状 y 区间——形状与渲染模型不一致时（薄片浮在高处等）
+        // 正是从这两个数上直接看出来。
+        // v2.37 九次修订（§15.11.5）：区间改为**世界坐标**并显式标注（旧样本打的是局部坐标：沙漠里
+        // y=65 的绊线显示 shapeY=[0.0625,0.15625]，正是根因的现场证据，§15.11.1）；流体同样入样。
+        if (diag.samples.size() < 3) {
+            final BlockState st = level.getBlockState(pos);
+            final List<AABB> sh = worldShapeAabbs(level, pos, st);
+            if (sh.isEmpty()) {
+                diag.sample(pos + " shape=(empty) -> " + reasonName(code));
+            } else {
+                double lo = Double.MAX_VALUE, hi = -Double.MAX_VALUE;
+                for (AABB b : sh) { lo = Math.min(lo, b.minY); hi = Math.max(hi, b.maxY); }
+                diag.sample(pos + " shapeY(world)=[" + lo + "," + hi + "] -> " + reasonName(code));
+            }
+        }
+    }
+
+    /**
+     * v2.37 八次修订（§15.10 诊断）：绊线候选通道的逐闸门计数（一次性，随采集帧构造）。
+     *
+     * <p>闸门次序（{@link #queryTripwireCandidates}）：chunks（chunk 已载入）→ nonAirSections
+     * （节非全空）→ paletteHit（节 palette 含 TRIPWIRE 层）→ notVisible（编译可见性闸门）→
+     * cells（实际枚举到的绊线格）→ 精筛终止原因码（added / shapeEmpty / projNone / noShapeHit /
+     * occluded / rayNull）。哪一级骤降，就是哪一级挡下的。
+     */
+    private static final class TripwireDiag {
+        int chunks, nonAirSections, paletteHit, notVisible, cells, added;
+        int shapeEmpty, projNone, noShapeHit, occluded, rayNull;
+        SectionPos camSection = SectionPos.of(0, 0, 0);
+        int renderDist;
+        final List<String> samples = new ArrayList<>(3);
+        final List<BlockPos> hiddenSections = new ArrayList<>(2);
+
+        void sample(final String s) { samples.add(s); }
+        void sampleSection(final BlockPos origin) {
+            if (hiddenSections.size() < 2) hiddenSections.add(origin);
+        }
+
+        /** 单行摘要（§15.10：一行看出哪级闸门挡下的）。 */
+        String summary() {
+            final StringBuilder sb = new StringBuilder(256);
+            sb.append("camSection=").append(camSection.x()).append(',').append(camSection.y())
+                    .append(',').append(camSection.z()).append(", renderDist=").append(renderDist);
+            sb.append(", chunks=").append(chunks).append(", nonAirSections=").append(nonAirSections);
+            sb.append(", paletteHit=").append(paletteHit).append(", notVisible=").append(notVisible);
+            if (!hiddenSections.isEmpty()) sb.append(" sections=").append(hiddenSections);
+            sb.append(", cells=").append(cells).append(", added=").append(added);
+            sb.append(", shapeEmpty=").append(shapeEmpty).append(", projNone=").append(projNone);
+            sb.append(", noShapeHit=").append(noShapeHit).append(", occluded=").append(occluded);
+            sb.append(", rayNull=").append(rayNull);
+            if (!samples.isEmpty()) sb.append(", samples=").append(samples);
+            return sb.toString();
+        }
+    }
+
+    // v2.37 八次修订（§15.10 诊断）：精筛的终止原因码。**纯诊断**，不改变任何判定：
+    // 返回值仅供绊线候选通道记账用（半透明网格通道忽略之），用于把"这条通道一个都没采到"
+    // 拆成"哪一道闸门挡下的"——本函数此前完全静默，是绊线采集失败无法定位的直接原因。
+    private static final int FR_VISIBLE = 0;      // 找到可见像素 → 已 addTerrain
+    private static final int FR_CAM_INSIDE = 1;   // 相机在形状内 → 已 addTerrain
+    private static final int FR_SHAPE_EMPTY = 2;  // getShape 为空（无形状可判）
+    private static final int FR_PROJ_NONE = 3;    // 8 角全不可投影（相机背后 / 全出屏）
+    private static final int FR_NO_SHAPE_HIT = 4; // 无任一像素的射线穿过形状（bbox 超集内全落空）
+    private static final int FR_OCCLUDED = 5;     // 射线穿过形状，但所有像素深度比较不过（被挡）
+    private static final int FR_RAY_NULL = 6;     // 逐像素射线 / 反投影失败（投影矩阵不可用）
+
+    private static String reasonName(final int code) {
+        switch (code) {
+            case FR_VISIBLE: return "visible";
+            case FR_CAM_INSIDE: return "camInside";
+            case FR_SHAPE_EMPTY: return "shapeEmpty";
+            case FR_PROJ_NONE: return "projNone";
+            case FR_NO_SHAPE_HIT: return "noShapeHit";
+            case FR_OCCLUDED: return "occluded";
+            case FR_RAY_NULL: return "rayNull";
+            default: return "?" + code;
+        }
+    }
+
+    private static int fineFilterTranslucent(
             final ClientLevel level,
             final DepthCapture.DepthSnapshot snap,
             final Unprojector unproj,
@@ -1049,20 +1578,11 @@ public final class ObjectResolver {
             final long timestamp
     ) {
         final BlockState state = level.getBlockState(pos);
-        // v2.10：候选盒 = 实际渲染形状。普通方块用 state.getShape 的包围盒（玻璃板/红石线为薄片）；
-        // 流体（水）按 getFluidState().getHeight() 缩放 Y_max——getShape 对流体返回满格，满格 AABB
-        // 会让"射线穿过格子内空气部分"在天空背景下误判可见（设计 §5.4）。
-        final List<AABB> shapes;
-        final FluidState fluid = state.getFluidState();
-        if (!fluid.isEmpty()) {
-            final float h = fluid.getHeight(level, pos);
-            shapes = List.of(new AABB(
-                    pos.getX(), pos.getY(), pos.getZ(),
-                    pos.getX() + 1.0, pos.getY() + h, pos.getZ() + 1.0));
-        } else {
-            shapes = state.getShape(level, pos).toAabbs();
-        }
-        if (shapes.isEmpty()) return;
+        // v2.10：候选盒 = 实际渲染形状（玻璃板/红石线为薄片；流体按 fluid.getHeight 缩放 Y_max）；
+        // v2.37 九次修订（§15.11.5）：改为**世界坐标**副本——由 worldShapeAabbs 统一提供（局部盒会
+        // 让本通道的深度判据恒不成立，绊线 + 半透明族全部静默，§15.11.2/§15.11.4）。
+        final List<AABB> shapes = worldShapeAabbs(level, pos, state);
+        if (shapes.isEmpty()) return FR_SHAPE_EMPTY;
 
         double minX = Double.MAX_VALUE, minY = Double.MAX_VALUE, minZ = Double.MAX_VALUE;
         double maxX = -Double.MAX_VALUE, maxY = -Double.MAX_VALUE, maxZ = -Double.MAX_VALUE;
@@ -1073,7 +1593,7 @@ public final class ObjectResolver {
         // ⓪ 相机在方块形状内（游泳/站玻璃里）→ 可见（v2.8 早退）
         if (closedContains(minX, minY, minZ, maxX, maxY, maxZ, cam.x, cam.y, cam.z)) {
             addTerrain(terrain, pos, state, timestamp);
-            return;
+            return FR_CAM_INSIDE;
         }
 
         // ① 投影 8 角 → 屏幕 bbox（超集；任一角在相机背后 → 无法构建有效范围 → 保守跳过）
@@ -1094,34 +1614,40 @@ public final class ObjectResolver {
         }
         // 全角不可投影 → 盒在相机背后 / 完全出屏 → 不可见。bbox 只是像素迭代范围，
         // 真伪由逐像素射线-AABB + 深度比较决定，故 bbox 缩小只降召回、不引入假阳性。
-        if (projected == 0) return;
+        if (projected == 0) return FR_PROJ_NONE;
         // ② 循环前显式裁剪到屏幕范围（v2.10）：越界像素 depthAt 钳到 1.0 会静默读成天空 → 假阳性
         final int x0 = Math.max(0, (int) Math.floor(minPx));
         final int x1 = Math.min(width - 1, (int) Math.ceil(maxPx));
         final int y0 = Math.max(0, (int) Math.floor(minPy));
         final int y1 = Math.min(height - 1, (int) Math.ceil(maxPy));
 
+        // v2.37 八次修订（§15.10 诊断）：区分"一条射线都没穿过形状"与"穿过了但全被挡"——
+        // 前者指向形状/模型不一致（几何问题），后者指向深度判据（正常遮挡）。仅用于终止原因码。
+        boolean hitAny = false;
+        boolean projFailed = false;
         for (int py = y0; py <= y1; py++) {
             for (int px = x0; px <= x1; px++) {
                 final Vec3 dir = unproj.pixelRay(px, py);
-                if (dir == null) continue;
+                if (dir == null) { projFailed = true; continue; }
                 final double tEntry = minSlabEntry(cam, dir, shapes);
                 if (tEntry == Double.MAX_VALUE) continue; // 射线不穿形状（bbox 超集 → continue 防误判）
+                hitAny = true;
                 final float d = snap.depthAt(px, py);
                 final double zOpaque;
                 if (d >= unproj.dFar()) {
                     zOpaque = Double.POSITIVE_INFINITY; // 贴天空 → 可见
                 } else {
                     final Vec3 w = unproj.unprojectPixel(px, py, d);
-                    if (w == null) continue;
+                    if (w == null) { projFailed = true; continue; }
                     zOpaque = w.distanceTo(cam);
                 }
                 if (zOpaque >= tEntry - DELTA) {
                     addTerrain(terrain, pos, state, timestamp);
-                    return; // 首个可见像素 break（提前退出）
+                    return FR_VISIBLE; // 首个可见像素 break（提前退出）
                 }
             }
         }
+        return hitAny ? FR_OCCLUDED : (projFailed ? FR_RAY_NULL : FR_NO_SHAPE_HIT);
     }
 
     private static double minSlabEntry(final Vec3 origin, final Vec3 dir, final List<AABB> shapes) {
@@ -1219,7 +1745,14 @@ public final class ObjectResolver {
             Map<BlockPos, VisionCollector.TerrainBlockSnapshot> terrain,
             Map<BlockPos, VisionCollector.BlockEntitySnapshot> blockEntities,
             List<VisionCollector.EntityLightSnapshot> entities,
-            /** v2.23：被证明消失的记忆格（随 terrain.nbt 顶层落盘，供记忆侧减量）。 */
+            /**
+             * v2.23：被证明消失的记忆格（随 terrain.nbt 顶层 {@code deletions} 键落盘，供记忆侧减量）。
+             *
+             * <p>v2.37 七次修订（§15）：<b>只含几何段</b>（main + translucent + shaped）——信号缺失族
+             * 校正通道的裁决走 {@code sync} 的 {@code signalLossDeletions} 并列键，<b>刻意不并入本字段</b>
+             * （两条通道在记忆侧各有独立守卫，合并会同时放宽两道保险，§15.2）。本字段供 API 组装
+             * JSON / 统计用；{@code VisionApi} 不消费它。
+             */
             List<BlockPos> deletions,
             /** v2.32：本帧所属维 id（agent 当前维；随 snapshot 响应顶层 + 各 store currentDimension 落盘）。 */
             String dimension,

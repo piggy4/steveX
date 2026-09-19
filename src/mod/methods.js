@@ -1,7 +1,7 @@
 /**
  * 采集端 mod（stevex-template-1.21.11）WebSocket API 方法清单。
  *
- * 共 50 个方法，分组与参数 schema 已按 mod Java 源码逐条核实
+ * 共 51 个方法，分组与参数 schema 已按 mod Java 源码逐条核实
  * （见 steveX_改进方案.md 附录 §十一；websocket 分发在 AgentWebSocketServer /
  * api\*Api.java 各 handler 内，方法名注册与参数读取是两套并存的 ad hoc 逻辑）。
  * 上层通过 POST /api/mod/:method 原样透传，mod 侧对未知方法会返回
@@ -122,9 +122,9 @@ const METHODS = [
       { name: 'fov', type: 'int', def: 70, hint: '视野（出现才改）', sample: 80 }
     ] },
 
-  // ── 容器（7）──
+  // ── 容器（8）──
   { method: 'container/get', category: 'container', description: 'Get open container contents',
-    zh: '读取当前打开的容器：类型/槽位物品/携带物品，及熔炉/附魔台/箱子等专用字段，无参数', paramDefs: [] },
+    zh: '读取当前打开的容器：类型/槽位物品/携带物品，及熔炉/附魔台/切石机/箱子等专用字段，无参数。**附魔台**额外给 costs/enchantClue/enchantName/levelClue/goldCount/bookshelves，三个选项按同一套下标对齐（enchantName 是附魔注册名如 "minecraft:sharpness"，选项不可用时为 null；enchantClue 是原始注册表数字 id，仅供排查）；bookshelves=有效书架数，是**世界状态**——靠准星所指方块定位附魔台，界面开着时用 camera/turn 转视角会让它失效，该键**缺席＝未知**（不是 0），且给的是原始计数（vanilla 算附魔等级时会 clamp 到 15）。**切石机**额外给 selectedRecipe/visibleRecipes/recipes——recipes 是方案列表的具体内容（每项是该方案在 GUI 上显示的图标物品，**下标与 container/button 的 button 号一一对应**，条目数应恒等于 visibleRecipes；输入物不是合法切割材料时为空数组）。注意 slots[] 只列非空格', paramDefs: [] },
   { method: 'container/slot', category: 'container', description: 'Interact with a container slot',
     zh: '点击容器格；params 填 { slot, button?, clickType? }：slot=格下标（先 container/get 看布局），button=0左键/1右键，clickType=0拾取 1快捷移动 2交换 4丢弃…',
     paramDefs: [
@@ -133,7 +133,7 @@ const METHODS = [
       { name: 'clickType', type: 'int', def: 0, hint: '0=拾取 1=快捷移动 2=交换 4=丢弃 5=合成…', sample: 0 }
     ] },
   { method: 'container/button', category: 'container', description: 'Click a container button',
-    zh: '点击容器界面顶部的按钮（如熔炉开关/附魔选项）；params 填 { button }：按钮序号（从 0 起），返回 {status, accepted}',
+    zh: '点击容器界面按钮（如附魔台的第 N 个附魔选项，N 从 0 起）；params 填 { button }：按钮序号。返回 {status, accepted}——accepted 只表示本地预检通过且已发包，**不是执行结果**（服务端无论成功失败都不回包），是否真的生效须用 container/get 观察（如附魔位物品是否长出 enchantments、青金石是否被扣、stateId 是否变化）',
     paramDefs: [{ name: 'button', type: 'int', def: 0, hint: '界面按钮序号（从 0 起）', sample: 0 }] },
   { method: 'container/close', category: 'container', description: 'Close container screen',
     zh: '关闭打开的容器界面，无参数', paramDefs: [] },
@@ -152,6 +152,11 @@ const METHODS = [
     paramDefs: [
       { name: 'primary', type: 'string', def: '', hint: '主效果注册 id，如 minecraft:haste（缺省/空=不设）', sample: 'minecraft:haste' },
       { name: 'secondary', type: 'string', def: '', hint: '副效果注册 id（信标≥4 级才可用；缺省/空=不设）', sample: 'minecraft:regeneration' }
+    ] },
+  { method: 'container/select-trade', category: 'container', description: 'Select a villager trade (fills payment slot)',
+    zh: '选中村民交易列表第 index 笔（等价点交易界面第 index 行，直接发 SelectTrade 包）。只选中、不消耗物品；服务端会顺手把付款物从背包搬进支付格（填到满叠），随后用 container/slot { slot:2 } 点结算格完成交易（可连点，结算格自动补货）。params 填 { index }：交易下标，与 container/get 的 trades[] 同一套编号（0 起，越界报错并返回 size）。前置：交易界面已开；村民失效时服务端只写日志，表现为包发了但支付格没变',
+    paramDefs: [
+      { name: 'index', type: 'int', def: -1, hint: '交易下标（container/get 的 trades[] 序号，0 起）', sample: 1 }
     ] },
 
   // ── 聊天（3）──
@@ -193,12 +198,12 @@ const METHODS = [
 
   // ── 视觉（2，对应视觉系统方案 §6.2）──
   { method: 'vision/snapshot', category: 'vision', description: 'Depth capture + visible blocks/entities + store stats',
-    zh: '深度采集 + 可见方块/方块实体/实体快照并落盘 NBT（首次最久约 15s），无参数', paramDefs: [] },
-  { method: 'vision/entity', category: 'vision', description: 'Full NBT of a single entity by uuid',
-    zh: '按 uuid 查询单个实体全量 NBT；params 填 { uuid(必填), force? }：uuid=实体 UUID（来自 f3 准星目标或 vision/snapshot），force=true 跳过缓存强制重扫',
+    zh: '深度采集 + 可见方块/方块实体/实体快照并落盘 NBT（首次最久约 15s），无参数；掉落物实体带 item{id,count,enchanted?}（enchanted 仅真附魔时出现）；活体实体（生物/玩家）另带 equipment{槽:{id,count?,enchanted?}}（槽 mainhand/offhand/feet/legs/chest/head/body/saddle）、name（仅名字牌可见时）、effects（效果种类 id，不含持续/等级；过滤不可见粒子的效果；数据源为单机集成服务器——连真实服务器时该键恒缺席，此时"缺席"是**未知**而非"没有效果"，须看顶层 effectsSource）、baby（仅幼年）、maxHealth、pose、onFire（仅着火）',
+    paramDefs: [] },
+  { method: 'vision/entity', category: 'vision', description: 'Stored entity entry by uuid (from last capture frame)',
+    zh: '按 uuid 查询本会话最近一次采集帧中的实体薄投影（非实时直读；首次采集前、切维后尚未重新采集、不在该帧可见范围时均报错）；params 填 { uuid(必填) }：uuid=实体 UUID（来自 vision/snapshot）。只返回物理态及可见摘要：掉落物 item{id,count,enchanted?}、展示实体 content、活体 living；不会返回复原侧完整物品组件、payload 或隐藏效果。响应带 effectsSource，unavailable 时效果缺席表示未知',
     paramDefs: [
-      { name: 'uuid', type: 'string', required: true, hint: '实体 UUID（来自 f3 准星目标或 vision/snapshot）', sample: '00000000-0000-0000-0000-000000000000' },
-      { name: 'force', type: 'bool', def: false, hint: 'true=跳过缓存强制重扫', sample: false }
+      { name: 'uuid', type: 'string', required: true, hint: '实体 UUID（来自 f3 准星目标或 vision/snapshot）', sample: '00000000-0000-0000-0000-000000000000' }
     ] },
 ]
 

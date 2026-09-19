@@ -7,6 +7,7 @@ import java.util.List;
 import name.modid.vision.DecorativeConfig;
 import name.modid.vision.DecorativeSummary;
 import name.modid.vision.DepthCapture;
+import name.modid.vision.LivingSummary;
 import name.modid.vision.VisionCollector;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
@@ -19,16 +20,12 @@ import net.minecraft.client.renderer.entity.EntityRenderDispatcher;
 import net.minecraft.client.renderer.gizmos.DrawableGizmoPrimitives;
 import net.minecraft.client.renderer.state.LevelRenderState;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.HolderLookup;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
-import net.minecraft.nbt.NbtOps;
-import net.minecraft.nbt.Tag;
 import net.minecraft.world.TickRateManager;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.item.ItemEntity;
-import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
@@ -144,7 +141,7 @@ public abstract class LevelRendererMixin {
                     // instanceof 仍需保留以取栈实例。空栈/失败 → null。
                     final CompoundTag itemTag = entity instanceof ItemEntity itemEntity
                             && VisionCollector.isItemEntity(typeId)
-                            ? encodeItemStack(itemEntity.getItem(), lvl.registryAccess())
+                            ? VisionCollector.encodeItemStack(itemEntity.getItem(), lvl.registryAccess())
                             : null;
                     // v2.35（展示实体内容记忆，设计 §6.2）：typeId ∈ 采集白名单（DecorativeConfig，
                     // config/stevex/vision.json 热重载）→ 本帧编码整份可装载 NBT payload + 同帧
@@ -158,6 +155,18 @@ public abstract class LevelRendererMixin {
                         payload = null;
                         content = null;
                     }
+                    // v2.41（实体属性观测面，见 docs/实体属性观测面设计方案.md §6）：活体实体同帧编码
+                    // 两个口径——复原口径（全量 tag，落盘 entities.nbt 的 living 键）与可见口径
+                    // （薄摘要，进 snapshot JSON 的实体级键）。非 LivingEntity → 两者 null。
+                    final CompoundTag livingTag;
+                    final CompoundTag livingView;
+                    if (entity instanceof LivingEntity) {
+                        livingTag = LivingSummary.buildSave(entity, lvl.registryAccess());
+                        livingView = LivingSummary.buildView(entity);
+                    } else {
+                        livingTag = null;
+                        livingView = null;
+                    }
                     out.add(new DepthCapture.EntitySnapshotData(
                             entity.getId(),
                             entity.getUUID(),
@@ -165,7 +174,8 @@ public abstract class LevelRendererMixin {
                             box, x, y, z,
                             entity.getYRot(), entity.getXRot(),
                             motion.x, motion.y, motion.z,
-                            entity.onGround(), health, itemTag, payload, content));
+                            entity.onGround(), health, itemTag, payload, content,
+                            livingTag, livingView));
                 }
             }
         }
@@ -201,18 +211,4 @@ public abstract class LevelRendererMixin {
         DepthCapture.setLateDebugCleared(!alwaysOnTopPrimitives.isEmpty());
     }
 
-    /**
-     * v2.34（掉落物记忆，见 docs/掉落物记忆设计方案.md）：把物品栈编码成 {@code ItemStack.CODEC} tag
-     * （{@code {id, count?, components?}}，与容器/末影箱条目同一路径，记忆侧同法解码）。空栈 / 失败 → null。
-     */
-    private static CompoundTag encodeItemStack(final ItemStack stack, final HolderLookup.Provider registries) {
-        if (stack == null || stack.isEmpty()) return null;
-        try {
-            Tag tag = ItemStack.CODEC.encodeStart(registries.createSerializationContext(NbtOps.INSTANCE), stack)
-                    .resultOrPartial(err -> { }).orElse(null);
-            return tag instanceof CompoundTag c ? c : null;
-        } catch (RuntimeException e) {
-            return null;
-        }
-    }
 }

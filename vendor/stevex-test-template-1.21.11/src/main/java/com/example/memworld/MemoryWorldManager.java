@@ -377,7 +377,17 @@ public final class MemoryWorldManager {
         MemoryRestorer.AgentPose pose = RESTORER.tick(level);
         // v2.28（§5.2.2）：容器内容记忆紧跟在方块实体通道后（§5.2.2 tick 序 RESTORER→CONTAINER→DELETION→CELLS）。
         // 视觉先把容器方块/BE 放好，容器通道再覆写内容；在 DELETION 之前执行（容器非实心非减量候选）。
-        CONTAINER.tick(level);
+        // v2.38（§7.1 决策 J）：改传本帧 terrain.blocks（= 采集侧在**现实世界**观测到的方块）——容器通道的
+        // 墓碑 guard 只用它做一件事：判"现实是否重新观测到该格是记录里的容器"以解除 guard。此处 terrain
+        // 已在 L375 由 TERRAIN.tick 取到，DELETION.apply（L384）所需的 deletions 也在同一份里，故次序不变。
+        //
+        // ⚠ terrain 可为 null（TerrainRestorer.tick 的**常规**返回，非异常）：未到 pollIntervalTicks 周期
+        // （TerrainRestorer:170）、该维无数据（:207）、本代际已交付（:208）都会返回 null。此时**必须传 null**
+        // 而不是 terrain.blocks()——ContainerMemoryApplier 的入参契约本就是 @Nullable「可为 null = 该帧无视觉
+        // 数据 → 一律不回放墓碑格」（ContainerMemoryApplier:130/255），DeletionApplier.apply 也是同样按
+        // terrain == null 直接 return（DeletionApplier:95）。2026-09-12 19:13/19:30 的启动崩溃
+        // （NPE at MemoryWorldManager:383）就是这一处漏了判空。
+        CONTAINER.tick(level, terrain == null ? null : terrain.blocks());
         // v2.31（§5.3）：生物群系在容器内容叠加后、减量删除前执行——群系属区块数据、非方块，减量候选
         // 按可见方块集判定，不会把已复现的群系当"消失"删掉；此处仅保证恢复序与渲染一致（先地形后群系）。
         BIOME.tick(level);

@@ -171,6 +171,63 @@ public class VisionBlockEntityStore {
         return Map.of("new", added, "updated", updated, "skipped", skipped);
     }
 
+    /**
+     * v2.38（设计 §4.1 <b>F1</b> / §7.1 <b>决策 H·I</b>）<b>唯一删除原语</b>在本 store 的落点 —— 持久修剪
+     * 被"判据证明已消失"的格的方块实体记录。
+     *
+     * <p><b>为什么必须做</b>（§1.1 的对称性断裂）：本 store 是<b>增量 union、永不自删</b>的累积文件；方块被
+     * 减量删掉后记录仍在 ⇒ 记忆侧回放把方块复活（告示牌/箱子/床的根因）。判据只管"方块本体没了"，本方法
+     * 让"判据命中"这一事实落到记录上，从而把复活根因消除在持久层（而非靠记忆侧每帧挡）。
+     *
+     * <p><b>入参取并集</b>（决策 H）：调用方传入的是 {@code deletions ∪ signalLossDeletions}——两条通道
+     * 的候选在同一 resolve 内都已就位。只覆盖 {@code deletions} 会让"信号缺失表加进来的方块"删了方块却
+     * 留下负载（§14.4 的加表路线就此失效）。
+     *
+     * <p><b>块身份复核</b>（决策 I）：{@code expected} 的 value 是该格本代际由记忆侧上报的 blockId
+     * （信号缺失段携带；main/translucent/shaped 段不带 ⇒ 空串）。非空时要求与记录<b>逐字相等</b>才修剪
+     * ——防"同 pos 换了另一种方块"时误伤记录。<b>空串不作额外要求</b>：这些段的上报谓词与记忆侧执行守卫
+     * 同族（上报 ⇒ 记忆侧持有该块 ⇒ 其守卫必放行），故"上报即持有"已构成决策 I 要的构造性保证。
+     *
+     * <p><b>不延迟</b>（决策 G）：BE 载荷是"每帧观测、可重建"的（{@code ObjectResolver.recordBlock} 在该
+     * 方块再次可见时同帧回填），被误修剪的代价 = 一轮闪烁且可自愈 ⇒ 即时修剪。**与之相反**，
+     * {@link ContainerMemoryStore} 的容器载荷不可重建，故那边是延迟修剪。
+     *
+     * <p><b>落盘时机</b>：本方法置 dirty 后<b>自行 save()</b>（F1 的承诺是"同帧落盘"）；调用方随后调用的
+     * {@link #sync} 会看到 dirty=false 而不重复写。故一次修剪 = 一次整文件写，不会每帧发生。
+     *
+     * @param dimension 目标维（修剪只作用于该维子图）
+     * @param expected  待修剪格 → 该格本代际上报的 blockId（无身份信息段用空串）
+     * @return 统计 { "pruned": 已修剪, "kept": 身份不符/记录仍在而保留, "missing": 本就无记录 }
+     */
+    public Map<String, Integer> applyDeletions(final String dimension, final Map<BlockPos, String> expected) {
+        final Map<String, StoredEntry> entries = byDim.get(dimension);
+        if (entries == null || entries.isEmpty() || expected.isEmpty()) {
+            return Map.of("pruned", 0, "kept", 0, "missing", 0);
+        }
+        int pruned = 0, kept = 0, missing = 0;
+        for (Map.Entry<BlockPos, String> e : expected.entrySet()) {
+            final String key = posToKey(e.getKey());
+            final StoredEntry existing = entries.get(key);
+            if (existing == null) {
+                missing++;
+                continue;
+            }
+            final String reportedId = e.getValue();
+            if (reportedId != null && !reportedId.isBlank() && !reportedId.equals(existing.blockId)) {
+                kept++;   // 决策 I：身份不符 ⇒ 不修剪（欠删方向安全）
+                continue;
+            }
+            entries.remove(key);
+            pruned++;
+        }
+        if (pruned > 0) {
+            dirty = true;
+            save();      // 同帧落盘（F1 的持久性承诺在此兑现）
+            dirty = false;
+        }
+        return Map.of("pruned", pruned, "kept", kept, "missing", missing);
+    }
+
     /** 存储中已有的方块实体总数（跨全部维）。 */
     public int size() {
         int total = 0;

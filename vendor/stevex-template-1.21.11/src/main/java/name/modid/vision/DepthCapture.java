@@ -561,6 +561,12 @@ public class DepthCapture {
      *                时为本帧编码的整份 NBT payload（{@code VisionCollector#serializeEntityFull}）；其余类型 / 失败为 null
      * @param content v2.35（决策点 2 渠道 B）：与 payload 同帧构建的薄内容摘要（{@code DecorativeSummary}），
      *                仅采集端 snapshot JSON 消费；其余类型 / 失败为 null
+     * @param living  v2.41（实体属性观测面，见 docs/实体属性观测面设计方案.md §6）：活体实体的复原口径
+     *                全量属性 tag（{@code LivingSummary#buildSave}），随对象解析透传到
+     *                {@code EntityLightSnapshot} 后落盘 {@code entities.nbt} 的 {@code living} 键；
+     *                非 {@code LivingEntity} / 失败为 null（活体恒非 null，可为空 compound）
+     * @param livingView v2.41：与 living 同帧构建的可见口径薄摘要（{@code LivingSummary#buildView}），
+     *                仅采集端 snapshot JSON 消费；非活体 / 失败为 null
      */
     public record EntitySnapshotData(
             int id,
@@ -579,6 +585,8 @@ public class DepthCapture {
             float health,
             CompoundTag item,
             CompoundTag payload,
-            CompoundTag content
+            CompoundTag content,
+            CompoundTag living,
+            CompoundTag livingView
     ) {}
 }

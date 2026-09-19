@@ -97,6 +97,9 @@ public class ContainerMemoryApplier {
     private int ticks;
     private int missingSourceCounter;
 
+    /** v2.38（§7.1 决策 J）：本轮 reconcile 因墓碑 guard 未回放的记录数（只用于一行诊断日志，见 {@link #reconcile}）。 */
+    private int tombstoneWithheld;
+
     /** 服务器（世界）启动 / 切换时调用，清空已应用状态。 */
     public void onServerStart() {
         lastMtime = null;
@@ -117,8 +120,16 @@ public class ContainerMemoryApplier {
      * 通道放置 / 玩家改动被还原"等情况。文件缺失时暂停（同 {@link MemoryRestorer}）。
      *
      * <p>v2.32：每轮只 reconcile {@code level.dimension()} 对应维的容器（加全局末影箱）。
+     *
+     * <p><b>v2.38（§7.1 决策 J）</b>：多一个入参 {@code realityBlocks} —— 采集侧本帧在<b>现实世界</b>观测到的
+     * 方块（{@code terrain.blocks}，即 {@code TerrainRestorer.TerrainData#blocks()}）。它只服务一处：
+     * 墓碑 guard 的<b>清除条件</b>，即"现实重新观测到该格是记录里的那个容器 ⇒ 记录重新是权威、
+     * 恢复正常回放"（{@link RemovalTombstones}）。<b>不能</b>用"当帧 deletions"当 guard：它会当帧自取消，
+     * 让两条通道按 poll 周期对打（§7.1 J 的三步推导）。
+     *
+     * @param realityBlocks 采集侧本帧观测到的现实方块（可为 null = 该帧无视觉数据 → 一律不回放墓碑格）
      */
-    public void tick(final ServerLevel level) {
+    public void tick(final ServerLevel level, final Map<BlockPos, TerrainRestorer.TerrainBlock> realityBlocks) {
         MemoryConfig config = MemoryConfig.get();
         if (ticks++ % Math.max(1, config.pollIntervalTicks) != 0) return;
 
@@ -158,7 +169,7 @@ public class ContainerMemoryApplier {
         // 文件变化 → 必然 reconcile（覆写语义，保证与采集同步）；文件未变但容器记录存在 →
         // 按配置每轮 reconcile（捕获延迟放置的 BE / 还原玩家改动）。
         if (changed || config.containerReconcileOnPoll) {
-            reconcile(level, current, changed);
+            reconcile(level, current, changed, realityBlocks);
         }
     }
 
@@ -168,12 +179,21 @@ public class ContainerMemoryApplier {
      * v2.32：只覆写传入 level（= 活动维，见 {@link MemoryWorldManager}）对应维的容器 + 全局末影箱。
      * 其它维的容器记录留在文件缓存，镜像切回该维时再覆写。
      */
-    private void reconcile(final ServerLevel level, final FileData data, final boolean warnConflicts) {
+    private void reconcile(final ServerLevel level, final FileData data, final boolean warnConflicts,
+                           final Map<BlockPos, TerrainRestorer.TerrainBlock> realityBlocks) {
         final String dimension = level.dimension().identifier().toString();
         Map<BlockPos, PosRecord> containers = data.containersByDim().get(dimension);
         if (containers != null) {
+            tombstoneWithheld = 0;
             for (Map.Entry<BlockPos, PosRecord> e : containers.entrySet()) {
-                applyPos(level, dimension, e.getKey(), e.getValue(), warnConflicts);
+                applyPos(level, dimension, e.getKey(), e.getValue(), warnConflicts, realityBlocks);
+            }
+            if (tombstoneWithheld > 0) {
+                // 只在真有 withheld 时打一行（本通道常态是 0；打了就是每 poll 一行噪音）。数字口径 =
+                // "记录被减量墓碑挡住、未自足回放"的格数——它与 §7.1 J 要防的箱子闪烁是同一件事的两面。
+                LOGGER.info("[MemoryWorld] Container replay withheld [{}]: {} record(s) tombstoned by removal "
+                        + "this session (§7.1 J; released when reality re-observes the container)",
+                        dimension, tombstoneWithheld);
             }
         }
         if (data.enderPresent()) {
@@ -191,7 +211,8 @@ public class ContainerMemoryApplier {
      * </ol>
      */
     private void applyPos(final ServerLevel level, final String dimension, final BlockPos pos, final PosRecord rec,
-                          final boolean warnConflicts) {
+                          final boolean warnConflicts,
+                          final Map<BlockPos, TerrainRestorer.TerrainBlock> realityBlocks) {
         BlockState worldState = level.getBlockState(pos);
         if (!worldState.isAir()) {
             String worldId = BuiltInRegistries.BLOCK.getKey(worldState.getBlock()).toString();
@@ -216,7 +237,28 @@ public class ContainerMemoryApplier {
             return;
         }
 
-        // 世界为空气：自足放置。自建块只可能是非实心容器，不是 DELETION 候选，不会与减量冲突。
+        // 世界为空气：自足放置。
+        //
+        // ⚠ 原注释（v2.28 起，v2.38 §13.6 认定为**错误**）曾写作"自建块只可能是非实心容器，不是 DELETION
+        //   候选，不会与减量冲突"。两处都不成立：
+        //   ① 箱子族**就是**非满形状块（`ChestBlock.getShape` = Block.column(14,0,14)）；
+        //   ② v2.38 批 2（§14.4）把箱子族 / 告示牌 / 床等 148 个方块加进信号缺失表后，它们**会被减量
+        //      通道判删**（在此之前是"在任何段之外 ⇒ 不产生 deletions"的偶然安全，不是设计保证）。
+        //   故这里必须有 guard，见下。
+        //
+        // v2.38（§7.1 决策 J）**墓碑 guard**：本会话减量通道实删过该格 ⇒ 不在空气位回放记录，否则
+        //   两条通道按 poll 周期对打（镜像里箱子闪烁）。清除条件 = 现实重新观测到该格是记录里的那个
+        //   容器（{@code terrain.blocks} 的 blockId 与记录一致）⇒ 记录重新是权威、恢复正常回放。
+        //   这是"假阳性之后玩家又把箱子建回来"的恢复路径，也是冷启动语义不受影响的原因（墓碑为空 ⇒
+        //   本 guard 恒不触发）。
+        if (RemovalTombstones.get().contains(dimension, pos)) {
+            final TerrainRestorer.TerrainBlock reality = realityBlocks == null ? null : realityBlocks.get(pos);
+            if (reality == null || !reality.blockId().equals(rec.blockId())) {
+                tombstoneWithheld++;
+                return;
+            }
+            RemovalTombstones.get().clear(dimension, pos);
+        }
         if (rec.blockId().isBlank()) {
             warnOnce("noBlock@" + dimension + "/" + pos,
                     "[MemoryWorld] Pos {} [{}]: air & record without block; skip", pos, dimension);

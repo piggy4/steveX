@@ -35,6 +35,15 @@ public final class DecorativeSummary {
     /** 纯文本摘要最大长度（字符），超出截断加省略号。 */
     private static final int TEXT_MAX = 200;
 
+    /** ItemStack 编码里的 data components 键（形如 {@code {id, count?, components?}}）。 */
+    private static final String KEY_COMPONENTS = "components";
+    /** 真附魔 component id（{@code ItemEnchantments} = 无界 map「附魔 id → 等级」）。 */
+    private static final String COMPONENT_ENCHANTMENTS = "minecraft:enchantments";
+    /** {@code DataComponentPatch} 的"移除"键前缀（{@code !minecraft:enchantments} = 该组件被显式移除）。 */
+    private static final String COMPONENT_REMOVED_PREFIX = "!";
+    /** 摘要里的附魔布尔键名（v2.35 补遗 §6.5）。 */
+    private static final String KEY_ENCHANTED = "enchanted";
+
     private DecorativeSummary() {
     }
 
@@ -83,7 +92,7 @@ public final class DecorativeSummary {
         return out.isEmpty() ? null : out;
     }
 
-    /** armor_stand / mannequin：非空装备位 equipment{slot:{id,count}}；mannequin 另附 profile 名。 */
+    /** armor_stand / mannequin：非空装备位 equipment{slot:{id,count,enchanted?}} + 整架 enchanted；mannequin 另附 profile 名。 */
     private static CompoundTag armorStand(
             final CompoundTag payload,
             final String typeId,
@@ -93,11 +102,17 @@ public final class DecorativeSummary {
         final CompoundTag equipment = payload.getCompoundOrEmpty("equipment");
         if (!equipment.isEmpty()) {
             final CompoundTag eq = new CompoundTag();
+            boolean anyEnchanted = false;
             for (String slot : equipment.keySet()) {
                 CompoundTag item = readItem(equipment.getCompoundOrEmpty(slot));
-                if (item != null) eq.put(slot, item);
+                if (item != null) {
+                    eq.put(slot, item);
+                    anyEnchanted |= item.contains(KEY_ENCHANTED);
+                }
             }
             if (!eq.isEmpty()) out.put("equipment", eq);
+            // 整架级：任一非空槽命中即 true（供 agent 一眼筛，无需遍历 equipment）
+            if (anyEnchanted) out.putBoolean(KEY_ENCHANTED, true);
         }
         if ("minecraft:mannequin".equals(typeId)) {
             final String name = decodeProfileName(payload.get("profile"), registries);
@@ -157,6 +172,8 @@ public final class DecorativeSummary {
     /**
      * 从 ItemStack.CODEC 编码 tag（{@code {id, count?, components?}}，与 v2.34 掉落物 / 容器条目
      * 同一路径）只读精简字段。空栈 / 无 id → null。
+     *
+     * <p>v2.35 补遗（§6.5）：真附魔时另写 {@code enchanted: true}（仅 true 时写，与 {@code count} 同款省字节）。
      */
     private static CompoundTag readItem(final CompoundTag stackTag) {
         if (stackTag == null || stackTag.isEmpty()) return null;
@@ -166,6 +183,36 @@ public final class DecorativeSummary {
         out.putString("id", id);
         final int count = stackTag.getIntOr("count", 1);
         if (count > 1) out.putInt("count", count);
+        if (isEnchanted(stackTag)) out.putBoolean(KEY_ENCHANTED, true);
         return out;
+    }
+
+    /**
+     * 真附魔判定（v2.35 补遗，判据 A，见 docs/展示实体内容记忆设计方案.md §6.5）：
+     * 等价于 {@code ItemStack.isEnchanted()} = {@code DataComponents.ENCHANTMENTS} 非空。
+     *
+     * <p><b>刻意不用</b> {@code ItemStack.hasFoil()}（"有光效"）：vanilla 给附魔金苹果 / 附魔之瓶 /
+     * 成书 / 下界之星 / <b>空白附魔书</b> / 末地水晶等<b>无附魔</b>物品硬设了
+     * {@code minecraft:enchantment_glint_override}（磁石指针另覆写 {@code isFoil}），用"光效"会把它们
+     * 误报成附魔。附魔书的附魔在 {@code stored_enchantments}（另一个 component）⇒ 本判据下为 false，
+     * 是既定边界（要看书内附魔走 Tier-2 {@code vision/entity?uuid=} 的整份 NBT）。
+     *
+     * <p>纯 tag 读：不解码 ItemStack、不碰 registry、不产生对象分配（沿用本类零解码风格）。
+     * 任一环节不是预期的 compound 形状 → 一律判 false（内容字段失效不阻塞主链路）。
+     *
+     * <p>v2.40：包级开放 —— {@code vision/snapshot} 的掉落物 {@code entities[].item} 判据与展示实体
+     * {@code content} 共用此实现（同一份判据不漂移），故不设 {@code private}。
+     */
+    static boolean isEnchanted(final CompoundTag stackTag) {
+        final Tag componentsTag = stackTag.get(KEY_COMPONENTS);
+        if (!(componentsTag instanceof CompoundTag components)) return false;
+        if (components.contains(COMPONENT_REMOVED_PREFIX + COMPONENT_ENCHANTMENTS)) return false;
+        final Tag enchantmentsTag = components.get(COMPONENT_ENCHANTMENTS);
+        if (!(enchantmentsTag instanceof CompoundTag enchantments)) return false;
+        // ItemEnchantments.CODEC = 无界 map「附魔 id → 等级(1..255)」；有条目即真附魔
+        for (String enchantmentId : enchantments.keySet()) {
+            if (enchantments.getIntOr(enchantmentId, 0) > 0) return true;
+        }
+        return false;
     }
 }

@@ -35,8 +35,33 @@ import org.joml.Vector4f;
  */
 public class Unprojector {
 
-    /** 沿射线远离相机推 ε（§4.2）：float32 深度量化下近中距误差远小于 ε=0.05。 */
-    public static final double EPSILON = 0.05;
+    /**
+     * 沿射线远离相机推 ε 的<b>落格量</b>（设计 §4.2.1，v2.39 决策 R-1）：
+     * {@code nudged = W + r̂·ε}，再 {@code floor(nudged)} 定出该像素归属的格。
+     *
+     * <p><b>为什么从 0.05 下调到 1/128</b>（§4.2.1）：这个推移要同时满足两个约束，而两者由
+     * <b>不相交的两群面</b>决定，单一常数调不出兼顾值——
+     * <ul>
+     *   <li><b>下界</b>（让落在<b>格界平面</b>上的面被确定性地推入其所属格，抵消 float32 深度量化
+     *       带来的"硬币翻转"）：{@code ε > 0.5·Δz(1ULP) = 5.96e-7·z²} ⇒ 0.05 覆盖到 290 格，宽裕；</li>
+     *   <li><b>上界</b>（不得把<b>贴着本格出口</b>的薄几何体推出本格）：{@code ε·|dy| <}
+     *       可见面到本格出口的距离。实测最小厚度是 <b>1/64 = 0.015625</b>（睡莲 / 红石粉，几何全在
+     *       格内 {@code y = 1/64}），而非设计早期估计的 1/16 ⇒ 俯角 &gt; 18.2° 时
+     *       {@code 0.05·|dy| > 1/64}，像素被推进<b>下方的格</b>；睡莲下方是水（非空气）⇒ §5.1 的
+     *       air 近侧回退不触发 ⇒ <b>睡莲整族失明</b>（实测：快照内 0 格 {@code lily_pad}）。</li>
+     * </ul>
+     * {@code 1/128 = 0.0078125} 对 1/64 给出 <b>2× 余量</b>（俯角 &gt; 60° 才越界），代价是
+     * 下界的可靠半径 290 → <b>114 格</b>（仍覆盖 {@code removalMaxRayDist = 96}）。
+     *
+     * <p><b>不要</b>把它与 {@code ObjectResolver.PROBE_EPSILON}（回退恢复 / 实体盒膨胀探针）合并为
+     * 一个常量：两者同值不同义——后者的作用是"探到相邻格"，不是"跨过格界"（§4.2.1 四常量表）。
+     *
+     * <p><b>残留限制</b>（决策 R-2 未定案）：ε 是<b>固定世界距离</b>，而所需推移量与俯角相关
+     * （{@code ε_need ≈ 到最近格界平面的距离 + k·errBound(z)}）。故极掠射把薄贴花推到极远时
+     * 仍会落错格——彻底修法见 §4.2.1 / Phase 11 的 R-2（边界对齐，需 {@code blockHits} 携带
+     * 每像素实际推进量）。
+     */
+    public static final double LANDING_EPSILON = 1.0 / 128.0;
 
     private final DepthCapture.DepthSnapshot snap;
     private final float dFar;
@@ -74,7 +99,7 @@ public class Unprojector {
      *
      * @param entitySections 有实体 section 的 key 集合（§5.3 桶，Phase 3 由实体快照构建）；
      *                       null / 空 → 跳过实体候选收集（快速路径）
-     * @param epsilon 沿射线推的距离（设计 §4.2 用 0.05）
+     * @param epsilon 沿射线推的落格量（设计 §4.2.1；正常路径用 {@link #LANDING_EPSILON}）
      * @return 反投影结果（方块去重点 + 实体候选原始点 W + 统计）
      */
     public UnprojectResult visibleBlockHits(final LongSet entitySections, final double epsilon) {
@@ -91,6 +116,8 @@ public class Unprojector {
         final double invH = 1.0 / height;
         int nonSky = 0;
         int clipped = 0;
+        // 诊断（§4.2.1 决策 R-2 的在线指示器）：本次推移**改变了所属格**的像素数。
+        int boundaryResolved = 0;
 
         for (int y = 0; y < height; y++) {
             final double ndcY = 2.0 * (y + 0.5) * invH - 1.0;
@@ -140,18 +167,25 @@ public class Unprojector {
                         Mth.floor(camX + rx * scale),
                         Mth.floor(camY + ry * scale),
                         Mth.floor(camZ + rz * scale));
+                // 诊断（§4.2.1 决策 R-2）：W 与 nudged 落格不同的像素 = "floor(W) 本会落在别格、
+                // 靠这次推移才落对"的那一群（即面恰好压在格界平面上的像素）。ε 仍在量化噪声之上时
+                // 该计数稳定；一旦 ε 低于 0.5 ULP，这群像素的落格退化成掷硬币、计数会开始抖动
+                // ——故它是"ε 是否仍满足下界"的在线指示器，也是 R-2 是否必须立项的判据。
+                if (BlockPos.asLong(Mth.floor(wx), Mth.floor(wy), Mth.floor(wz)) != key) {
+                    boundaryResolved++;
+                }
                 if (!hits.containsKey(key)) {
                     hits.put(key, new Vec3(camX + rx * scale, camY + ry * scale, camZ + rz * scale));
                 }
             }
         }
 
-        return new UnprojectResult(hits, entityCandidates, nonSky, clipped);
+        return new UnprojectResult(hits, entityCandidates, nonSky, clipped, boundaryResolved, epsilon);
     }
 
-    /** 便捷重载：用默认 ε=0.05、不收集实体候选。 */
+    /** 便捷重载：用 {@link #LANDING_EPSILON}、不收集实体候选。 */
     public UnprojectResult visibleBlockHits() {
-        return visibleBlockHits(null, EPSILON);
+        return visibleBlockHits(null, LANDING_EPSILON);
     }
 
     /**
@@ -248,7 +282,23 @@ public class Unprojector {
             /** 非天空像素数（d &lt; d_far）。 */
             int nonSkyPixels,
             /** 近裁剪面内 / 相机背后 / 长度退化而被丢弃的像素数。 */
-            int clippedPixels
+            int clippedPixels,
+            /**
+             * 落格推移**改变了所属格**的像素数（设计 §4.2.1 决策 R-2 的在线指示器）。
+             * 正常量级：与"压在格界平面上的面"的屏幕占比同阶（远小于 nonSkyPixels）；
+             * 若它在相邻帧间大幅抖动，说明 ε 已低于 0.5 ULP 的量化下界 ⇒ 该距离上的落格不可信。
+             */
+            int boundaryResolvedPixels,
+            /**
+             * 本次落格推移**实际使用的** ε（即 {@code nudged = W + r̂·ε} 里的那个 ε）。
+             *
+             * <p>之所以要随结果带出来：§5.1 的 air 近侧回退要还原原始表面点，而
+             * {@code W = nudged − dir·ε} 在数学上是这次推移的<b>逆运算</b>——回退必须用同一个 ε，
+             * 否则还原出的 W 会沿射线偏 {@code Δε}，薄几何体（1/64）上就直接穿到后面那块去了。
+             * 两值同源时这个耦合看不出来，一旦落格量单独下调就会立刻致命（v2.39 决策 R-1 的
+             * 副作用，故把"实际推进量"作为结果的一部分显式传递，也是 §4.2.1 R-2 的方向）。
+             */
+            double landingEpsilon
     ) {
         public int uniqueBlockCount() {
             return blockHits.size();

@@ -4,14 +4,16 @@ import com.mojang.logging.LogUtils;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
-import net.minecraft.client.Minecraft;
-import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.HolderLookup;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.NbtOps;
+import net.minecraft.nbt.Tag;
 import net.minecraft.util.ProblemReporter;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.storage.TagValueOutput;
@@ -19,11 +21,13 @@ import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 
 /**
- * 视觉系统 —— 序列化中枢 + Tier-2 实体 NBT + 数据层访问。
+ * 视觉系统 —— 序列化中枢 + 数据层访问。
  *
  * <p>v2（GPU 深度缓冲驱动）重构后，本类收窄为"非采集"部分：
  * <ul>
- *   <li><b>Tier-2 实体全量 NBT</b>：{@link #collectEntityNbt(UUID, boolean)} 按需序列化 + TTL 缓存</li>
+ *   <li><b>实体整份 payload 序列化</b>：{@link #serializeEntityFull(Entity)}（v2.35 展示实体白名单
+ *       采集复用）。v2.40 起<b>不再提供按需直读端点</b>：{@code vision/entity} 改读落盘 store
+ *       （{@link VisionEntityStore#findEntity}），"直读任意活体实体"的通路已关闭</li>
  *   <li><b>BlockState 序列化</b>：blockId / stateProps 助手</li>
  *   <li><b>快照记录类型</b>：BlockEntitySnapshot / TerrainBlockSnapshot / EntityLightSnapshot，
  *       供深度驱动采集管线与各 store 复用</li>
@@ -49,69 +53,16 @@ public class VisionCollector {
     /** v2.31：群系 cell 存储 —— 单调 union 覆盖写（独立 biomes.nbt，见 VisionBiomeStore）。 */
     private static final VisionBiomeStore biomeStore = new VisionBiomeStore();
 
-    /**
-     * 实体全量 NBT 的 TTL 缓存（uuid → 最近一次序列化结果）。
-     *
-     * <p>防呆：即使"按需"查询，agent 若每 tick 轮询同一实体仍会反复全量序列化。
-     * 同一 uuid 在 {@code ENTITY_NBT_TTL_MS}（1000ms）内命中缓存直接返回，除非
-     * {@code force:true}。仅在渲染线程访问，无需同步；LRU 上限 256 防无限增长。
-     */
-    private static final long ENTITY_NBT_TTL_MS = 1000L;
-    private static final Map<UUID, CachedEntityNbt> entityNbtCache =
-            new LinkedHashMap<>(64, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(final Map.Entry<UUID, CachedEntityNbt> eldest) {
-                    return size() > 256;
-                }
-            };
-
-    // ==================== 实体全量 NBT（按需，低频） ====================
-
-    /**
-     * 按 uuid 查询实体全量 NBT（Tier 2：{@code saveWithoutId}，含背包/血量/属性等）。
-     *
-     * <p>低频路径：只在 agent 明确请求某个实体时触发，且同一 uuid 在 1000ms 内
-     * 命中 TTL 缓存直接返回（除非 {@code force:true}），防止反复全量序列化。
-     * 必须在渲染线程上调用（通过 {@link Minecraft#execute(Runnable)}）。
-     *
-     * @return 完整实体 NBT（含 id / UUID / Pos / Motion / Rotation + 类型专属数据），
-     *         找不到实体或无法序列化时返回 null
-     */
-    public static CompoundTag collectEntityNbt(final UUID uuid, final boolean force) {
-        ClientLevel level = Minecraft.getInstance().level;
-        if (level == null) return null;
-
-        long now = System.currentTimeMillis();
-        CachedEntityNbt cached = entityNbtCache.get(uuid);
-        if (!force && cached != null && now - cached.lastMillis() < ENTITY_NBT_TTL_MS) {
-            return cached.nbt();
-        }
-
-        // Level.getEntities() 是 protected，无法从外部访问；线性匹配已足够（低频 + TTL 缓存）
-        Entity entity = null;
-        for (Entity candidate : level.entitiesForRendering()) {
-            if (candidate.getUUID().equals(uuid)) {
-                entity = candidate;
-                break;
-            }
-        }
-        if (entity == null || entity.isRemoved()) return null;
-
-        CompoundTag nbt = serializeEntityFull(entity);
-        if (nbt != null) {
-            entityNbtCache.put(uuid, new CachedEntityNbt(now, nbt));
-        }
-        return nbt;
-    }
+    // ==================== 实体整份 payload 序列化（v2.35） ====================
 
     /**
      * 把实体序列化成<b>标准整份 NBT payload</b>（{@code {id, ...saveWithoutId}}，设计 §5）：可被
      * vanilla {@code EntityType.create(ValueInput…)} 完整装载的标准实体存档。返回 null = 不可装载
      * （实体不存在 / 已移除 / 类型不可序列化如玩家 / 保存失败）。
      *
-     * <p>v2.35（展示实体内容记忆）抽出复用：{@link #collectEntityNbt}（Tier-2 按需）与采集管线
-     * （§6.2，{@code LevelRendererMixin} 对白名单展示实体本帧编码）共用同一保存路径，两侧格式保证
-     * 一致。必须在渲染线程调用（读实体状态 / registryAccess 均有竞态）。
+     * <p>v2.35（展示实体内容记忆）抽出复用：采集管线（§6.2，{@code LevelRendererMixin} 对白名单
+     * 展示实体本帧编码）与本方法共用同一保存路径，两侧格式保证一致。必须在渲染线程调用
+     * （读实体状态 / registryAccess 均有竞态）。
      */
     public static CompoundTag serializeEntityFull(final Entity entity) {
         if (entity == null || entity.isRemoved()) return null;
@@ -130,8 +81,24 @@ public class VisionCollector {
         }
     }
 
-    /** TTL 缓存条目：序列化时刻 + 结果 NBT。 */
-    private record CachedEntityNbt(long lastMillis, CompoundTag nbt) {}
+    /**
+     * 把物品栈编码成 {@code ItemStack.CODEC} tag（{@code {id, count?, components?}}，与容器/末影箱条目
+     * 同一路径，记忆侧同法解码）。空栈 / 失败 → null。
+     *
+     * <p>v2.34 原在 {@code LevelRendererMixin} 内（掉落物专用）；v2.41 提到此处，供三处复用同一路径：
+     * 掉落物 {@code item}、活体 {@code living.equipment}（{@link LivingSummary}）、展示实体 payload
+     * 内的装备（后者由 {@code saveWithoutId} 内部自编码，不走此方法）。必须在渲染线程调用。
+     */
+    public static CompoundTag encodeItemStack(final ItemStack stack, final HolderLookup.Provider registries) {
+        if (stack == null || stack.isEmpty()) return null;
+        try {
+            Tag tag = ItemStack.CODEC.encodeStart(registries.createSerializationContext(NbtOps.INSTANCE), stack)
+                    .resultOrPartial(err -> { }).orElse(null);
+            return tag instanceof CompoundTag c ? c : null;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
 
     // ==================== 掉落物实体大类（v2.34，单一事实来源） ====================
 
@@ -206,7 +173,8 @@ public class VisionCollector {
 
     /**
      * 实体轻量物理状态（Tier 1）：纯字段读取即可获得，不含 NBT。
-     * 全量 NBT 走 {@link #collectEntityNbt(UUID, boolean)} 按需查询。
+     * 更深的内容只有白名单展示实体（{@code payload}）、掉落物（{@code item}）与活体属性
+     * （{@code living}，v2.41）随帧编码。
      *
      * @param item    v2.34（掉落物记忆）：当 typeId 为 {@code minecraft:item} 时携带物品栈
      *                （{@code ItemStack.CODEC} + {@code NbtOps} 编码 tag）；其余类型 / 空栈为 null。
@@ -218,6 +186,13 @@ public class VisionCollector {
      * @param content v2.35（决策点 2 渠道 B）：与 payload 同帧构建的<b>薄内容摘要</b>
      *                （{@link DecorativeSummary}），仅用于采集端 snapshot JSON（{@code entities[].content}），
      *                记忆侧不使用；无摘要类型 / 解码失败 → null。
+     * @param living  v2.41（实体属性观测面，见 docs/实体属性观测面设计方案.md）：活体实体的<b>复原口径</b>
+     *                全量属性 tag（{@link LivingSummary#buildSave}，装备整份物品栈 / 名字 Component /
+     *                完整药水效果…），落盘到 {@code entities.nbt} 的 {@code living} 键；
+     *                非 {@code LivingEntity} / 编码失败 → null。<b>活体恒非 null</b>（可为空 compound）——
+     *                键的存在性编码"是不是活体"，见 {@link LivingSummary#buildSave}。
+     * @param livingView v2.41：与 living 同帧构建的<b>可见口径</b>薄摘要（{@link LivingSummary#buildView}），
+     *                仅用于采集端 snapshot JSON（实体级键）；记忆侧不使用 → 非活体 / 失败为 null。
      */
     public record EntityLightSnapshot(
             int id,
@@ -230,7 +205,9 @@ public class VisionCollector {
             float health,
             CompoundTag item,
             CompoundTag payload,
-            CompoundTag content
+            CompoundTag content,
+            CompoundTag living,
+            CompoundTag livingView
     ) {}
 
     // ==================== 查询接口 ====================
