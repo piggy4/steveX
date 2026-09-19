@@ -201,7 +201,7 @@ const METHODS = [
     zh: '深度采集 + 可见方块/方块实体/实体快照并落盘 NBT（首次最久约 15s），无参数；掉落物实体带 item{id,count,enchanted?}（enchanted 仅真附魔时出现）；活体实体（生物/玩家）另带 equipment{槽:{id,count?,enchanted?}}（槽 mainhand/offhand/feet/legs/chest/head/body/saddle）、name（仅名字牌可见时）、effects（效果种类 id，不含持续/等级；过滤不可见粒子的效果；数据源为单机集成服务器——连真实服务器时该键恒缺席，此时"缺席"是**未知**而非"没有效果"，须看顶层 effectsSource）、baby（仅幼年）、maxHealth、pose、onFire（仅着火）',
     paramDefs: [] },
   { method: 'vision/entity', category: 'vision', description: 'Stored entity entry by uuid (from last capture frame)',
-    zh: '按 uuid 查该实体的落盘条目（数据源 = 上次采集帧的 entities.nbt，非实时直读；不在本帧可见范围或不在当前维度则报错）；params 填 { uuid(必填) }：uuid=实体 UUID（来自 f3 准星目标或 vision/snapshot）。返回物理态 + 掉落物整份物品栈 item / 展示实体整份 payload nbt',
+    zh: '按 uuid 查询本会话最近一次采集帧中的实体薄投影（非实时直读；首次采集前、切维后尚未重新采集、不在该帧可见范围时均报错）；params 填 { uuid(必填) }：uuid=实体 UUID（来自 vision/snapshot）。只返回物理态及可见摘要：掉落物 item{id,count,enchanted?}、展示实体 content、活体 living；不会返回复原侧完整物品组件、payload 或隐藏效果。响应带 effectsSource，unavailable 时效果缺席表示未知',
     paramDefs: [
       { name: 'uuid', type: 'string', required: true, hint: '实体 UUID（来自 f3 准星目标或 vision/snapshot）', sample: '00000000-0000-0000-0000-000000000000' }
     ] },

@@ -61,6 +61,8 @@ public final class LivingSummary {
      * <p>v2.42：数据源为 {@link EffectSampler}（集成服务器），连真实服务器时取不到，见该类 javadoc。
      */
     private static final String KEY_EFFECTS = "effects";
+    /** Whether {@link #KEY_EFFECTS} is authoritative, including an authoritative empty list. */
+    private static final String KEY_EFFECTS_KNOWN = "effectsKnown";
     /** 幼年（仅 true 时写）。 */
     private static final String KEY_BABY = "baby";
     /** 姿态（{@code Pose#getSerializedName()}；仅非 {@code standing} 时写——建实体默认即站立）。 */
@@ -153,14 +155,18 @@ public final class LivingSummary {
             // 尤其时长：冻结实体不 tick（§5.1），一次应用即永久保持。
             // 落盘侧**不过滤** isVisible()：隐藏粒子的效果也是事实，复原必须保真（§4.1）。
             // （过滤只发生在读取面，见 buildView。）
-            final ListTag effects = new ListTag();
-            for (MobEffectInstance instance : collectEffects(living)) {
-                MobEffectInstance.CODEC
-                        .encodeStart(registries.createSerializationContext(NbtOps.INSTANCE), instance)
-                        .resultOrPartial(err -> LOGGER.debug("[Vision] effect encode error: {}", err))
-                        .ifPresent(effects::add);
+            if (EffectSampler.available()) {
+                final ListTag effects = new ListTag();
+                for (MobEffectInstance instance : collectEffects(living)) {
+                    MobEffectInstance.CODEC
+                            .encodeStart(registries.createSerializationContext(NbtOps.INSTANCE), instance)
+                            .resultOrPartial(err -> LOGGER.debug("[Vision] effect encode error: {}", err))
+                            .ifPresent(effects::add);
+                }
+                // The marker distinguishes an authoritative empty list from an unavailable data source.
+                out.putBoolean(KEY_EFFECTS_KNOWN, true);
+                if (!effects.isEmpty()) out.put(KEY_EFFECTS, effects);
             }
-            if (!effects.isEmpty()) out.put(KEY_EFFECTS, effects);
 
             // 幼年：不只外观——碰撞盒尺寸经 memory_cells.bin 反向通道参与减量判定（§4.1）。
             if (living.isBaby()) out.putBoolean(KEY_BABY, true);

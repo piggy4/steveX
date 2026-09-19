@@ -222,16 +222,14 @@ public class VisionApi {
      *   <li><b>语义</b>由 inspect（实时直读）变为 recall（<b>回忆上一帧看见过的对象</b>）。</li>
      * </ul>
      *
-     * <p><b>v2.40 已知态（刻意保留的矛盾）</b>：本端点<b>不做投影</b>，条目原样返回——掉落物的
-     * {@code item} 是整份物品栈 tag（含附魔 id/等级、盒内容），展示实体的 {@code nbt} 是整份可装载
-     * payload（含装备槽完整组件），与 {@code vision/snapshot.entities[].item} 的薄化暂不一致。
-     * 待"已知集 / provenance"层落地后一并收口：agent 手持物品时经 {@code inventory} 本就已知全量
-     * NBT，此刻按薄投影会把它<b>已有</b>的信息判成未知（遗忘）。
+     * <p>v2.46：查询只返回采集时随条目保存的薄投影。复原侧的完整 {@code item}/{@code nbt}/
+     * {@code living} 载荷不会穿过本 API；已知集应由显式交互 API 建模，不能靠复原文件旁路泄露。
+     * 查询还要求本进程已完成至少一次采集，且最近采集维度与客户端当前维度一致。
      *
      * @param params { "uuid": "…" }——取自 {@code vision/snapshot.entities[].uuid}
      *               （v2.40：{@code force} 随直读缓存一并失效，不再读取）
-     * @return { "ok": true, "uuid": "…", "nbt": { id, type, pos, motion, rotation, onGround, health,
-     *           item?(掉落物整份物品栈), nbt?(展示实体整份 payload) } }
+     * @return { "ok": true, "uuid": "…", "effectsSource": "…", "nbt": { id, type, pos, motion,
+     *           rotation, onGround, health, item?(薄摘要), content?(薄摘要), living?(薄摘要) } }
      *           或 { "ok": false, "error": "…" }
      */
     private static Map<String, Object> entityQuery(final Map<String, Object> params) {
@@ -257,7 +255,9 @@ public class VisionApi {
         // 避免读到半更新态（§8）。纯内存查表，不再序列化任何实体。
         Minecraft.getInstance().execute(() -> {
             try {
-                result.nbt = VisionCollector.getEntityStore().findEntity(uuid);
+                final var level = Minecraft.getInstance().level;
+                final String dimension = level == null ? null : level.dimension().identifier().toString();
+                result.nbt = VisionCollector.getEntityStore().findEntity(uuid, dimension);
             } catch (Exception e) {
                 result.error = e.getMessage();
                 SteveX.LOGGER.error("[Vision] entityQuery failed", e);
@@ -286,6 +286,7 @@ public class VisionApi {
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("ok", true);
         resp.put("uuid", uuid);
+        resp.put("effectsSource", EffectSampler.sourceName());
         resp.put("nbt", nbtToJson(result.nbt));
         return resp;
     }

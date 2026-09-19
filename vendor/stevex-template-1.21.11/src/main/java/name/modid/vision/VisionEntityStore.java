@@ -92,10 +92,13 @@ public class VisionEntityStore {
     /**
      * v2.41（实体属性观测面，见 docs/实体属性观测面设计方案.md §4）：活体条目<b>复原口径</b>的全量属性
      * （装备整份物品栈 / customName Component / 完整药水效果 / 幼年 / 姿态 / 着火）；仅 {@code LivingEntity}
-     * 且有内容时有。落盘厚不构成越界——边界只在读取面执行，本键永不由 {@code vision/entity} 之外的
-     * 读取面消费（该端点原样返回条目，属刻意的已知态，见 {@link VisionApi}）。
+     * 且有内容时有。落盘厚不构成越界——边界只在读取面执行，{@code vision/entity} 仅返回
+     * {@link #KEY_VIEW} 薄投影，不读取本键。
      */
     private static final String KEY_LIVING = "living";
+    /** Agent-readable projection. Full restoration payloads remain outside this compound. */
+    private static final String KEY_VIEW = "view";
+    private static final String KEY_CONTENT = "content";
 
     private final Path filePath;
 
@@ -103,6 +106,8 @@ public class VisionEntityStore {
     private final Map<String, CompoundTag> worlds = new LinkedHashMap<>();
     /** v2.32：最近一次写入所属维（文件顶层 currentDimension）。 */
     private String currentDimension = WorldsFile.LEGACY_DIMENSION;
+    /** Disk state is restoration memory, not proof of a capture in this process. */
+    private boolean capturedThisSession;
 
     public VisionEntityStore() {
         Path dir = Minecraft.getInstance().gameDirectory.toPath().resolve(DIR_NAME);
@@ -169,11 +174,13 @@ public class VisionEntityStore {
             if (e.living() != null) {
                 entry.put(KEY_LIVING, e.living());
             }
+            entry.put(KEY_VIEW, buildView(e));
             entitiesTag.put(e.uuid().toString(), entry);
         }
         bucket.put(KEY_ENTITIES, entitiesTag);
 
         worlds.put(dimensionId, bucket);
+        capturedThisSession = true;
         writeFile();
 
         return Map.of("entities", entities.size());
@@ -185,8 +192,8 @@ public class VisionEntityStore {
      * 按 uuid 查<b>当前维</b>桶里最近一次采集落盘的实体条目（v2.40，{@code vision/entity} 的唯一数据源）。
      *
      * <p>纯内存镜像查询（{@link #worlds}，构造时已灌入既有文件）：不解析文件、不触任何游戏对象。
-     * 返回的即条目<b>原样</b>——物理态 8 字段，掉落物另带 {@code item}（整份物品栈）、展示实体另带
-     * {@code nbt}（整份可装载 payload）。语义是"<b>回忆上一帧看见过的对象</b>"而非实时直读。
+     * 返回条目中的 {@code view} 薄投影；完整复原载荷只供记忆世界消费，不跨 API 边界。
+     * 语义是"<b>回忆本会话上一帧看见过的对象</b>"而非实时直读。
      *
      * <p>桶是<b>整体覆写</b>的（{@link #sync}）⇒ 只含本帧仍被渲染的实体：移出视锥 / 实体消失 /
      * 不在当前维 → 返回 null。跨会话不会被误命中（当前维桶每次采集即替换）。
@@ -194,16 +201,39 @@ public class VisionEntityStore {
      * <p>必须在渲染线程调用（与 {@link #sync} 同线程，避免覆写 {@code worlds} 时读到半更新态）。
      *
      * @param uuid 实体 UUID 的规范字符串（{@code UUID#toString()} 形态，即 store 的键形态）
-     * @return 条目 NBT（{@code {id, type, pos, motion, rotation, onGround, health, item?, nbt?, living?}}）；
-     *         当前维桶缺失该 uuid → null
+     * @return 薄投影 NBT；本会话未采集、维度不一致或该 uuid 缺失时返回 null
      */
-    public CompoundTag findEntity(final String uuid) {
-        if (uuid == null) return null;
-        final CompoundTag bucket = worlds.get(currentDimension);
+    public CompoundTag findEntity(final String uuid, final String expectedDimension) {
+        if (uuid == null || expectedDimension == null || !capturedThisSession
+                || !expectedDimension.equals(currentDimension)) return null;
+        final CompoundTag bucket = worlds.get(expectedDimension);
         if (bucket == null) return null;
         final CompoundTag entities = bucket.getCompoundOrEmpty(KEY_ENTITIES);
         if (!entities.contains(uuid)) return null;
-        return entities.getCompoundOrEmpty(uuid);
+        final CompoundTag entry = entities.getCompoundOrEmpty(uuid);
+        return entry.contains(KEY_VIEW) ? entry.getCompoundOrEmpty(KEY_VIEW) : null;
+    }
+
+    /** Build the only representation that may cross the vision/entity API boundary. */
+    private static CompoundTag buildView(final VisionCollector.EntityLightSnapshot e) {
+        final CompoundTag view = new CompoundTag();
+        view.putInt(KEY_ID, e.id());
+        view.putString(KEY_TYPE, e.typeId());
+        view.put(KEY_POS, doubleList(e.x(), e.y(), e.z()));
+        view.put(KEY_MOTION, doubleList(e.vx(), e.vy(), e.vz()));
+        view.put(KEY_ROTATION, floatList(e.yaw(), e.pitch()));
+        view.putBoolean(KEY_ON_GROUND, e.onGround());
+        view.putFloat(KEY_HEALTH, e.health());
+        if (e.item() != null) {
+            final CompoundTag item = new CompoundTag();
+            item.putString("id", e.item().getStringOr("id", ""));
+            item.putInt("count", e.item().getIntOr("count", 1));
+            if (DecorativeSummary.isEnchanted(e.item())) item.putBoolean("enchanted", true);
+            view.put(KEY_ITEM, item);
+        }
+        if (e.content() != null) view.put(KEY_CONTENT, e.content().copy());
+        if (e.livingView() != null) view.put(KEY_LIVING, e.livingView().copy());
+        return view;
     }
 
     // ==================== 内部 ====================

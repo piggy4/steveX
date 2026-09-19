@@ -116,11 +116,12 @@ public class EntityRestorer {
     /**
      * 激活效果列表（完整 {@code MobEffectInstance} tag，与 vanilla {@code active_effects} 同格式）。
      *
-     * <p>⚠️ <b>当前恒缺席</b>：采集端 {@code LivingSummary.collectEffects} 已置空（药水效果不在客户端
-     * 同步链路上，见设计 §3.2）⇒ 本条目的效果段每次都走 {@code removeAllEffects()}（对新建实体是空操作）。
-     * 复原路径本身<b>完整保留</b>，源头解决时采集端只改那一个方法。
+     * <p>只有采集端写出 {@code effectsKnown=true}（集成服务器数据源可用）时才按全量语义应用；
+     * 连接真实服务器时效果未知，本侧保留既有状态，不把“未知”解释为“没有效果”。
      */
     private static final String KEY_EFFECTS = "effects";
+    /** True when effects are authoritative; absent means unknown for remote-server captures. */
+    private static final String KEY_EFFECTS_KNOWN = "effectsKnown";
     /** 幼年（仅 true 时写）。 */
     private static final String KEY_BABY = "baby";
     /** 姿态（{@code Pose#getSerializedName()}；仅非 standing 时写）。 */
@@ -582,14 +583,16 @@ public class EntityRestorer {
 
         // 药水效果：先清后加（全量对齐）。完整 MobEffectInstance 解码 → addEffect，与 vanilla
         // active_effects 存档同一格式。
-        // 注意：采集端当前不下发 effects（源头缺失，见 KEY_EFFECTS javadoc），故本段实际是空操作——
-        // 但 removeAllEffects 必须留在原位：链路解通后它才是"效果被摘掉"能传过来的那一半。
-        le.removeAllEffects();
-        for (Tag t : living.getListOrEmpty(KEY_EFFECTS)) {
-            MobEffectInstance.CODEC
-                    .parse(registries.createSerializationContext(NbtOps.INSTANCE), t)
-                    .resultOrPartial(err -> LOGGER.warn("[MemoryWorld] Effect decode error: {}", err))
-                    .ifPresent(le::addEffect);
+        // effectsKnown=true 时，缺少 effects 子键表示权威空列表；未知来源则不触碰既有状态。
+        // Older files with a non-empty effects key predate effectsKnown but are still authoritative.
+        if (living.getBooleanOr(KEY_EFFECTS_KNOWN, false) || living.contains(KEY_EFFECTS)) {
+            le.removeAllEffects();
+            for (Tag t : living.getListOrEmpty(KEY_EFFECTS)) {
+                MobEffectInstance.CODEC
+                        .parse(registries.createSerializationContext(NbtOps.INSTANCE), t)
+                        .resultOrPartial(err -> LOGGER.warn("[MemoryWorld] Effect decode error: {}", err))
+                        .ifPresent(le::addEffect);
+            }
         }
 
         applyBaby(le, living.getBooleanOr(KEY_BABY, false));
