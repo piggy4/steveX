@@ -1,6 +1,7 @@
 package name.modid;
 
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import java.net.InetSocketAddress;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -26,7 +27,28 @@ import org.java_websocket.server.WebSocketServer;
 public class AgentWebSocketServer extends WebSocketServer {
 
     private static final int PORT = 25550;
+    /** 入站解析用（{@code fromJson}）。 */
     public static final Gson GSON = new Gson();
+
+    /**
+     * 出站序列化用：**开启 serializeNulls**。
+     *
+     * <p>Gson 默认会**丢弃值为 null 的 map 条目**——实测 gson 2.13.2：
+     * {@code {levels:3, primaryEffect:null, after:"x"}} 序列化成 {@code {"levels":3,"after":"x"}}，
+     * 键连影子都没有。而本项目需要同时表达两种不同的事实：
+     * <ul>
+     *   <li>**缺席 ＝ 未知**（客户端不知道）——靠**不 put 该键**（v2.42 起的既定口径）；</li>
+     *   <li>**null ＝ 已知为无**（vanilla 自己算出来就是"没有"）——靠 put 该键、值为 null。</li>
+     * </ul>
+     * 默认序列化器只能表达前者，后者会被静默降级成"未知"，与项目口径直接冲突。
+     * 首个真实用例：{@code container/get} 信标的 {@code primaryEffect}/{@code secondaryEffect}
+     * （vanilla 用 0 编码"没选效果"）。
+     *
+     * <p>副作用（已知、且是**修正**）：{@code f3} 的 {@code target.block/fluid/entity} 三键
+     * 本来就是被显式 put 成 null 的（{@code F3Api.java:145}，意图是"准星没指到"），
+     * 此前一直被 Gson 吞掉、退化成"未知"；开启后它们会真的以 {@code null} 出现。
+     */
+    public static final Gson GSON_OUT = new GsonBuilder().serializeNulls().create();
 
     @FunctionalInterface
     public interface WsHandler {
@@ -183,7 +205,7 @@ public class AgentWebSocketServer extends WebSocketServer {
     // ==================== Response builders ====================
 
     private static void send(WebSocket conn, Map<String, Object> frame) {
-        conn.send(GSON.toJson(frame));
+        conn.send(GSON_OUT.toJson(frame));
     }
 
     private static Map<String, Object> ok(int id, Object data) {
