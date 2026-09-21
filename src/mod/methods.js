@@ -124,7 +124,7 @@ const METHODS = [
 
   // ── 容器（8）──
   { method: 'container/get', category: 'container', description: 'Get open container contents',
-    zh: '读取当前打开的容器：类型/槽位物品/携带物品，及熔炉/附魔台/切石机/箱子等专用字段，无参数。**附魔台**额外给 costs/enchantClue/enchantName/levelClue/goldCount/bookshelves，三个选项按同一套下标对齐（enchantName 是附魔注册名如 "minecraft:sharpness"，选项不可用时为 null；enchantClue 是原始注册表数字 id，仅供排查）；bookshelves=有效书架数，是**世界状态**——靠准星所指方块定位附魔台，界面开着时用 camera/turn 转视角会让它失效，该键**缺席＝未知**（不是 0），且给的是原始计数（vanilla 算附魔等级时会 clamp 到 15）。**切石机**额外给 selectedRecipe/visibleRecipes/recipes——recipes 是方案列表的具体内容（每项是该方案在 GUI 上显示的图标物品，**下标与 container/button 的 button 号一一对应**，条目数应恒等于 visibleRecipes；输入物不是合法切割材料时为空数组）。注意 slots[] 只列非空格', paramDefs: [] },
+    zh: '读取当前打开的容器：类型/槽位物品/携带物品，及熔炉/附魔台/切石机/织布机/箱子等专用字段，无参数。**附魔台**额外给 costs/enchantClue/enchantName/levelClue/goldCount/bookshelves，三个选项按同一套下标对齐（enchantName 是附魔注册名如 "minecraft:sharpness"，选项不可用时为 null；enchantClue 是原始注册表数字 id，仅供排查）；bookshelves=有效书架数，是**世界状态**——靠准星所指方块定位附魔台，界面开着时用 camera/turn 转视角会让它失效，该键**缺席＝未知**（不是 0），且给的是原始计数（vanilla 算附魔等级时会 clamp 到 15）。**切石机**额外给 selectedRecipe/visibleRecipes/recipes——recipes 是方案列表的具体内容（每项是该方案在 GUI 上显示的图标物品，**下标与 container/button 的 button 号一一对应**，条目数应恒等于 visibleRecipes；输入物不是合法切割材料时为空数组）。**织布机**额外给 selectedPattern/patterns——patterns 是全部织布方案（**下标与 container/button 的 button 号一一对应**，1.21.11 图案槽为空时有 32 项）；每项是一面"选它就会得到"的旗（旗帜槽的旗＋该图案＋染料槽的颜色，与产物格算式一致），图案本身读该项的 bannerPatterns 字段（[{pattern:"minecraft:border",color:"red"}]），**不是**界面上那面灰底预览旗；旗帜或染料缺一时为空数组。**注意织布机的按钮号是全局下标**——界面 4×4 一次只显示 16 个、要滚动才看得全，但 patterns[] 给的是全量，点按钮**不需要先滚动**。织布机菜单的格子编号与切石机不同：4–30 = 背包 9–35、31–39 = 快捷栏 0–8（换算 s≤8 ? 31+s : s-5），且 0=旗帜 1=染料 2=图案 3=产物。**信标**额外给 levels/effects/primaryEffect/secondaryEffect——effects 是**全部可选效果**（不是"当前等级能选的"，而是界面上存在的那 6 个），每项 {effect,tier,canBePrimary,canBeSecondary}：effect 是效果注册名，tier 0–3 对应 speed,haste / resistance,jump_boost / strength / regeneration；canBePrimary 复刻主效果列的可点状态（tier < levels），canBeSecondary 复刻副效果列（**界面副效果列只放 regeneration**，且 levels ≥ 4 才有这一列）。primaryEffect/secondaryEffect 是**当前选中**，没选时是 **null**（不是缺席：vanilla 用 0 编码"没选效果"，那是"已知为空"）。**注意 tier 只是界面门禁、服务端不过滤**——container/beacon 能设出界面上点不到的效果，判断"界面允不允许"只能看这两个布尔。effects 是静态常量（每个信标、每个存档都一样），**不依赖 mc.level、不需要服务端回读**（与切石机的 recipes、织布机的 patterns 不同）。另：bannerPatterns 字段对任何位置的旗帜都生效（inventory 也读得到）。注意 slots[] 只列非空格', paramDefs: [] },
   { method: 'container/slot', category: 'container', description: 'Interact with a container slot',
     zh: '点击容器格；params 填 { slot, button?, clickType? }：slot=格下标（先 container/get 看布局），button=0左键/1右键，clickType=0拾取 1快捷移动 2交换 4丢弃…',
     paramDefs: [
@@ -133,7 +133,7 @@ const METHODS = [
       { name: 'clickType', type: 'int', def: 0, hint: '0=拾取 1=快捷移动 2=交换 4=丢弃 5=合成…', sample: 0 }
     ] },
   { method: 'container/button', category: 'container', description: 'Click a container button',
-    zh: '点击容器界面按钮（如附魔台的第 N 个附魔选项，N 从 0 起）；params 填 { button }：按钮序号。返回 {status, accepted}——accepted 只表示本地预检通过且已发包，**不是执行结果**（服务端无论成功失败都不回包），是否真的生效须用 container/get 观察（如附魔位物品是否长出 enchantments、青金石是否被扣、stateId 是否变化）',
+    zh: '点击容器界面按钮（如附魔台的第 N 个附魔选项、切石机/织布机的第 N 个方案，N 从 0 起）；params 填 { button }：按钮序号。返回 {status, accepted}——accepted 只表示本地预检通过且已发包，**不是执行结果**（服务端无论成功失败都不回包），是否真的生效须用 container/get 观察（附魔台看附魔位物品是否长出 enchantments、青金石是否被扣；切石机/织布机看 selectedRecipe/selectedPattern 是否变成该下标，注意它只能证明"选中了几号"，不能证明"几号是什么"——后者要读 recipes[]/patterns[]）。**织布机**的按钮号是**全局下标**（与 patterns[] 下标同一套）：界面 4×4 一次只显示 16 个、要滚动才看得全 32 个，但**点按钮不需要先滚动**；原因为 vanilla 已把滚动偏移 startRow 折进 index（LoomScreen:193-194）。越界（button ≥ 方案数）时预检不过，accepted:false 且不发包',
     paramDefs: [{ name: 'button', type: 'int', def: 0, hint: '界面按钮序号（从 0 起）', sample: 0 }] },
   { method: 'container/close', category: 'container', description: 'Close container screen',
     zh: '关闭打开的容器界面，无参数', paramDefs: [] },
@@ -148,10 +148,10 @@ const METHODS = [
       { name: 'type', type: 'int', def: 0, hint: '0=均分(默认) 1=每格放1 2=创造克隆', sample: 0 }
     ] },
   { method: 'container/beacon', category: 'container', description: 'Set beacon effect & consume payment',
-    zh: '设置/切换信标效果并扣支付物（等价信标 GUI 的点效果图标+点√，直接发 SetBeacon 包）。params 填 { primary?, secondary? }：效果注册 id 如 "minecraft:haste"，缺省/空=该槽不设。前置：信标界面已开，支付物已用 container/slot 放入支付槽（menu slot 0），服务端无支付物时为空操作；1 级信标主效果可选 haste/speed，二级留空',
+    zh: '设置/切换信标效果并扣支付物（等价信标 GUI 的点效果图标+点√，直接发 SetBeacon 包）。params 填 { primary?, secondary? }：效果注册 id 如 "minecraft:haste"，缺省/空串=**把该槽清空为"无效果"**（不是"保持原样"）。前置：信标界面已开，支付物已用 container/slot 放入支付槽（menu slot 0），服务端无支付物时为空操作。**有哪些效果可选、哪些在当前等级下界面上能点，读 container/get 的 effects[]**（每项带 tier 与 canBePrimary/canBeSecondary）。**注意服务端不过滤 tier**——1 级信标设 regeneration 也会被接受并生效，这个包只管"界面允不允许"之外的事',
     paramDefs: [
-      { name: 'primary', type: 'string', def: '', hint: '主效果注册 id，如 minecraft:haste（缺省/空=不设）', sample: 'minecraft:haste' },
-      { name: 'secondary', type: 'string', def: '', hint: '副效果注册 id（信标≥4 级才可用；缺省/空=不设）', sample: 'minecraft:regeneration' }
+      { name: 'primary', type: 'string', def: '', hint: '主效果注册 id，如 minecraft:strength（缺省/空=把该槽清空）', sample: 'minecraft:strength' },
+      { name: 'secondary', type: 'string', def: '', hint: '副效果注册 id（界面副效果列只给 regeneration，但服务端不过滤；缺省/空=把该槽清空）', sample: 'minecraft:regeneration' }
     ] },
   { method: 'container/select-trade', category: 'container', description: 'Select a villager trade (fills payment slot)',
     zh: '选中村民交易列表第 index 笔（等价点交易界面第 index 行，直接发 SelectTrade 包）。只选中、不消耗物品；服务端会顺手把付款物从背包搬进支付格（填到满叠），随后用 container/slot { slot:2 } 点结算格完成交易（可连点，结算格自动补货）。params 填 { index }：交易下标，与 container/get 的 trades[] 同一套编号（0 起，越界报错并返回 size）。前置：交易界面已开；村民失效时服务端只写日志，表现为包发了但支付格没变',

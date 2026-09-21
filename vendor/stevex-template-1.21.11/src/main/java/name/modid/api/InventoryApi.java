@@ -146,6 +146,24 @@ public class InventoryApi {
             if (!cmdData.isEmpty()) item.put("customModelData", cmdData);
         }
 
+        // v2.46 bannerPatterns：旗帜图案层。此前 slotItem 不吐该组件，带图案的旗帜与素旗在
+        // API 里完全同形（同 id / 同 count）——而织布机的全部方案正是"同一面旗 + 不同图案"，
+        // 缺这段则 container/get 的 patterns[] 会退化成 32 个彼此无法区分的条目。
+        // 图案是持有者可见的（物品模型与 tooltip 都显示），故与观察边界一致；
+        // color 用 DyeColor 的序列化名（red / blue …），与本文件其余"注册名"口径一致。
+        // 无图案层时**不写该键**（缺省即常态）。
+        var bannerPatterns = stack.get(DataComponents.BANNER_PATTERNS);
+        if (bannerPatterns != null && !bannerPatterns.layers().isEmpty()) {
+            List<Map<String, Object>> bannerLayers = new ArrayList<>();
+            for (var layer : bannerPatterns.layers()) {
+                Map<String, Object> l = new LinkedHashMap<>();
+                l.put("pattern", layer.pattern().getRegisteredName());
+                l.put("color",   layer.color().getName());
+                bannerLayers.add(l);
+            }
+            item.put("bannerPatterns", bannerLayers);
+        }
+
         return item;
     }
 }

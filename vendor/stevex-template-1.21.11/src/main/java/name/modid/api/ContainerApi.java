@@ -13,6 +13,7 @@ import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.inventory.BeaconScreen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.protocol.game.ServerboundSelectTradePacket;
@@ -20,9 +21,15 @@ import net.minecraft.network.protocol.game.ServerboundSetBeaconPacket;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.effect.MobEffect;
 import net.minecraft.world.inventory.*;
+import net.minecraft.world.item.DyeColor;
+import net.minecraft.world.item.DyeItem;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.crafting.display.SlotDisplayContext;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.EnchantingTableBlock;
+import net.minecraft.world.level.block.entity.BannerPattern;
+import net.minecraft.world.level.block.entity.BannerPatternLayers;
+import net.minecraft.world.level.block.entity.BeaconBlockEntity;
 import net.minecraft.world.phys.BlockHitResult;
 
 /**
@@ -134,7 +141,40 @@ public class ContainerApi {
                         data.put("enchantSeed",  em.getEnchantmentSeed());
                     }
                     case BeaconMenu bm -> {
-                        data.put("levels", bm.getLevels());
+                        final int beaconLevels = bm.getLevels();
+                        data.put("levels", beaconLevels);
+                        // v2.47 effects：信标可选效果的**全量列表**。此前该分支只有 levels——
+                        // agent 因此既不知道有哪些效果可设，也不知道当前等级下界面上哪几个能点。
+                        //
+                        // 列表**不在 BeaconMenu 里**，而是静态常量 BeaconBlockEntity.BEACON_EFFECTS
+                        // （4 组 2/2/1/1 共 6 个，BeaconBlockEntity.java:53-58），每个信标、每个存档都一样
+                        // ⇒ **不需要服务端回读**，也不依赖 mc.level——与切石机 recipes / 织布机 patterns 的关键差别。
+                        //
+                        // canBePrimary/canBeSecondary 复刻 GUI 门禁（BeaconScreen.java:69-101 + :216
+                        // `active = tier < levels`）：主效果列 = 四组全部，某效果可点 ⟺ tier < levels；
+                        // 副效果列**只放第 4 组**（即 regeneration），且 levels ≥ 4 时才有这一列。
+                        // 注意 tier 是**纯 UI 门禁**：服务端不过滤 tier
+                        // （BeaconBlockEntity.filterEffect:111 只按 VALID_EFFECTS 过滤，applyEffects:238
+                        // 只看 levels 决定范围/时长）⇒ container/beacon 能设出界面上点不到的效果，
+                        // 故这两个布尔是 agent 判断"界面允不允许"的唯一依据。
+                        final List<Map<String, Object>> beaconEffects = new ArrayList<>();
+                        for (int tier = 0; tier < BeaconBlockEntity.BEACON_EFFECTS.size(); tier++) {
+                            final boolean canBeSecondary = tier == 3 && beaconLevels >= 4;
+                            for (var effect : BeaconBlockEntity.BEACON_EFFECTS.get(tier)) {
+                                Map<String, Object> e = new LinkedHashMap<>();
+                                e.put("effect",         effect.getRegisteredName());
+                                e.put("tier",           tier);
+                                e.put("canBePrimary",   tier < beaconLevels);
+                                e.put("canBeSecondary", canBeSecondary);
+                                beaconEffects.add(e);
+                            }
+                        }
+                        data.put("effects", beaconEffects);
+                        // 当前选中：BeaconMenu 的 DataSlot 1/2，由服务端同步到客户端。
+                        // vanilla 用 0 编码"没选"（BeaconMenu.decodeEffect:107）⇒ 这里**显式写 null**：
+                        // 它表示"已知当前没有效果"，与"未知"（不写该键）是两件不同的事。
+                        data.put("primaryEffect",   effectName(bm.getPrimaryEffect()));
+                        data.put("secondaryEffect", effectName(bm.getSecondaryEffect()));
                     }
                     case BrewingStandMenu bsm -> {
                         data.put("fuel",         bsm.getFuel());
@@ -163,6 +203,47 @@ public class ContainerApi {
                     }
                     case LoomMenu lom -> {
                         data.put("selectedPattern", lom.getSelectedBannerPatternIndex());
+                        // v2.46 patterns：织布方案列表的**具体内容**（此前只有 selectedPattern
+                        // 这个下标，agent 无从知道第 N 号是什么图案，只能盲点）。
+                        //
+                        // 数据本来就在客户端：selectablePatterns 是 LoomMenu 的**字段**（不是
+                        // DataSlot），由客户端自己的 slotsChanged → getSelectablePatterns()
+                        // 算出——vanilla 的 LoomScreen:131 正是读它画那 4×4 个按钮。故这里不是
+                        // 新开同步通道，只是把已有数据接出来。
+                        //
+                        // 图标取"选它就会得到的那面旗"（即 LoomMenu.setupResultSlot:263-280 的
+                        // 算式：旗帜槽那面旗 + 本图案 + 染料槽的颜色），而**不是** LoomScreen 按钮
+                        // 上那面固定灰底的预览旗。理由：灰底是界面为中性预览造的，世上并不存在
+                        // 那样一面旗，写进读取面就是**假事实**；"选它得到什么"才是真话。
+                        //
+                        // **下标必须与 button 号一一对应**（agent 用 container/button {button:i}
+                        // 选第 i 个方案），故**逐个输出、绝不跳过**。
+                        //
+                        // 与切石机的两点不同：① 按钮号是**全局**下标——界面 4×4 一次只显示 16 个、
+                        // 要滚动才看得全 32 个，但 LoomScreen:193-194 已把 startRow 折进 index，
+                        // 故本列表给全量、点按钮**不需要先滚动**；② 图案槽为空时列表来自
+                        // BannerPatternTags.NO_ITEM_REQUIRED，放进图案物则改由该物的
+                        // PROVIDES_BANNER_PATTERNS 决定——两种都由 vanilla 自己算。
+                        //
+                        // 空列表是**权威事实**（selectablePatterns 确实是空的：旗帜或染料缺一即
+                        // 如此，见 LoomMenu.slotsChanged:185-189），照写 []；mc.level 为 null 则
+                        // **不写该键**（缺席=未知）。二者口径同切石机 recipes。
+                        if (mc.level != null) {
+                            final var selectable  = lom.getSelectablePatterns();
+                            final var bannerStack = lom.getBannerSlot().getItem();
+                            final var dyeStack    = lom.getDyeSlot().getItem();
+                            if (selectable.isEmpty()) {
+                                data.put("patterns", List.of());
+                            } else if (!bannerStack.isEmpty() && dyeStack.getItem() instanceof DyeItem dyeItem) {
+                                final List<Map<String, Object>> patterns = new ArrayList<>();
+                                for (var pattern : selectable) {
+                                    patterns.add(InventoryApi.slotItem(-1,
+                                            bannerWithPattern(bannerStack, pattern, dyeItem.getDyeColor())));
+                                }
+                                data.put("patterns", patterns);
+                            }
+                            // 图案非空却缺旗帜/染料：造不出一面真旗 ⇒ 不写该键（缺席=未知）
+                        }
                     }
                     case StonecutterMenu sm -> {
                         data.put("selectedRecipe", sm.getSelectedRecipeIndex());
@@ -240,6 +321,39 @@ public class ContainerApi {
             if (EnchantingTableBlock.isValidBookShelf(level, pos, offset)) count++;
         }
         return count;
+    }
+
+    /**
+     * 造一面"选了该图案就会得到"的旗：旗帜槽那面旗 + 该图案 + 该染料色。
+     *
+     * <p>逐句对齐 vanilla 的 {@code LoomMenu.setupResultSlot}（{@code LoomMenu.java:263-280}）
+     * ——那条正是产物格的算式：{@code copyWithCount(1)}，再把图案层**追加**到旗帜原有图案
+     * 之后（{@code addAll(layers).add(pattern, color)}）。产物格只算被选中的那一个，本方法
+     * 对方案列表里的每一个各算一次。
+     *
+     * <p>刻意**不用** {@code LoomScreen} 按钮上那面灰底预览旗（{@code LoomScreen:178} 用
+     * {@code DyeColor.GRAY} 填底）：那是界面为了中性预览造的，世上并不存在那样一面旗，
+     * 写进读取面即成假事实。
+     */
+    private static ItemStack bannerWithPattern(final ItemStack banner,
+                                               final Holder<BannerPattern> pattern,
+                                               final DyeColor color) {
+        final ItemStack result = banner.copyWithCount(1);
+        result.update(DataComponents.BANNER_PATTERNS, BannerPatternLayers.EMPTY,
+                layers -> new BannerPatternLayers.Builder().addAll(layers).add(pattern, color).build());
+        return result;
+    }
+
+    /**
+     * 效果 Holder → 注册名（如 {@code minecraft:haste}）；{@code null} 原样返回。
+     *
+     * <p>信标的"当前没选效果"在 vanilla 里编码为 {@code 0}（{@code BeaconMenu.decodeEffect:107}），
+     * 语义是**已知为空**而非未知，故经此助手转成 {@code null} 写进 JSON
+     * ——落盘要真的出现 {@code null}，这依赖出站 Gson 的 {@code serializeNulls}，
+     * 见 {@code AgentWebSocketServer.GSON_OUT}。
+     */
+    private static String effectName(final Holder<MobEffect> effect) {
+        return effect == null ? null : effect.getRegisteredName();
     }
 
     // ==================== slot click ====================
