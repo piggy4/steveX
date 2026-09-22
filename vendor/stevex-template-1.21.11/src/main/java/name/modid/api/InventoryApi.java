@@ -164,6 +164,39 @@ public class InventoryApi {
             item.put("bannerPatterns", bannerLayers);
         }
 
+        // v2.48 potionContents：药水内容物。此前 slotItem 不吐该组件，于是**所有药水在 API 里同形**
+        // （id 都是 minecraft:potion / splash_potion / lingering_potion，count 都是 1），
+        // 酿造台的三个药水格因此完全读不出"这一格是哪瓶药"——与织布机缺 BANNER_PATTERNS
+        // 是同一类缺陷（组件不同、后果相同：同 id 的东西彼此无法区分）。
+        //
+        // effects 用 vanilla 自己的 PotionContents.forEachEffect(consumer, durationScale) 取，
+        // 即 tooltip 走的那条路径（PotionContents.addToTooltip → addPotionTooltip(getAllEffects(), …, scale)），
+        // 故 duration 是**已按 durationScale 折算过**的值：滞留药水的该组件是 0.25
+        // （Items.java:1824-1827 在物品上设的默认值），不折算会把时长整整夸大 4 倍。
+        // 该组件本身也只在 ≠1 时写出，免得读者以为折算没发生。
+        // level 取 amplifier + 1，与 `player` 的 effects[].level 同一口径（tooltip 的"力量 II"＝amplifier 1）。
+        // potion 是药水注册名；无该组件的物品（玻璃瓶、绝大多数物品）不写此键（缺省即常态）。
+        var potionContents = stack.get(DataComponents.POTION_CONTENTS);
+        if (potionContents != null) {
+            final float durationScale = stack.getOrDefault(DataComponents.POTION_DURATION_SCALE, 1.0F);
+            Map<String, Object> pc = new LinkedHashMap<>();
+            potionContents.potion().ifPresent(p -> pc.put("potion", p.getRegisteredName()));
+            List<Map<String, Object>> potionEffects = new ArrayList<>();
+            potionContents.forEachEffect(e -> {
+                Map<String, Object> pe = new LinkedHashMap<>();
+                pe.put("effect",   e.getEffect().getRegisteredName());
+                pe.put("level",    e.getAmplifier() + 1);
+                pe.put("duration", e.getDuration());
+                pe.put("visible",  e.isVisible());
+                potionEffects.add(pe);
+            }, durationScale);
+            if (!potionEffects.isEmpty()) pc.put("effects", potionEffects);
+            potionContents.customColor().ifPresent(c -> pc.put("customColor", c));
+            potionContents.customName().ifPresent(n -> pc.put("customName", n));
+            if (durationScale != 1.0F) pc.put("durationScale", durationScale);
+            item.put("potionContents", pc);
+        }
+
         return item;
     }
 }

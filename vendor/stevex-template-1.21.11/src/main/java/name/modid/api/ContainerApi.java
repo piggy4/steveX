@@ -20,6 +20,7 @@ import net.minecraft.network.protocol.game.ServerboundSelectTradePacket;
 import net.minecraft.network.protocol.game.ServerboundSetBeaconPacket;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.effect.MobEffect;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.*;
 import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.DyeItem;
@@ -30,6 +31,7 @@ import net.minecraft.world.level.block.EnchantingTableBlock;
 import net.minecraft.world.level.block.entity.BannerPattern;
 import net.minecraft.world.level.block.entity.BannerPatternLayers;
 import net.minecraft.world.level.block.entity.BeaconBlockEntity;
+import net.minecraft.world.level.block.entity.BrewingStandBlockEntity;
 import net.minecraft.world.phys.BlockHitResult;
 
 /**
@@ -177,8 +179,61 @@ public class ContainerApi {
                         data.put("secondaryEffect", effectName(bm.getSecondaryEffect()));
                     }
                     case BrewingStandMenu bsm -> {
+                        // v2.48：fuel 是**剩余可酿造次数**（0–20），**不是**燃料槽里烈焰粉的个数
+                        // ——后者在 slots[] 的 slot 4 里，两者是两件事（fuel 归零时才会从槽里
+                        // 消耗 1 个烈焰粉并补满 20，见 BrewingStandBlockEntity.serverTick:104-108）。
+                        // maxFuel 取 vanilla 自己的公开常量 BrewingStandBlockEntity.FUEL_USES=20：
+                        // 界面的燃料条正是按 fuel/20 画的（BrewingStandScreen:40 是
+                        // `(18 * fuel + 20 - 1) / 20`，18 为 sprite 宽度），故它是该读数的**分母**，
+                        // 不是我们编的"上限"。
+                        // brewingTicks 是**剩余**酿造 tick 数，从 400 递减到 0，0 = 当前没在酿
+                        // （serverTick:119 起酿时置 400、每 tick 自减；BrewingStandScreen:47 的进度条
+                        // 是 28*(1-tickCount/400)）。400 在 vanilla 是**字面量**、没有公开常量，
+                        // 故不额外发 brewTotalTicks 去把它固化在 API 里，改在 methods.js 里记明。
                         data.put("fuel",         bsm.getFuel());
+                        data.put("maxFuel",      BrewingStandBlockEntity.FUEL_USES);
                         data.put("brewingTicks", bsm.getBrewingTicks());
+                    }
+                    case CrafterMenu cm -> {
+                        // v2.49 disabledSlots：合成格（菜单下标 0–8）的"禁用"位——9 个坑位各有一个
+                        // 开关，被禁用的格子收不了料（客户端 CrafterSlot.mayPlace 返回 false，服务端
+                        // CrafterBlockEntity.canPlaceItem 对禁用格亦返回 false，两端一致）。
+                        // 位在菜单的**数据槽 0–8**（CrafterBlockEntity.containerData，NUM_DATA=10）：
+                        // 开界面时服务端**全量**下发（AbstractContainerMenu.sendAllDataToRemote:157-178
+                        // 把整个 dataSlots 数组塞进 content 包），此后变更走 synchronizeDataSlotToRemote
+                        // → ClientboundContainerSetDataPacket → 客户端 menu.setData。
+                        // ⇒ 客户端持有权威副本（CrafterMenu.isSlotDisabled:79 就是这么读的，vanilla
+                        // CrafterScreen 靠它画禁用格贴图）⇒ **有服务端回读通道**，照写即是事实、
+                        // 不存在"未知"，故空数组也是断言"当前没有禁用格"。
+                        // 只列**被禁用**的下标（与 slots[] 只列非空格同风格）；下标即 container/slot
+                        // 的 slot，两者同一套编号。写侧见 applyCrafterSlotClick（改格状态的点法）。
+                        final List<Integer> disabledSlots = new ArrayList<>();
+                        for (int i = 0; i < 9; i++) {
+                            if (cm.isSlotDisabled(i)) disabledSlots.add(i);
+                        }
+                        data.put("disabledSlots", disabledSlots);
+
+                        // powered：数据槽 9（CrafterBlockEntity.DATA_TRIGGERED）。vanilla 界面右上那枚
+                        // 红石图标正是读它（CrafterScreen.renderRedstone:112-121）。合成器**只在被红石
+                        // 触发时**才真的合成并吐出产物，故这是"此刻它会不会干活"的界面事实。
+                        data.put("powered", cm.isPowered());
+
+                        // result：合成预期产物。产物格按**类型**找（NonInteractiveResultSlot），
+                        // 不硬编码下标——它是 addStandardInventorySlots **之后**才 add 的
+                        // （CrafterMenu.java:53），当前落在下标 45，但那只是布局的副作用、不是契约。
+                        // 内容由服务端 refreshRecipeResult() 算好（CrafterBlock.getPotentialResults
+                        // → assemble）再经普通槽位同步下发；客户端**不**参与计算（该方法有
+                        // `player instanceof ServerPlayer` 门禁，客户端副本恒空）。
+                        // 注意产物格是 NonInteractiveResultSlot：isFake=true、mayPickup/mayPlace 恒
+                        // false ⇒ 拿不走也放不进，它**只是预览**，真正的产出发生在方块被红石触发时。
+                        // 配方不匹配 → 产物为空 ⇒ **显式写 null**：这是"已知为无"（vanilla 自己算出
+                        // 没有），与信标 primaryEffect 同口径，依赖出站 GSON_OUT 的 serializeNulls。
+                        Slot resultSlot = null;
+                        for (Slot s : cm.slots) {
+                            if (s instanceof NonInteractiveResultSlot) { resultSlot = s; break; }
+                        }
+                        data.put("result", resultSlot != null && resultSlot.hasItem()
+                                ? InventoryApi.slotItem(resultSlot.index, resultSlot.getItem()) : null);
                     }
                     case AnvilMenu am -> data.put("cost", am.getCost());
                     case MerchantMenu mm -> {
@@ -369,9 +424,90 @@ public class ContainerApi {
             int clickIdx = AgentWebSocketServer.num(params, "clickType", 0); // 0=PICKUP, 1=QUICK_MOVE, ...
             var clickType = CLICK_TYPES.getOrDefault(clickIdx, ClickType.PICKUP);
 
+            // v2.49：合成器合成格的"禁用"开关**不走点击协议**，见 applyCrafterSlotClick 的说明。
+            // 注意它是"点击前钩子"：切完状态后**照常**往下走正常点击（vanilla 亦然）。
+            applyCrafterSlotClick(mc, p, slotId, button, clickType);
+
             mc.gameMode.handleInventoryMouseClick(p.containerMenu.containerId, slotId, button, clickType, p);
         });
         return Map.of("status", "ok");
+    }
+
+    /**
+     * 合成器（{@code CrafterMenu}）合成格的"禁用"开关 —— 逐句对齐 vanilla 的
+     * {@code CrafterScreen.slotClicked}（{@code CrafterScreen.java:36-53}）。
+     *
+     * <p><b>为何必须在这里补</b>：这个开关在 vanilla 里被实现成**屏幕层的一次"点击槽"覆写**，
+     * 而不是点击协议的一部分。点击包那条路（{@code handleInventoryMouseClick} →
+     * {@code AbstractContainerMenu.clicked} → {@code ServerboundContainerClickPacket}）**到不了它**：
+     * 空手点空格在 {@code doClick}（{@code AbstractContainerMenu.java:438-442}）里是字面意义的
+     * 空操作，那段要求 {@code !carried.isEmpty()} 才动。真正承载禁用位的是**另一个包**
+     * {@code ServerboundContainerSlotStateChangedPacket}——由 {@code CrafterScreen.updateSlotState}
+     * → {@code AbstractContainerScreen.handleSlotStateChanged} → {@code MultiPlayerGameMode.handleSlotStateChanged}
+     * 发出，服务端只在 {@code handleContainerSlotStateChanged}（{@code ServerGamePacketListenerImpl.java:995-1002}）
+     * 认它且限定 {@code CrafterMenu}。{@code slotClicked} 的全部调用点都在
+     * {@code AbstractContainerScreen} 自己的鼠标事件里，故只能由本方法复刻。
+     *
+     * <p><b>它是"点击前钩子"，永远不吞掉这次点击</b>：vanilla 的 {@code slotClicked} 切完状态后
+     * **照样** {@code super.slotClicked}（发点击包），本方法照此——切状态 + 落回正常点击。
+     * 顺序有意义：状态包先于点击包、同一条连接有序 ⇒ 服务端**先**改禁用位、**再**执行这次点击。
+     * 别小看这条：光标拿着物品点一个**已禁用**的格子时，vanilla 的行为是"启用**并且**把物品放进去"
+     * （点击包在启用之后才到，于是 {@code mayPlace} 放行）；若在此把点击包吞掉，物品就放不进去了。
+     * 纯"禁用"那一击随后那次点击包在 vanilla 里本就是空操作，照发即可。
+     *
+     * <p><b>触发条件照抄 vanilla</b>：目标是 CrafterSlot、且**该格为空**。注意 vanilla <b>不看左右键</b>，
+     * 左键右键都切——真正的门禁是"**手上（光标）是空的**"。故序列里 {@code button:1} 与 {@code button:0}
+     * 等效。
+     * <ul>
+     *   <li>{@code PICKUP}：已禁用 → 启用；未禁用且**光标为空** → 禁用。两条之后都落回正常点击
+     *       （前者让"启用 + 放进去"成立，后者的点击是空操作）。</li>
+     *   <li>{@code SWAP}：已禁用且要换进来的那格快捷栏**有物品** → 启用，随后正常点击把物品换进来。</li>
+     * </ul>
+     * 条件不成立时（格里有物 / 光标有物 / 其它 clickType）什么都不做，于是"光标拿着物品右键合成格"
+     * 依然是"放 1 个"。
+     *
+     * <p><b>副作用（有意、且与 vanilla 一致）</b>：合成器网格上"空手点空格"从空操作变成切换禁用。
+     * 另：服务端 {@code CrafterBlockEntity.slotCanBeDisabled} 要求该格为空——对非空格的禁用请求
+     * 会被服务端静默忽略（不是报错）。
+     */
+    private static void applyCrafterSlotClick(final Minecraft mc, final Player p,
+                                              final int slotId, final int button,
+                                              final ClickType clickType) {
+        if (!(p.containerMenu instanceof CrafterMenu menu)) return;
+        if (slotId < 0 || slotId >= menu.slots.size()) return;
+        final Slot slot = menu.getSlot(slotId);
+        if (!(slot instanceof CrafterSlot) || slot.hasItem()) return;
+        if (mc.gameMode == null || mc.getConnection() == null) return;
+
+        switch (clickType) {
+            case PICKUP -> {
+                if (menu.isSlotDisabled(slotId)) {
+                    setCrafterSlotState(mc, menu, slotId, true);
+                } else if (menu.getCarried().isEmpty()) {
+                    setCrafterSlotState(mc, menu, slotId, false);
+                }
+            }
+            case SWAP -> {
+                if (button >= 0 && button < p.getInventory().getContainerSize()
+                        && menu.isSlotDisabled(slotId)
+                        && !p.getInventory().getItem(button).isEmpty()) {
+                    setCrafterSlotState(mc, menu, slotId, true);   // 启用后正常点击把物品换进来
+                }
+            }
+            default -> {}
+        }
+    }
+
+    /**
+     * 切换一个合成格的禁用状态 —— 对齐 vanilla 的 {@code CrafterScreen.updateSlotState:66-71}：
+     * ① 本地 {@code menu.setSlotState}（客户端副本立即对齐，服务端随后会经数据槽回读确认）；
+     * ② 发状态包（{@code gameMode.handleSlotStateChanged} 是 public，正是界面调的那一句）。
+     * 界面那声 UI 点击音效不复刻（不是状态）。
+     */
+    private static void setCrafterSlotState(final Minecraft mc, final CrafterMenu menu,
+                                            final int slotId, final boolean enabled) {
+        menu.setSlotState(slotId, enabled);
+        mc.gameMode.handleSlotStateChanged(slotId, menu.containerId, enabled);
     }
 
     // ==================== quickcraft drag ====================
