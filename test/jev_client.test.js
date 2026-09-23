@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict')
 const test = require('node:test')
-const { JevClient, TYPESAFE_URL, resolveJevOptions } = require('../src/decision/jev_client')
+const { JevClient, OPENROUTER_URL, TYPESAFE_URL, resolveJevOptions } = require('../src/decision/jev_client')
 
 test('builds the native TypeSafe request shape', async () => {
   let request
@@ -38,6 +38,29 @@ test('unwraps the Cloudflare Workers AI response', async () => {
   assert.equal(body.model, 'typesafe/jev')
   assert.ok(body.input.questions.route)
   assert.equal(result.answers.route.choice, 'retreat')
+})
+
+test('builds the OpenRouter Decisions API request shape', async () => {
+  let request
+  const client = new JevClient({ provider: 'openrouter', apiKey: 'openrouter-test-key' }, async (url, options) => {
+    request = { url, options }
+    return new Response(JSON.stringify({
+      model: 'typesafe/jev-1.13',
+      answers: { action: { type: 'choice', choice: 'retreat', confidence: 0.91 } }
+    }))
+  })
+
+  const result = await client.evaluate({ health: 3 }, {
+    action: { type: 'choice', criteria: { retreat: 'Create distance' } }
+  })
+  assert.equal(request.url, OPENROUTER_URL)
+  assert.equal(request.options.headers.Authorization, 'Bearer openrouter-test-key')
+  assert.deepEqual(JSON.parse(request.options.body), {
+    model: 'typesafe/jev-1.13',
+    state: { health: 3 },
+    questions: { action: { type: 'choice', criteria: { retreat: 'Create distance' } } }
+  })
+  assert.equal(result.answers.action.choice, 'retreat')
 })
 
 test('environment variables override non-secret config', () => {

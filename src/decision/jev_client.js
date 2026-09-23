@@ -1,5 +1,7 @@
 const TYPESAFE_URL = 'https://api.typesafe.ai/v1/systemone'
 const CLOUDFLARE_MODEL = 'typesafe/jev'
+const OPENROUTER_URL = 'https://openrouter.ai/api/alpha/decisions'
+const OPENROUTER_MODEL = 'typesafe/jev-1.13'
 
 function requireObject(value, name) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -14,15 +16,21 @@ function envValue(name, fallback = '') {
 function resolveJevOptions(config = {}) {
   const provider = envValue('JEV_PROVIDER', config.provider || 'typesafe').toLowerCase()
   const accountId = envValue('CLOUDFLARE_ACCOUNT_ID', config.accountId)
-  const defaultUrl = provider === 'cloudflare' && accountId
-    ? `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run`
-    : TYPESAFE_URL
+  const defaultUrl = provider === 'cloudflare'
+    ? (accountId ? `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run` : TYPESAFE_URL)
+    : (provider === 'openrouter' ? OPENROUTER_URL : TYPESAFE_URL)
+  const defaultModel = provider === 'cloudflare'
+    ? CLOUDFLARE_MODEL
+    : (provider === 'openrouter' ? OPENROUTER_MODEL : 'jev-1.13.0')
+  const keyName = provider === 'cloudflare'
+    ? 'CLOUDFLARE_API_TOKEN'
+    : (provider === 'openrouter' ? 'OPENROUTER_API_KEY' : 'JEV_API_KEY')
 
   return {
     provider,
-    apiKey: envValue(provider === 'cloudflare' ? 'CLOUDFLARE_API_TOKEN' : 'JEV_API_KEY', config.apiKey),
+    apiKey: envValue(keyName, config.apiKey),
     baseUrl: envValue('JEV_BASE_URL', config.baseUrl || defaultUrl),
-    model: envValue('JEV_MODEL', config.model || (provider === 'cloudflare' ? CLOUDFLARE_MODEL : 'jev-1.13.0')),
+    model: envValue('JEV_MODEL', config.model || defaultModel),
     timeoutMs: Number(envValue('JEV_TIMEOUT_MS', config.timeoutMs || 10000))
   }
 }
@@ -30,7 +38,7 @@ function resolveJevOptions(config = {}) {
 class JevClient {
   constructor(options = {}, fetchImpl = globalThis.fetch) {
     const resolved = resolveJevOptions(options)
-    if (!['typesafe', 'cloudflare'].includes(resolved.provider)) {
+    if (!['typesafe', 'cloudflare', 'openrouter'].includes(resolved.provider)) {
       throw new Error(`Unsupported Jev provider: ${resolved.provider}`)
     }
     if (typeof fetchImpl !== 'function') throw new TypeError('fetch implementation is required')
@@ -86,6 +94,8 @@ class JevClient {
 
 module.exports = {
   CLOUDFLARE_MODEL,
+  OPENROUTER_MODEL,
+  OPENROUTER_URL,
   TYPESAFE_URL,
   JevClient,
   resolveJevOptions
