@@ -6,6 +6,8 @@
   "main": "src/main.js",
   "scripts": {
     "start": "node src/main.js",
+    "test": "node --test test/*.test.js",
+    "jev:check": "node scripts/check-jev.js",
     "bootstrap": "powershell -ExecutionPolicy Bypass -File scripts/bootstrap.ps1",
     "mc:capture": "powershell -ExecutionPolicy Bypass -File scripts/run-capture.ps1",
     "mc:memory": "powershell -ExecutionPolicy Bypass -File scripts/run-memory.ps1",

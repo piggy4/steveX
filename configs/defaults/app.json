@@ -19,6 +19,13 @@
     "host": "localhost",
     "port": 8090
   },
+  "decision": {
+    "provider": "typesafe",
+    "model": "jev-1.13.0",
+    "baseUrl": "https://api.typesafe.ai/v1/systemone",
+    "timeoutMs": 10000,
+    "enabled": false
+  },
   "mod": {
     "host": "127.0.0.1",
     "port": 25550
