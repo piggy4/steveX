@@ -41,3 +41,6 @@ __pycache__/
 # .storages/ · dist-exe/ · *.tsbuildinfo · .pnpm-store/.
 # Deliberately no path-level rules here: adding one would hide source we intend
 # to edit. Upstream github.com/deepseek-ai/deepseek-harness, v0.2.0-rc.2.
+# Upstream tracks the two desktop `.env.*.example` templates; the `.env.*` rule
+# above would otherwise silently hide them.
+!src/agent/deepseek-harness-master/apps/desktop/.env.*.example
