@@ -7,6 +7,7 @@ import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -43,6 +44,18 @@ import org.slf4j.LoggerFactory;
  *   <li>同一文件内容（同一读取代际）同一维只交付一次 pose / 内容，换维由 {@link MemoryWorldManager}
  *       先经 {@link #currentPoseFor} 拿到目标维姿态做跨维传送、本类随后把该维内容铺到已加载区块。</li>
  * </ul>
+ *
+ * <p>v2.48（§11）：源不再是单个 {@code block_entities.nbt}，而是 {@code block_entities/} 目录下的
+ * <b>区文件</b>加一份 {@code _index.nbt}。本类的三条不变量随之调整，但<b>对外行为一字未改</b>——
+ * 记忆世界的最终内容仍与"每次整份重读"逐条一致：
+ * <ul>
+ *   <li><b>每轮仍只 stat 一个文件</b>：{@code _index.nbt} 只在真有区写出时才被采集端重写，所以
+ *       "mtime 未变 ⇒ 什么都不用做"这条门控前提照旧成立（{@code pollIntervalTicks = 1} 的成本论证不变）；</li>
+ *   <li><b>只读变化的区</b>：索引给出 {@code 维 → 区 → updatedAt}，与 {@link #indexCache} diff 后，
+ *       只有 {@code updatedAt} 变了的区才重新解压。区文件是整区快照，故"整区替换"与"整份重读"等价；</li>
+ *   <li><b>姿态单飞</b>：agent 姿态与世界时间挪进 {@code _pose.nbt}（维级标量、无坐标、逐帧变），
+ *       由独立门控驱动，不参与索引——否则它会每帧刷新索引 mtime，把上一条门控彻底废掉。</li>
+ * </ul>
  */
 public class MemoryRestorer {
 
@@ -65,23 +78,48 @@ public class MemoryRestorer {
     /** v2.18：agent 位置比较容差（1 mm），过滤双精度坐标下的浮点抖动。 */
     private static final double POS_EPSILON = 1e-3;
 
-    /** v2.32：已应用的世界状态按维隔离：维度 → 方块坐标 → 内容指纹（block+state+nbt）。累积，只增不删。 */
-    private final Map<String, Map<BlockPos, String>> appliedByDim = new LinkedHashMap<>();
+    /** v2.48：agent 姿态文件（维级标量，全维一份；采集端只在自己变化时才重写）。 */
+    private static final String POSE_FILE_NAME = "_pose.nbt";
 
-    /** v2.32：已应用版本的源文件内容指纹按维；该维未出现过（null）→ 需要应用。 */
-    private final Map<String, String> appliedFingerprintByDim = new LinkedHashMap<>();
+    /**
+     * v2.48：内容镜像 —— 维 → 区键 → 该区的（方块坐标 → 条目）。<b>与采集端 ③ 的分片结构同形</b>。
+     *
+     * <p>由索引 diff 驱动<b>整区替换</b>：区文件是该区的完整快照，故"换了哪个区就读哪个区、整区换掉"，
+     * 与"每次整份重读"在结果上等价，而代价只与变更的区成正比。
+     */
+    private final Map<String, Map<String, Map<BlockPos, StoredBlock>>> blocksByDim = new LinkedHashMap<>();
 
-    /** v2.32：昼夜对齐状态按维（最近一次应用该维的 dayTime；旧文件无 → 无键 = -1 语义不应用）。 */
+    /**
+     * v2.48：已应用的世界状态，同样按维、<b>按区</b>隔离：维度 → 区键 → 方块坐标 → 内容指纹。
+     *
+     * <p>按区隔离是必须的，不是对称性洁癖：{@link #syncRegion} 靠"把本区的 {@code next} 整表换掉
+     * {@code applied}"来剪掉已经消失的条目，作用域必须与"一次能拿到的完整快照"（= 一个区文件）对齐。
+     * 若仍按整维记，区级更新就没法在不重走全维的前提下完成剪枝。
+     */
+    private final Map<String, Map<String, Map<BlockPos, String>>> appliedByDim = new LinkedHashMap<>();
+
+    /** v2.48：昼夜对齐状态按维（最近一次应用该维的 dayTime；无记录 → -1 语义不应用）。 */
     private final Map<String, Long> lastDayTimeByDim = new LinkedHashMap<>();
 
-    /** v2.32：最近一次成功读取解析出的各维桶（维度 → blocks + pose + dayTime），跨 tick 缓存。 */
-    private Map<String, DimData> parsedBuckets = Map.of();
+    /** v2.48：维 → 该维最新 agent 姿态（来自 {@code _pose.nbt}；无姿态的维无键）。 */
+    private final Map<String, AgentPose> poseByDim = new LinkedHashMap<>();
 
-    /** v2.32：一次读取代际内已向调用方交付过数据的维集合。 */
+    /** v2.48：维 → 该维最新世界时间（来自 {@code _pose.nbt}）。 */
+    private final Map<String, Long> dayTimeByDim = new LinkedHashMap<>();
+
+    /** v2.48：索引 diff 缓存：维 → 区键 → 上次看到的 {@code updatedAt}。相同 ⇒ 该区不需要重读。 */
+    private final Map<String, Map<String, Long>> indexCache = new LinkedHashMap<>();
+
+    /** v2.48：索引说"这个区变了"、但内容尚未同步进世界的区（维 → 区键集）。{@link #syncDim} 消费后清空。 */
+    private final Map<String, Set<String>> pendingSync = new LinkedHashMap<>();
+
+    /** v2.32：一次读取代际内已向调用方交付过姿态的维集合。 */
     private final Set<String> servedThisRead = new HashSet<>();
 
-    /** v2.13 mtime 门控（§7.4）：最近一次成功读取的源文件 mtime；未变 → 不读不解压。 */
-    private FileTime lastMtime;
+    /** v2.13 mtime 门控（§7.4）：索引文件的 mtime；未变 → 一个区文件都不读。 */
+    private FileTime lastIndexMtime;
+    /** v2.48：姿态文件的 mtime（独立门控——它与区文件的变化频率完全不同，见 {@link VisionBlockEntityStore}）。 */
+    private FileTime lastPoseMtime;
 
     private int ticks;
     private int missingSourceCounter;
@@ -89,21 +127,31 @@ public class MemoryRestorer {
     /** 服务器（世界）启动 / 切换时调用，清空已应用状态。 */
     public void onServerStart() {
         appliedByDim.clear();
-        appliedFingerprintByDim.clear();
+        blocksByDim.clear();
+        poseByDim.clear();
+        dayTimeByDim.clear();
+        indexCache.clear();
+        pendingSync.clear();
         lastDayTimeByDim.clear();
-        parsedBuckets = Map.of();
         servedThisRead.clear();
-        lastMtime = null;
+        lastIndexMtime = null;
+        lastPoseMtime = null;
         ticks = 0;
         LOGGER.info("[MemoryWorld] Restorer ready");
     }
 
-    /** 命令触发：强制重新读取源文件。须同时清 mtime 门控，否则 mtime 相同会被提前拦下。 */
+    /**
+     * 命令触发：强制重新读取。
+     *
+     * <p>清空 {@link #indexCache} 即"所有区都当作第一次见"⇒ 下一轮重读全部区文件；两个 mtime 门控也一并
+     * 清掉，否则 mtime 相同会被提前拦下。
+     */
     public void forceRefresh() {
-        appliedFingerprintByDim.clear();
-        parsedBuckets = Map.of();
+        indexCache.clear();
+        pendingSync.clear();
         servedThisRead.clear();
-        lastMtime = null;
+        lastIndexMtime = null;
+        lastPoseMtime = null;
     }
 
     /**
@@ -118,7 +166,10 @@ public class MemoryRestorer {
      * <p>该位置没有已应用记录时是廉价 no-op。
      */
     public void clearStale(final String dimension, final BlockPos pos) {
-        Map<BlockPos, String> applied = appliedByDim.get(dimension);
+        final Map<String, Map<BlockPos, String>> regions = appliedByDim.get(dimension);
+        if (regions == null) return;
+        // 按区定位：区文件切分后已应用表也是分片的，全区扫一遍就不再是常数代价。
+        final Map<BlockPos, String> applied = regions.get(VisionRegions.regionKeyOfBlock(pos));
         if (applied != null) applied.remove(pos);
     }
 
@@ -127,107 +178,159 @@ public class MemoryRestorer {
      * 跨维传送，目标 = 文件该维桶顶层 agentPos）。该维无数据 / 无姿态 → null。
      */
     public AgentPose currentPoseFor(final String dimension) {
-        DimData data = parsedBuckets.get(dimension);
-        return data == null ? null : data.pose;
+        return poseByDim.get(dimension);
     }
 
     /**
-     * 驱动一次轮询：源文件 mtime 变化时读取（解析全文件各维桶）；之后只对<b>当前 level 维</b>桶做
-     * 差异应用，并在有数据时返回该维的 agent 姿态（供 manager 决定是否传送——manager 负责与上次
-     * 姿态 / 维度比较，本类每个"新内容代际 × 首次驱动该维"返回一次）。
+     * v2.48：驱动一次轮询。源目录下现在有<b>两个</b>独立变化的输入，故有<b>两个</b>独立门控：
+     *
+     * <ol>
+     *   <li>{@code _index.nbt}（{@link #pollRegions}）——"哪些区变了"。整份 buffered 内容只有它一个
+     *       权威索引，所以它没变 ⇒ 一个区文件都不读。</li>
+     *   <li>{@code _pose.nbt}（{@link #pollPose}）——agent 姿态与世界时间。它每帧都在动，若也进索引，
+     *       索引就会被每帧重写、门控失效（这是实现期才暴露的约束，见 {@code VisionBlockEntityStore}）。</li>
+     * </ol>
+     *
+     * <p>两者读到的东西汇合到同一份内存镜像里，之后只对<b>当前 level 维</b>做差异应用，并在有数据时
+     * 返回该维的 agent 姿态（供 manager 决定是否传送——manager 负责与上次姿态 / 维度比较，本类每个
+     * "新内容代际 × 首次驱动该维"返回一次）。
      *
      * <p>返回值用于「跟随观察者视角」——agent 位置/朝向/维变化时 manager 据此传送玩家；无数据时
      * 返回 null。
      */
     public AgentPose tick(final ServerLevel level) {
-        MemoryConfig config = MemoryConfig.get();
+        final MemoryConfig config = MemoryConfig.get();
         if (ticks++ % Math.max(1, config.pollIntervalTicks) != 0) return null;
 
-        Path source = config.resolveSourceFile();
-        if (source == null || !Files.exists(source)) {
+        final Path storeDir = config.resolveBlockEntityDir();
+        if (storeDir == null || !Files.isDirectory(storeDir)) {
             // 每 30 次轮询（约 30 秒）告警一次，避免刷屏
             if (missingSourceCounter++ % 30 == 0) {
-                LOGGER.warn("[MemoryWorld] Source file missing, updates paused (gameDir={}). "
+                LOGGER.warn("[MemoryWorld] Source store directory missing, updates paused (gameDir={}). "
                         + "Set 'sourceFile' in config/stevex-test/memory.json.",
                         config.gameDirectory());
             }
-            lastMtime = null; // 文件重新出现后自然触发首次读取
+            // 两个门控都归零：目录重新出现后自然触发首次读取。索引缓存也一并清空，使重新出现时
+            // 每个区都当作第一次见——与 v2.32 清 appliedFingerprintByDim 的意图一致（重新出现即重新
+            // 走一遍差异，而差异本身会把无变化的部分判成 no-op）。
+            lastIndexMtime = null;
+            lastPoseMtime = null;
+            indexCache.clear();
             servedThisRead.clear();
-            appliedFingerprintByDim.clear();
             return null;
         }
         missingSourceCounter = 0;
 
-        // v2.13 mtime 门控（§7.4）：文件只在采集器侧 vision/snapshot 落盘时变化 → 以 mtime 作为
-        // 快照到达信号。mtime 未变 → 不读不解压（空闲成本≈0）。
-        final FileTime mtime;
-        try {
-            mtime = Files.getLastModifiedTime(source);
-        } catch (IOException e) {
-            LOGGER.warn("[MemoryWorld] Failed to stat source file {}: {}", source, e.getMessage());
-            return null;
-        }
-        if (!mtime.equals(lastMtime)) {
-            Map<String, DimData> parsed = readFile(source);
-            if (parsed == null) return null; // 写入半截等 → 保留旧 mtime，下轮重试
-            lastMtime = mtime; // 只在成功读取后才推进
-            parsedBuckets = parsed;
-            servedThisRead.clear();
-        }
+        // 先索引后姿态：索引决定"内容有没有变"，姿态决定"这一轮要不要交付"。顺序不影响结果，
+        // 只影响日志里谁先出现。
+        pollRegions(storeDir);
+        pollPose(storeDir);
 
         final String dim = level.dimension().identifier().toString();
-        final DimData data = parsedBuckets.get(dim);
-        if (data == null) return null; // 该维还没有数据
+        if (!blocksByDim.containsKey(dim) && !poseByDim.containsKey(dim)) return null; // 该维还没有数据
         if (servedThisRead.contains(dim)) return null; // 本代际已交付
         servedThisRead.add(dim);
 
-        // v2.21：世界时间对齐（§7.10），按维——只对当前维桶的 dayTime（采集时该维世界时间）对齐；
+        // v2.21：世界时间对齐（§7.10），按维——只对当前维的 dayTime（采集时该维世界时间）对齐；
         // 与 advance_time=false 不冲突——setDayTime 直接设值，不依赖 tickTime 自增。
-        if (data.dayTime >= 0) {
-            Long last = lastDayTimeByDim.get(dim);
-            if (last == null || last != data.dayTime) {
-                level.setDayTime(data.dayTime);
-                lastDayTimeByDim.put(dim, data.dayTime);
-                LOGGER.info("[MemoryWorld] Day time synced [{}] to {} ({})", dim, data.dayTime,
-                        data.dayTime % 24000L);
+        final Long dayTime = dayTimeByDim.get(dim);
+        if (dayTime != null && dayTime >= 0) {
+            final Long last = lastDayTimeByDim.get(dim);
+            if (last == null || !last.equals(dayTime)) {
+                level.setDayTime(dayTime);
+                lastDayTimeByDim.put(dim, dayTime);
+                LOGGER.info("[MemoryWorld] Day time synced [{}] to {} ({})", dim, dayTime, dayTime % 24000L);
             }
         }
 
-        // 内容指纹变化 → 同步方块实体
-        String fp = fingerprint(data.blocks);
-        if (!fp.equals(appliedFingerprintByDim.get(dim))) {
-            appliedFingerprintByDim.put(dim, fp);
-            sync(level, dim, data.blocks);
-        }
+        // 内容同步只处理"索引说变了、还没同步进世界"的那些区。
+        syncDim(level, dim);
 
-        // agent 视角：交付当前维桶记录的姿态，是否真正传送由 manager 与上次姿态 / 维度比较后决定
-        return data.pose;
+        // agent 视角：交付当前维记录的姿态，是否真正传送由 manager 与上次姿态 / 维度比较后决定
+        return poseByDim.get(dim);
     }
 
     // ==================== 差异计算与应用 ====================
 
-    private void sync(final ServerLevel level, final String dimension, final Map<BlockPos, StoredBlock> current) {
-        if (current.isEmpty()) return; // 空记忆，无需放置
-        Map<BlockPos, String> applied = appliedByDim.computeIfAbsent(dimension, k -> new LinkedHashMap<>());
-
-        Map<BlockPos, String> next = new LinkedHashMap<>();
-        List<BlockPos> toPlace = new ArrayList<>();
-
-        for (Map.Entry<BlockPos, StoredBlock> e : current.entrySet()) {
-            BlockPos pos = e.getKey();
-            String key = e.getValue().fingerprint();
-            next.put(pos, key);
-            if (!key.equals(applied.get(pos))) toPlace.add(pos);
+    /**
+     * v2.48：把"索引说变了"的区同步进世界。只遍历 {@link #pendingSync} 里点名的区——<b>这是切分的全部
+     * 意义所在</b>：姿态文件每帧都在变、每帧都会让 {@link #servedThisRead} 归零，若此处按整维遍历，
+     * 每帧的代价仍与全维成正比，读文件的省下的又全走回去了。
+     */
+    private void syncDim(final ServerLevel level, final String dimension) {
+        final Set<String> dirty = pendingSync.get(dimension);
+        if (dirty == null || dirty.isEmpty()) return;
+        final Map<String, Map<BlockPos, StoredBlock>> regions = blocksByDim.get(dimension);
+        if (regions == null) {
+            dirty.clear();
+            return;
         }
-
-        if (toPlace.isEmpty()) return;
+        // 先取出再清空：本轮只处理这些区；同步过程中若索引又变（同 tick 内不会，但别依赖这个）
+        // 会重新攒进 pendingSync，下一 tick 再处理。
+        final Set<String> todo = new LinkedHashSet<>(dirty);
+        dirty.clear();
 
         int placedNew = 0;
         int rewritten = 0;
         int skipped = 0;
-        for (BlockPos pos : toPlace) {
-            StoredBlock sb = current.get(pos);
-            boolean isNew = applied.get(pos) == null;
+        for (final String regionKey : todo) {
+            final Map<BlockPos, StoredBlock> current = regions.get(regionKey);
+            if (current == null) continue; // 区在索引里已消失，applyIndex 已连镜像一并摘掉
+            final int[] counts = syncRegion(level, dimension, regionKey, current);
+            placedNew += counts[0];
+            rewritten += counts[1];
+            skipped += counts[2];
+        }
+        if (placedNew + rewritten + skipped == 0) return;
+
+        int total = 0;
+        for (final Map<BlockPos, StoredBlock> r : regions.values()) total += r.size();
+
+        // §18.5-D：三种情况必须可分辨——旧的 `+N placed` 把"首次放置 / 内容重写 / 失败跳过"混成一个数，
+        // 2026-09-12 的误判正是读它读出来的（§18.4 附注）。读法见 §10 第 22 条：
+        // placed = 该 pos 首次放置；rewritten = 之前放过、本次内容或状态变了（**BE 内容收缩走这一支**）；
+        // skipped = 没生效（下一帧会重试）。
+        LOGGER.info(
+                "[MemoryWorld] Sync [{}]: +{} placed, {} rewritten, {} skipped, {} region(s) touched, total {} entries",
+                dimension, placedNew, rewritten, skipped, todo.size(), total);
+    }
+
+    /**
+     * 把一个区同步进世界，返回 {@code [placed, rewritten, skipped]}。
+     *
+     * <p>作用域是<b>一个区</b>而非整个维：{@code applied} 按区隔离（见 {@link #appliedByDim}），"用 next
+     * 整表换掉 applied"这一步就只剪掉<b>本区</b>里消失的条目。因为入参 {@code current} 就是一个区文件的
+     * 完整快照，这个剪枝范围恰好不多不少——这正是把 {@code applied} 一并分片的原因。
+     */
+    private int[] syncRegion(final ServerLevel level, final String dimension, final String regionKey,
+                             final Map<BlockPos, StoredBlock> current) {
+        if (current.isEmpty()) return new int[]{0, 0, 0}; // 空区，无需放置
+        final Map<BlockPos, String> applied = appliedByDim
+                .computeIfAbsent(dimension, k -> new LinkedHashMap<>())
+                .computeIfAbsent(regionKey, k -> new LinkedHashMap<>());
+
+        final Map<BlockPos, String> next = new LinkedHashMap<>();
+        final List<BlockPos> toPlace = new ArrayList<>();
+
+        for (final Map.Entry<BlockPos, StoredBlock> e : current.entrySet()) {
+            final BlockPos pos = e.getKey();
+            final String key = e.getValue().fingerprint();
+            next.put(pos, key);
+            if (!key.equals(applied.get(pos))) toPlace.add(pos);
+        }
+
+        if (toPlace.isEmpty()) {
+            applied.clear();
+            applied.putAll(next);
+            return new int[]{0, 0, 0};
+        }
+
+        int placedNew = 0;
+        int rewritten = 0;
+        int skipped = 0;
+        for (final BlockPos pos : toPlace) {
+            final StoredBlock sb = current.get(pos);
+            final boolean isNew = applied.get(pos) == null;
             if (sb != null && place(level, pos, sb)) {
                 if (isNew) placedNew++;
                 else rewritten++;
@@ -237,7 +340,7 @@ public class MemoryRestorer {
                 // 原实现无条件 `applied.putAll(next)`，任何一次静默失败（如 loadStatic 返回 null、worldState
                 // 守卫拒绝）都会被记成"已应用"⇒ 永不重试，只能靠重启自愈（§18.4-2）。
                 skipped++;
-                String prev = applied.get(pos);
+                final String prev = applied.get(pos);
                 if (prev == null) next.remove(pos);
                 else next.put(pos, prev);
             }
@@ -245,14 +348,7 @@ public class MemoryRestorer {
 
         applied.clear();
         applied.putAll(next);
-
-        // §18.5-D：三种情况必须可分辨——旧的 `+N placed` 把"首次放置 / 内容重写 / 失败跳过"混成一个数，
-        // 2026-09-12 的误判正是读它读出来的（§18.4 附注）。读法见 §10 第 22 条：
-        // placed = 该 pos 首次放置；rewritten = 之前放过、本次内容或状态变了（**BE 内容收缩走这一支**）；
-        // skipped = 没生效（下一帧会重试）。
-        LOGGER.info(
-                "[MemoryWorld] Sync [{}]: +{} placed, {} rewritten, {} skipped, total {} entries",
-                dimension, placedNew, rewritten, skipped, applied.size());
+        return new int[]{placedNew, rewritten, skipped};
     }
 
     /**
@@ -331,39 +427,149 @@ public class MemoryRestorer {
         }
     }
 
-    // ==================== 读取源文件 ====================
+    // ==================== 轮询：索引与姿态 ====================
 
     /**
-     * 读取整份文件 → 各维 (blocks + pose + dayTime)。旧版单维文件经 {@link WorldsFile#read} 自动
-     * 包成 overworld 桶 → 姿态 / 昼夜字段在旧文件顶层、恰为该"桶"的顶层，解析路径一致。
+     * v2.48：轮询 {@code _index.nbt}（每轮唯一的 stat），把它与本地缓存 diff，只重读变化的区文件。
+     *
+     * <p><b>门控形状与 v2.32 完全一致</b>（§11.13-5）：仍然是一轮一次 stat、mtime 未变就什么都不做，
+     * 只是 stat 的对象从数据文件换成了索引文件。前提由采集端保证——索引只在真有区写出时才重写
+     * （{@code VisionRegions.commit} 里那句 {@code if (!writes.isEmpty())} 就是这条前提本身）。
+     *
+     * <p>读失败/空索引一律<b>不推进</b> {@link #lastIndexMtime}，于是下一轮重试；这与 v2.32 对源文件的
+     * 处理同形（写入半截 → 保留旧 mtime）。
      */
-    private Map<String, DimData> readFile(final Path source) {
+    private void pollRegions(final Path storeDir) {
+        final Path idx = storeDir.resolve(VisionRegions.INDEX_FILE_NAME);
+        final FileTime mtime;
         try {
-            CompoundTag root = NbtIo.readCompressed(source, NbtAccounter.unlimitedHeap());
-            if (root == null) return Map.of();
-
-            WorldsFile.Result r = WorldsFile.read(root);
-            Map<String, DimData> out = new LinkedHashMap<>();
-            for (Map.Entry<String, CompoundTag> e : r.worlds().entrySet()) {
-                CompoundTag bucket = e.getValue();
-                Map<BlockPos, StoredBlock> blocks = new LinkedHashMap<>();
-                CompoundTag beTag = bucket.getCompoundOrEmpty(KEY_BLOCK_ENTITIES);
-                for (String key : beTag.keySet()) {
-                    BlockPos pos = parsePos(key);
-                    if (pos == null) continue;
-                    CompoundTag entry = beTag.getCompoundOrEmpty(key);
-                    String blockId = entry.getStringOr(KEY_BLOCK, "");
-                    Map<String, String> state = readState(entry.getCompoundOrEmpty(KEY_STATE));
-                    CompoundTag nbt = entry.getCompoundOrEmpty(KEY_NBT);
-                    blocks.put(pos, new StoredBlock(blockId, state, nbt));
-                }
-                out.put(e.getKey(), new DimData(blocks, readPose(bucket), bucket.getLongOr(KEY_WORLD_TIME, -1L)));
-            }
-            return out;
+            mtime = Files.getLastModifiedTime(idx);
         } catch (IOException e) {
-            LOGGER.warn("[MemoryWorld] Failed to read source file {}: {}", source, e.getMessage());
-            return null;
+            return; // 索引还没出现（或目录刚被清空）→ 保持门控，出现时自然触发
         }
+        if (mtime.equals(lastIndexMtime)) return;
+
+        final Map<String, Map<String, Long>> fresh = VisionRegions.readIndex(storeDir);
+        if (fresh.isEmpty()) return; // 半截写 / 损坏 → 保留旧 mtime，下轮重试
+        lastIndexMtime = mtime; // 只在成功读取后才推进
+        applyIndex(storeDir, fresh);
+        servedThisRead.clear();
+    }
+
+    /**
+     * 把新索引合并进内存镜像：<b>只读变化的区文件</b>，整区替换。
+     *
+     * <p>区文件是该区的完整快照，所以"整区替换"与"读整份文件重建"在结果上等价——这正是 {@code updatedAt}
+     * 能当 diff 键的原因（§11.9.3：它是内容级的，只在内容真的变了时才变，不是写入时间戳）。
+     *
+     * <p>反向的一步同样必要：本地有、新索引里没有的区，说明采集端把它删了（{@code clear()} / 手动删目录），
+     * 必须连镜像和已应用表一并摘掉，否则增量合并会留下整份重读时本不存在的幽灵。
+     */
+    private void applyIndex(final Path storeDir, final Map<String, Map<String, Long>> fresh) {
+        int reread = 0;
+        int failed = 0;
+        for (final Map.Entry<String, Map<String, Long>> de : fresh.entrySet()) {
+            final String dim = de.getKey();
+            final String dimDirName = VisionRegions.dimDirName(dim);
+            // 记录在索引里、但目录名/文件名对不上的区（区文件自检在 readRegion 里做）。
+            final Map<String, Map<BlockPos, StoredBlock>> mirrored =
+                    blocksByDim.computeIfAbsent(dim, k -> new LinkedHashMap<>());
+            final Map<String, Long> cached = indexCache.computeIfAbsent(dim, k -> new LinkedHashMap<>());
+
+            for (final Map.Entry<String, Long> re : de.getValue().entrySet()) {
+                final String regionKey = re.getKey();
+                if (re.getValue().equals(cached.get(regionKey))) continue; // 未变 → 不读
+                final int[] rxrz = VisionRegions.parseRegionKey(regionKey);
+                if (rxrz == null) continue;
+                final CompoundTag root = VisionRegions.readRegion(
+                        VisionRegions.regionFile(storeDir, dim, rxrz[0], rxrz[1]), dimDirName, rxrz[0], rxrz[1]);
+                if (root == null) {
+                    failed++; // 不推进该区的 updatedAt ⇒ 下一轮重试
+                    continue;
+                }
+                mirrored.put(regionKey, readRegionEntries(root));
+                cached.put(regionKey, re.getValue());
+                pendingSync.computeIfAbsent(dim, k -> new LinkedHashSet<>()).add(regionKey);
+                reread++;
+            }
+
+            // 索引里已消失的区：连同镜像与已应用表一并摘掉。
+            final List<String> gone = new ArrayList<>();
+            for (final String regionKey : cached.keySet()) {
+                if (!de.getValue().containsKey(regionKey)) gone.add(regionKey);
+            }
+            for (final String regionKey : gone) {
+                cached.remove(regionKey);
+                mirrored.remove(regionKey);
+                final Map<String, Map<BlockPos, String>> appliedRegions = appliedByDim.get(dim);
+                if (appliedRegions != null) appliedRegions.remove(regionKey);
+            }
+        }
+        if (failed > 0) {
+            LOGGER.warn("[MemoryWorld] {} region file(s) unreadable this poll — will retry", failed);
+        } else if (reread > 0) {
+            LOGGER.info("[MemoryWorld] Region index changed: re-read {} region file(s)", reread);
+        }
+    }
+
+    /** 区文件 → 该区的条目表。{@code blocks} 节内的位置键由采集端用 {@code "x,y,z"} 写入。 */
+    private static Map<BlockPos, StoredBlock> readRegionEntries(final CompoundTag regionRoot) {
+        final Map<BlockPos, StoredBlock> out = new LinkedHashMap<>();
+        final CompoundTag beTag = regionRoot.getCompoundOrEmpty(KEY_BLOCK_ENTITIES);
+        for (final String key : beTag.keySet()) {
+            final BlockPos pos = VisionRegions.parsePosKey(key);
+            if (pos == null) continue;
+            final CompoundTag entry = beTag.getCompoundOrEmpty(key);
+            out.put(pos, new StoredBlock(
+                    entry.getStringOr(KEY_BLOCK, ""),
+                    readState(entry.getCompoundOrEmpty(KEY_STATE)),
+                    entry.getCompoundOrEmpty(KEY_NBT)));
+        }
+        return out;
+    }
+
+    /**
+     * v2.48：轮询 {@code _pose.nbt}（独立的第二个 stat），更新各维姿态与世界时间。
+     *
+     * <p>这个文件承载"维级标量"——没有坐标，所以进不了区文件；又每帧都在变，所以进不了索引（会把索引的
+     * mtime 每帧刷新一次，门控当场失效）。两个变量变化频率不同就该分属不同文件，这是实现期才暴露的约束，
+     * 采集侧 {@code VisionBlockEntityStore} 的类注释里有完整推理。
+     *
+     * <p>姿态文件<b>整份覆盖</b>各维姿态（它本来就装着所有维）——与区文件的"整区替换"是同一个不变量：
+     * 手上有一份完整快照时，就用它换掉整片。
+     */
+    private void pollPose(final Path storeDir) {
+        final Path file = storeDir.resolve(POSE_FILE_NAME);
+        final FileTime mtime;
+        try {
+            mtime = Files.getLastModifiedTime(file);
+        } catch (IOException e) {
+            return; // 还没有姿态文件（新装 / 尚未迁移）→ 保持门控
+        }
+        if (mtime.equals(lastPoseMtime)) return;
+
+        final CompoundTag root;
+        try {
+            root = NbtIo.readCompressed(file, NbtAccounter.unlimitedHeap());
+        } catch (IOException | RuntimeException e) {
+            // v2.48.1：连 RuntimeException 一起接——截断 gzip 流抛的是非受检的 ReportedNbtException。
+            LOGGER.warn("[MemoryWorld] Failed to read agent pose {}: {}", file, e.getMessage());
+            return; // 半截写 → 保留旧 mtime，下轮重试
+        }
+        if (root == null) return;
+        lastPoseMtime = mtime; // 只在成功读取后才推进
+
+        // 旧版单维文件经 WorldsFile.read 自动包成 overworld 桶 → 姿态字段在旧文件顶层、
+        // 恰为该"桶"的顶层，解析路径一致（与 v2.32 相同）。
+        final WorldsFile.Result r = WorldsFile.read(root);
+        poseByDim.clear();
+        dayTimeByDim.clear();
+        for (final Map.Entry<String, CompoundTag> e : r.worlds().entrySet()) {
+            final AgentPose pose = readPose(e.getValue());
+            if (pose != null) poseByDim.put(e.getKey(), pose);
+            dayTimeByDim.put(e.getKey(), e.getValue().getLongOr(KEY_WORLD_TIME, -1L));
+        }
+        servedThisRead.clear();
     }
 
     /**
@@ -421,20 +627,6 @@ public class MemoryRestorer {
         return state;
     }
 
-    private static BlockPos parsePos(final String key) {
-        String[] parts = key.split(",");
-        if (parts.length != 3) return null;
-        try {
-            return new BlockPos(
-                    Integer.parseInt(parts[0].trim()),
-                    Integer.parseInt(parts[1].trim()),
-                    Integer.parseInt(parts[2].trim())
-            );
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
     /** 观察者眼睛坐标字符串 → Vec3（双精度）；旧整数格式（如 {@code "100,64,96"}）同样可解析。 */
     private static Vec3 parseVec3(final String key) {
         if (key == null || key.isBlank()) return null;
@@ -451,11 +643,6 @@ public class MemoryRestorer {
         }
     }
 
-    /** 内容指纹：整张表的字符串表示（同一文件内容读取结果稳定）。 */
-    private static String fingerprint(final Map<BlockPos, StoredBlock> entries) {
-        return entries.toString();
-    }
-
     // ==================== 数据结构 ====================
 
     private record StoredBlock(String blockId, Map<String, String> state, CompoundTag nbt) {
@@ -467,10 +654,4 @@ public class MemoryRestorer {
     /** agent 视角：眼睛位置（双精度，v2.18）+ 朝向（v2.15）+ 基础视场角（v2.19）。
      *  yaw/pitch 为 NaN、fov 为 {@link #FOV_MISSING} 表示旧文件未记录对应字段。 */
     public record AgentPose(Vec3 pos, float yaw, float pitch, int fov) {}
-
-    /**
-     * 一个维桶的一次读取结果：方块实体表 + agent 视角 + 世界时间（dayTime，v2.21）。
-     * dayTime 为 {@code -1} 表示该维无该字段（不应用时间对齐）。
-     */
-    private record DimData(Map<BlockPos, StoredBlock> blocks, AgentPose pose, long dayTime) {}
 }

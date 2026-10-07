@@ -354,6 +354,7 @@ public class EntityRestorer {
         // 放置 / 重建 / 移动：文件里有、但应用表里没有（或已失效）→ 新建；payload 内容变化 → 整份重建；
         // 其余位置变化 → 传送（v2.35 内容复原，见 docs/展示实体内容记忆设计方案.md §7.3）。
         int spawned = 0;
+        int adopted = 0; // v2.48.2：世界里已有同 UUID 实体 → 认领（非新建，见 spawn）
         int rebuilt = 0;
         int moved = 0;
         for (Map.Entry<UUID, EntitySnapshot> e : current.entities.entrySet()) {
@@ -366,12 +367,16 @@ public class EntityRestorer {
                 if (existing != null) FROZEN.remove(existing);
                 removeAppliedPayload(dimension, uuid);
                 removeAppliedLiving(dimension, uuid);
-                Entity created = spawn(level, uuid, es);
+                Spawned created = spawn(level, uuid, es);
                 if (created != null) {
-                    nextApplied.put(uuid, created);
+                    nextApplied.put(uuid, created.entity());
+                    // v2.48.2：认领时同样记 payload/living = 当前源值 ⇒ 本轮的 payloadChanged 不会成立、
+                    // 不重建（理由见 spawn 的注释：宁可迟一次，也不冒"discard 后 add 失败删掉已正确实体"
+                    // 的风险）。位置/物品/活体属性仍由下一轮的 move 分支照常同步。
                     if (es.nbt() != null) setAppliedPayload(dimension, uuid, es.nbt());
                     if (es.living() != null) setAppliedLiving(dimension, uuid, es.living());
-                    spawned++;
+                    if (created.adopted()) adopted++;
+                    else spawned++;
                 }
             } else if (payloadChanged(es, appliedPayload(dimension, uuid))) {
                 // v2.35（§7.3）：payload 内容变化（物品 / 文本 / 装备 / 变换… 任一字段变）→ 整份重建，
@@ -405,25 +410,66 @@ public class EntityRestorer {
         applied.clear();
         applied.putAll(nextApplied);
 
-        LOGGER.info("[MemoryWorld] Entity sync [{}]: +{} spawned, {} rebuilt, {} moved, total {} entities",
-                dimension, spawned, rebuilt, moved, applied.size());
+        LOGGER.info("[MemoryWorld] Entity sync [{}]: +{} spawned, {} adopted, {} rebuilt, {} moved, total {} entities",
+                dimension, spawned, adopted, rebuilt, moved, applied.size());
     }
 
+    /** {@link #spawn} 的结果：{@code adopted=true} = 世界里本就有同 UUID 同类型的实体，被认领而非新建。 */
+    private record Spawned(Entity entity, boolean adopted) {}
+
     /**
-     * 创建并放置一个冻结实体。成功返回实体引用，失败返回 null。
+     * 创建并放置一个冻结实体；返回 null = 失败。
      * 优先整份 payload 装载（v2.35），无 payload / 装载失败回退默认构造（见 {@link #construct}）。
+     *
+     * <p>v2.48.2：{@code addFreshEntity} 失败时先按 UUID 在世界里找一遍，找到同类型的就<b>认领</b>。
+     * 理由是"失败"的头号原因根本不是失败：记忆世界**从存档加载**，上次会话放置的实体还在，而 UUID 是
+     * 照搬采集源的（永不重号）⇒ "已有同 UUID 实体"正是本 restorer 想要的目标状态。
+     *
+     * <p>为什么不认领会出事（2026-10-07 实测 32 条 / 每次开世界复现）：
+     * <ol>
+     *   <li>{@code applied} 是<b>纯内存表</b>、{@code onServerStart} 直接清空，且从不扫描世界里既有实体
+     *       ⇒ 每次开世界都把这 30+ 个实体重造一遍再被拒：白构造 + 每个实体两条 WARN 刷屏；</li>
+     *   <li>更糟的是它们不在 {@code applied} 里，而"采集侧删掉了某实体"这条通道正是靠遍历
+     *       {@code applied} 找差额实现的 ⇒ 记忆世界里那些实体<b>永远清不掉</b>（幽灵）。方向安全，
+     *       但功能全失且没有任何错误迹象——正是本项目文档反复点名的最难查的一类失效。</li>
+     * </ol>
+     *
+     * <p>认领 = 连内容一并当作"上次已应用"（调用方会记 payload/living = 当前源值）⇒ 不重建。代价是
+     * "记忆端离线期间源侧 payload 变了"要等该条目下次变化才被吸收；这里刻意选保守的一边——宁可迟一次，
+     * 也不冒"先 discard 再 add 失败、把本来正确的实体从世界里删掉"的风险。
      */
-    private Entity spawn(final ServerLevel level, final UUID uuid, final EntitySnapshot es) {
+    private Spawned spawn(final ServerLevel level, final UUID uuid, final EntitySnapshot es) {
         Entity created = construct(level, uuid, es);
         if (created == null) return null;
         freeze(created);
 
         if (!level.addFreshEntity(created)) {
+            // 同类型才算认领：UUID 相同但类型对不上（例如世界里是玩家、源里是鱼）宁可回落到 WARN，
+            // 也不要把它当快照实体冻住 / 搬走。
+            final Entity inWorld = findInWorld(level, uuid);
+            FROZEN.remove(created); // created 从未入世界，别留在冻结集合里（IdentityHashMap，防泄漏）
+            if (inWorld != null && !inWorld.isRemoved() && inWorld.getType() == created.getType()) {
+                freeze(inWorld); // 从存档加载出来的实体没被冻过：不冻会自己游荡 / 掉进虚空
+                return new Spawned(inWorld, true);
+            }
             LOGGER.warn("[MemoryWorld] Failed to add entity {} ({})", uuid, es.type());
-            FROZEN.remove(created);
             return null;
         }
-        return created;
+        return new Spawned(created, false);
+    }
+
+    /**
+     * 按 UUID 在本 level 里找实体，找不到 → null。
+     *
+     * <p>用 {@code getAllEntities()} 线性扫而不是 {@code getEntities().get(uuid)}：后者在
+     * {@code ServerLevel} 里是 protected 访问控制，跨包调不到。本方法只在"addFreshEntity 失败"这条
+     * 罕见路径上跑（每个实体每次开世界至多一次），线性扫的代价无所谓。
+     */
+    private static Entity findInWorld(final ServerLevel level, final UUID uuid) {
+        for (final Entity e : level.getAllEntities()) {
+            if (uuid.equals(e.getUUID())) return e;
+        }
+        return null;
     }
 
     /**
@@ -705,7 +751,8 @@ public class EntityRestorer {
                 out.put(e.getKey(), parseBucket(e.getValue()));
             }
             return out;
-        } catch (IOException e) {
+        } catch (IOException | RuntimeException e) {
+            // v2.48.1：连 RuntimeException 一起接——截断 gzip 流抛的是非受检的 ReportedNbtException。
             LOGGER.warn("[MemoryWorld] Failed to read entity file {}: {}", source, e.getMessage());
             return null;
         }

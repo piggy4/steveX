@@ -53,6 +53,21 @@ public class VisionCollector {
     /** v2.31：群系 cell 存储 —— 单调 union 覆盖写（独立 biomes.nbt，见 VisionBiomeStore）。 */
     private static final VisionBiomeStore biomeStore = new VisionBiomeStore();
 
+    /**
+     * v2.47（累积观测文件，见 docs/累积观测文件设计方案.md §4.5 决策 D）：两个 union store 共用的
+     * 写盘调度器（限频 5 秒 + 后台 daemon 线程 + 原子写）。
+     *
+     * <p><b>声明必须在两个 union store 之前</b>——静态字段按声明顺序初始化，store 的构造会把自己
+     * 注册进来（{@code registerWriter}）。
+     */
+    private static final UnionSaveScheduler unionScheduler = new UnionSaveScheduler();
+
+    /** v2.47：累积地形并集（只给 agent 读；terrain.nbt 的语义与格式一个字不动）。 */
+    private static final TerrainUnionStore terrainUnionStore = new TerrainUnionStore(unionScheduler);
+
+    /** v2.47：累积实体并集（只给 agent 读；entities.nbt 的语义与格式一个字不动）。 */
+    private static final EntityUnionStore entityUnionStore = new EntityUnionStore(unionScheduler);
+
     // ==================== 实体整份 payload 序列化（v2.35） ====================
 
     /**
@@ -227,5 +242,15 @@ public class VisionCollector {
     /** v2.31：群系 cell 存储访问。 */
     public static VisionBiomeStore getBiomeStore() {
         return biomeStore;
+    }
+
+    /** v2.47：累积地形并集访问（只给采集端自身用——记忆端不知道这两个文件存在）。 */
+    public static TerrainUnionStore getTerrainUnionStore() {
+        return terrainUnionStore;
+    }
+
+    /** v2.47：累积实体并集访问（同上）。 */
+    public static EntityUnionStore getEntityUnionStore() {
+        return entityUnionStore;
     }
 }

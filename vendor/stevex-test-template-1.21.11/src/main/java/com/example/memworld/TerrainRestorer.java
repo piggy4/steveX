@@ -303,7 +303,10 @@ public class TerrainRestorer {
                 buckets.put(e.getKey(), parseBucket(e.getValue()));
             }
             return new TerrainFile(r.currentDimension(), buckets);
-        } catch (IOException e) {
+        } catch (IOException | RuntimeException e) {
+            // v2.48.1：必须连 RuntimeException 一起接——NbtIo.readCompressed 对截断的 gzip 流抛的是
+            // **非受检**的 net.minecraft.nbt.ReportedNbtException（内含 EOFException），只接 IOException
+            // 会漏过去，直接崩掉集成服务器（2026-10-07 21:52 实测）。读到半截文件时应降级为"本轮放弃"。
             LOGGER.warn("[MemoryWorld] Failed to read terrain file {}: {}", source, e.getMessage());
             return null;
         }

@@ -74,8 +74,9 @@ public class VisionTerrainStore {
     /** v2.21：采集时刻世界时间（dayTime），记忆世界据此对齐昼夜（§7.10）。 */
     private static final String KEY_WORLD_TIME = "dayTime";
     private static final String KEY_BLOCKS = "blocks";
-    private static final String KEY_BLOCK = "block";
-    private static final String KEY_STATE = "state";
+    /** v2.47：包级可见，供 {@link TerrainUnionStore} 构造"逐字同形"的条目（见 {@link #posKey}）。 */
+    static final String KEY_BLOCK = "block";
+    static final String KEY_STATE = "state";
     /** v2.23（§7.11）：被证明消失的记忆格（BlockPos long 数组，采集侧 DeletionJudge 产出）。 */
     private static final String KEY_DELETIONS = "deletions";
     /**
@@ -209,10 +210,18 @@ public class VisionTerrainStore {
 
     // ==================== 内部 ====================
 
-    /** 整体覆盖写（当前维桶已更新，其余维桶由内存镜像带出）。 */
+    /**
+     * 整体覆盖写（当前维桶已更新，其余维桶由内存镜像带出）。
+     *
+     * <p>v2.48.1：<b>必须原子</b>（{@code .tmp} + 改名）。读方（记忆端 {@code TerrainRestorer}）按 mtime
+     * 轮询本文件，非原子写会让它读到"gzip 头在、尾不在"的半截文件；而 {@code NbtIo.readCompressed} 对
+     * 截断文件抛的是<b>非受检</b>的 {@code ReportedNbtException}，读方的 {@code catch (IOException)}
+     * 拦不住 → 直接崩掉集成服务器（2026-10-07 21:52 实测）。本文件随世界增长到数百 KB 后，写入耗时
+     * 从"微秒级"变成"百毫秒级"，这个窗口才真正致命。
+     */
     private void writeFile() {
         try {
-            NbtIo.writeCompressed(WorldsFile.wrap(currentDimension, worlds), filePath);
+            UnionSaveScheduler.writeAtomic(WorldsFile.wrap(currentDimension, worlds), filePath);
             LOGGER.debug("[Vision] Saved terrain: {} dimension bucket(s), current={} → {}",
                     worlds.size(), currentDimension, filePath);
         } catch (IOException ex) {
@@ -236,7 +245,14 @@ public class VisionTerrainStore {
         }
     }
 
-    private static String posKey(final BlockPos pos) {
+    /**
+     * 方块坐标 → 键（{@code "x,y,z"}）。
+     *
+     * <p>v2.47（累积观测文件）：{@link TerrainUnionStore} 复用<b>本实现</b>——union 的 {@code blocks}
+     * 键与本文件必须逐字同形（设计 §3.2），共用一份是唯一能保证"逐字"的做法（照抄一份迟早分叉）。
+     * 同时 {@link EntityUnionStore} 的 {@code cells} 也用它（同一坐标串风格）。
+     */
+    static String posKey(final BlockPos pos) {
         return pos.getX() + "," + pos.getY() + "," + pos.getZ();
     }
 
@@ -245,8 +261,8 @@ public class VisionTerrainStore {
         return v == null ? "" : Double.toString(v.x) + "," + Double.toString(v.y) + "," + Double.toString(v.z);
     }
 
-    /** 方块状态属性表 → NBT。 */
-    private static CompoundTag propsToNbt(final Map<String, String> props) {
+    /** 方块状态属性表 → NBT。v2.47：{@link TerrainUnionStore} 复用（理由同 {@link #posKey}）。 */
+    static CompoundTag propsToNbt(final Map<String, String> props) {
         CompoundTag tag = new CompoundTag();
         props.forEach(tag::putString);
         return tag;

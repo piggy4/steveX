@@ -61,9 +61,9 @@ public final class MemoryWorldManager {
     // 前者持有方块实体通道（删块清 BE）；后者持有地形 + 实体通道（上报实心不透明块 + 实体占用格）
     private static final DeletionApplier DELETION = new DeletionApplier(RESTORER, ENTITY);
     private static final MemoryCellReporter CELLS = new MemoryCellReporter(TERRAIN, ENTITY);
-    // v2.28（§5.2.2）：容器内容记忆通道（读独立 containers.nbt；每轮 reconcile 覆写容器 + 末影箱玩家态）
+    // v2.28（§5.2.2）：容器内容记忆通道（v2.48：读独立 containers/ 目录；每轮 reconcile 覆写容器 + 末影箱玩家态）
     private static final ContainerMemoryApplier CONTAINER = new ContainerMemoryApplier();
-    // v2.31（§5）：生物群系复原通道（读独立 biomes.nbt；/fillbiome 范式写入已加载区块）
+    // v2.31（§5）：生物群系复原通道（v2.48：读独立 biomes/ 目录；/fillbiome 范式写入已加载区块）
     private static final BiomeRestorer BIOME = new BiomeRestorer();
     private static MinecraftServer lastServer;
     // ==================== 客户端自动开档状态机 ====================

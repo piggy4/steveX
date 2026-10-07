@@ -35,23 +35,35 @@ import org.slf4j.LoggerFactory;
  * 容器内容记忆通道（设计 §5.2.2，v2.28 → v2.29 → v2.32 按维分桶）。
  *
  * <p>与视觉通道（{@link MemoryRestorer} / {@link TerrainRestorer} / {@link EntityRestorer}）
- * 独立的交互内容通道：只读单个 {@code containers.nbt}（采集侧交互会话提交的"容器/末影箱内容
- * 记忆"）。容器内容属于 L2 交互层，绝不混入 L1 视觉 {@code block_entities.nbt}。
+ * 独立的交互内容通道：只读采集侧交互会话提交的"容器/末影箱内容记忆"。容器内容属于 L2 交互层，
+ * 绝不混入 L1 视觉 {@code block_entities.nbt}。
  *
- * <p>文件契约（由采集侧写入、本类读取，两段式单写入者）：
+ * <p>文件契约（由采集侧写入、本类读取，两段式单写入者）。v2.48 起源是<b>目录</b>
+ * {@code containers/}：区文件 + {@code _index.nbt}（门控信号）+ {@code ender.nbt}（维级 / 全局标量）：
  * <pre>{@code
- * { version: 1,
- *   currentDimension: "minecraft:overworld",          // v2.32 文件最近写入维
- *   worlds: {                                         // v2.32 per-pos 容器按维分桶
- *     "minecraft:overworld": { containers: {
- *       "x,y,z": { "typeId": "minecraft:chest",       // 方块实体 id（建 BE / loadStatic 用）
- *                  "block": "minecraft:chest",        // 方块注册名
- *                  "state": {"facing":"east","type":"single"},  // 状态属性
- *                  "items": [ {"slot": 0, "item": <ItemStack 编码>}, … ] } } }, // 槽位 0..getContainerSize()-1
- *     "minecraft:the_nether": { containers: { … } }
- *   },
- *   enderInventory: { "items": [ {"slot": 0, "item": …}, … ] }   // v2.29：末影箱=玩家态，跨维同一份 → 顶层全局
- * } }</pre>
+ * containers/
+ *   _index.nbt                               // { dimensions: { 维: { 区键: updatedAt } } }
+ *   ender.nbt                                // { version: 1, enderInventory: { items: [ … ] } }
+ *   minecraft_overworld/
+ *     r.0.0.nbt                              // 一个区：
+ *       { dimension, regionX, regionZ, updatedAt, version: 1,
+ *         containers: {
+ *           "x,y,z": { "typeId": "minecraft:chest",      // 方块实体 id（建 BE / loadStatic 用）
+ *                      "block": "minecraft:chest",       // 方块注册名
+ *                      "state": {"facing":"east","type":"single"},       // 状态属性
+ *                      "items": [ {"slot": 0, "item": <ItemStack 编码>}, … ] } } }  // 槽位 0..size-1
+ * }</pre>
+ *
+ * <p><b>末影箱为什么单独一个文件</b>（实现期定案，非 §11.5 原文）：它是<b>玩家态</b>——跨维同一份、
+ * 没有坐标，所以进不了区文件；它又只在玩家翻动末影箱时才变，与"哪些区变了"完全无关，所以不该进
+ * {@code _index.nbt}——进去只会让索引在末影箱变化时白刷一次 mtime，把区门控搅乱。于是给它自己一份
+ * 文件、自己的 mtime 门控。这与采集侧把 agent 姿态单飞成 {@code block_entities/_pose.nbt} 是同一条
+ * 判据：<b>变化频率和作用域都不同的东西，分属不同文件</b>。
+ *
+ * <p><b>v2.48 分片给本通道省下的是"读取 + 解析"</b>，不是 reconcile 本身：每条记录都要过
+ * {@link ItemStack#CODEC} 解码（贵），分片前任何一格容器变动都要把<b>所有维的所有容器</b>重解一遍；
+ * 分片后只解 {@code updatedAt} 变了的区。{@link #reconcile} 仍按全量覆写走——那是本通道的<b>设计意图</b>
+ * （每轮重申权威以捕获延迟放置的 BE 与玩家改动），与省 I/O 无关，不动。
  *
  * <p>item 序列化与 1.21.11 对齐：本版本无 {@code ItemStack.parse/save(registryAccess, tag)} 便捷方法，
  * 用 {@link ItemStack#CODEC} 经 {@code NbtOps} 编解码（采集侧写入侧与记忆侧解析侧保持同一路径）。
@@ -85,13 +97,29 @@ public class ContainerMemoryApplier {
     private static final String KEY_STATE = "state";
     private static final String KEY_TYPE_ID = "typeId";
 
-    /** 一次读取成功的源文件 mtime（mtime 门控，同 §7.4）；未变 → 不读不解压。 */
-    private FileTime lastMtime;
+    /** v2.48：末影箱文件（玩家态，全局一份，独立门控）。 */
+    private static final String ENDER_FILE_NAME = "ender.nbt";
 
-    /** 最近一次成功读取的文件内容（缓存：每轮 reconcile 据此覆写，不依赖文件重读）。 */
-    private FileData current = FileData.EMPTY;
+    /** v2.48：索引文件的 mtime（本通道的主门控，同 §7.4）；未变 → 一个区文件都不读。 */
+    private FileTime lastIndexMtime;
+    /** v2.48：末影箱文件的 mtime（独立门控——它自有变化频率，见类 javadoc）。 */
+    private FileTime lastEnderMtime;
 
-    /** 单次文件代际内已告警过的 key（世界冲突 / 缺 typeId 等），换新文件内容时清空，避免每轮刷屏。 */
+    /**
+     * v2.48：维 → 区键 → 位置 → 记录。**累积**的镜像（区文件只覆盖自己那一片，故不能整表替换），
+     * 每轮 reconcile 据此全量覆写当前维。
+     */
+    private final Map<String, Map<String, Map<BlockPos, PosRecord>>> byDim = new LinkedHashMap<>();
+
+    /** v2.48：索引 diff 缓存：维 → 区键 → 上次看到的 {@code updatedAt}。相同 ⇒ 该区不需要重读。 */
+    private final Map<String, Map<String, Long>> indexCache = new LinkedHashMap<>();
+
+    /** 末影箱是否在记录中（false = 不动玩家末影箱，避免覆写本地已有内容）。 */
+    private boolean enderPresent;
+    /** 末影箱记录内容（{@link #enderPresent} 为 true 时才是权威快照）。 */
+    private List<ItemEntry> enderItems = List.of();
+
+    /** 单次读取代际内已告警过的 key（世界冲突 / 缺 typeId 等），换新内容时清空，避免每轮刷屏。 */
     private final Set<String> warned = new HashSet<>();
 
     private int ticks;
@@ -102,16 +130,22 @@ public class ContainerMemoryApplier {
 
     /** 服务器（世界）启动 / 切换时调用，清空已应用状态。 */
     public void onServerStart() {
-        lastMtime = null;
-        current = FileData.EMPTY;
+        lastIndexMtime = null;
+        lastEnderMtime = null;
+        byDim.clear();
+        indexCache.clear();
+        enderPresent = false;
+        enderItems = List.of();
         warned.clear();
         ticks = 0;
         LOGGER.info("[MemoryWorld] Container memory applier ready");
     }
 
-    /** 命令触发：强制重新读取源文件（须同时清 mtime 门控）。 */
+    /** 命令触发：强制重新读取（清索引缓存与两个 mtime 门控 ⇒ 下轮重读全部区文件）。 */
     public void forceRefresh() {
-        lastMtime = null;
+        lastIndexMtime = null;
+        lastEnderMtime = null;
+        indexCache.clear();
         warned.clear();
     }
 
@@ -130,63 +164,75 @@ public class ContainerMemoryApplier {
      * @param realityBlocks 采集侧本帧观测到的现实方块（可为 null = 该帧无视觉数据 → 一律不回放墓碑格）
      */
     public void tick(final ServerLevel level, final Map<BlockPos, TerrainRestorer.TerrainBlock> realityBlocks) {
-        MemoryConfig config = MemoryConfig.get();
+        final MemoryConfig config = MemoryConfig.get();
         if (ticks++ % Math.max(1, config.pollIntervalTicks) != 0) return;
 
-        Path source = config.resolveContainerFile();
-        if (source == null || !Files.exists(source)) {
+        final Path storeDir = config.resolveContainerDir();
+        if (storeDir == null || !Files.isDirectory(storeDir)) {
             if (missingSourceCounter++ % 30 == 0) {
-                LOGGER.warn("[MemoryWorld] Container file missing, updates paused (gameDir={}). "
+                LOGGER.warn("[MemoryWorld] Container store directory missing, updates paused (gameDir={}). "
                         + "Set 'containerFile' in config/stevex-test/memory.json.",
                         config.gameDirectory());
             }
-            lastMtime = null;     // 文件重新出现后自然触发首次读取
-            current = FileData.EMPTY;
+            // 存储整个不见了 → 内存镜像也清空（旧版此处 current = FileData.EMPTY），否则残留记录
+            // 会继续被覆写进世界。两个门控与索引缓存一并归零，目录重新出现后自然全量重读。
+            lastIndexMtime = null;
+            lastEnderMtime = null;
+            indexCache.clear();
+            byDim.clear();
+            enderPresent = false;
+            enderItems = List.of();
             return;
         }
         missingSourceCounter = 0;
 
-        final FileTime mtime;
-        try {
-            mtime = Files.getLastModifiedTime(source);
-        } catch (IOException e) {
-            LOGGER.warn("[MemoryWorld] Failed to stat container file {}: {}", source, e.getMessage());
-            return;
-        }
+        // 两个独立门控：索引（哪些区变了）+ 末影箱文件（玩家态）。任一有更新都算"内容变了"，
+        // 后者不再顺带把前者也刷一遍。
+        final boolean regionsChanged = pollRegions(level, storeDir);
+        final boolean enderChanged = pollEnder(level, storeDir);
+        final boolean changed = regionsChanged || enderChanged;
+        if (changed) warned.clear();
 
-        boolean changed = false;
-        if (!mtime.equals(lastMtime)) {
-            FileData data = readFile(source, level.registryAccess());
-            if (data == null) return; // 写入半截等 → 保留旧 mtime，下轮重试
-            lastMtime = mtime;        // 只在成功读取后才推进
-            current = data;
-            warned.clear();
-            changed = true;
-        }
+        if (!hasAnyRecord()) return;
 
-        if (current.isEmpty()) return;
-
-        // 文件变化 → 必然 reconcile（覆写语义，保证与采集同步）；文件未变但容器记录存在 →
+        // 内容变化 → 必然 reconcile（覆写语义，保证与采集同步）；内容未变但记录存在 →
         // 按配置每轮 reconcile（捕获延迟放置的 BE / 还原玩家改动）。
         if (changed || config.containerReconcileOnPoll) {
-            reconcile(level, current, changed, realityBlocks);
+            reconcile(level, changed, realityBlocks);
         }
+    }
+
+    /** 是否还有任何可覆写的记录（容器或末影箱）——旧版 {@code FileData.isEmpty()} 的等价物。 */
+    private boolean hasAnyRecord() {
+        if (enderPresent) return true;
+        for (final Map<String, Map<BlockPos, PosRecord>> regions : byDim.values()) {
+            for (final Map<BlockPos, PosRecord> containers : regions.values()) {
+                if (!containers.isEmpty()) return true;
+            }
+        }
+        return false;
     }
 
     // ==================== 覆写 / 应用 ====================
 
     /**
      * v2.32：只覆写传入 level（= 活动维，见 {@link MemoryWorldManager}）对应维的容器 + 全局末影箱。
-     * 其它维的容器记录留在文件缓存，镜像切回该维时再覆写。
+     * 其它维的容器记录留在内存镜像，镜像切回该维时再覆写。
+     *
+     * <p>v2.48：镜像按区分片存，这里把该维的<b>所有区</b>铺开遍历——reconcile 本就是全量覆写，
+     * 分片只影响"记录从哪读进来"，不影响"往世界里写多少"。遍历顺序（区 → 位置）与旧版的插入序不同，
+     * 但 {@link #applyPos} 逐格独立，顺序无影响。
      */
-    private void reconcile(final ServerLevel level, final FileData data, final boolean warnConflicts,
+    private void reconcile(final ServerLevel level, final boolean warnConflicts,
                            final Map<BlockPos, TerrainRestorer.TerrainBlock> realityBlocks) {
         final String dimension = level.dimension().identifier().toString();
-        Map<BlockPos, PosRecord> containers = data.containersByDim().get(dimension);
-        if (containers != null) {
+        final Map<String, Map<BlockPos, PosRecord>> regions = byDim.get(dimension);
+        if (regions != null && !regions.isEmpty()) {
             tombstoneWithheld = 0;
-            for (Map.Entry<BlockPos, PosRecord> e : containers.entrySet()) {
-                applyPos(level, dimension, e.getKey(), e.getValue(), warnConflicts, realityBlocks);
+            for (final Map<BlockPos, PosRecord> containers : regions.values()) {
+                for (final Map.Entry<BlockPos, PosRecord> e : containers.entrySet()) {
+                    applyPos(level, dimension, e.getKey(), e.getValue(), warnConflicts, realityBlocks);
+                }
             }
             if (tombstoneWithheld > 0) {
                 // 只在真有 withheld 时打一行（本通道常态是 0；打了就是每 poll 一行噪音）。数字口径 =
@@ -196,8 +242,8 @@ public class ContainerMemoryApplier {
                         dimension, tombstoneWithheld);
             }
         }
-        if (data.enderPresent()) {
-            applyEnder(level, data.enderItems());
+        if (enderPresent) {
+            applyEnder(level, enderItems);
         }
     }
 
@@ -357,52 +403,143 @@ public class ContainerMemoryApplier {
         return a.getCount() == b.getCount() && ItemStack.isSameItemSameComponents(a, b);
     }
 
-    // ==================== 读取源文件 ====================
+    // ==================== 轮询：索引与末影箱 ====================
 
     /**
-     * 读取容器文件 → v2.32 各维 per-pos 容器表 + 顶层末影箱玩家态。
+     * v2.48：轮询 {@code _index.nbt}（本通道的主 stat），只重读 {@code updatedAt} 变了的区文件。
      *
-     * <p>末影箱必须从<b>原始 root 顶层</b>读（旧版单维文件它也在顶层；若经
-     * {@link WorldsFile#read} 的 legacy 回退，整份 root 会变成 overworld 桶、把末影段埋进桶内，
-     * 与采集侧 load() 从原始 root 读末影段的约定对称）。旧版单维文件的 {@code containers} 键在
-     * root 顶层，经 legacy 回退后恰为该 overworld 桶的顶层 → 解析路径一致。
+     * <p>门控形状与旧版一致——一轮一次 stat、mtime 未变就什么都不做，只是 stat 的对象从
+     * {@code containers.nbt} 换成了索引。读失败 / 空索引不推进 {@link #lastIndexMtime}，下轮重试。
+     *
+     * @return 是否读进了新内容（旧版的 {@code changed}：文件变了就当 true，用于决定是否强制 reconcile）
      */
-    private FileData readFile(final Path source, final HolderLookup.Provider registries) {
+    private boolean pollRegions(final ServerLevel level, final Path storeDir) {
+        final Path idx = storeDir.resolve(VisionRegions.INDEX_FILE_NAME);
+        final FileTime mtime;
         try {
-            CompoundTag root = NbtIo.readCompressed(source, NbtAccounter.unlimitedHeap());
-            if (root == null) return FileData.EMPTY;
+            mtime = Files.getLastModifiedTime(idx);
+        } catch (IOException e) {
+            return false; // 索引还没出现（或目录刚被清空）→ 保持门控，出现时自然触发
+        }
+        if (mtime.equals(lastIndexMtime)) return false;
 
-            // v2.32：per-pos 容器按维分桶。
-            WorldsFile.Result r = WorldsFile.read(root);
-            Map<String, Map<BlockPos, PosRecord>> containersByDim = new LinkedHashMap<>();
-            for (Map.Entry<String, CompoundTag> e : r.worlds().entrySet()) {
-                CompoundTag containersTag = e.getValue().getCompoundOrEmpty(KEY_CONTAINERS);
-                Map<BlockPos, PosRecord> containers = new LinkedHashMap<>();
-                for (String key : containersTag.keySet()) {
-                    BlockPos pos = parsePos(key);
-                    if (pos == null) continue;
-                    CompoundTag entry = containersTag.getCompoundOrEmpty(key);
-                    String typeId = entry.getStringOr(KEY_TYPE_ID, "");
-                    String blockId = entry.getStringOr(KEY_BLOCK, "");
-                    Map<String, String> state = readState(entry.getCompoundOrEmpty(KEY_STATE));
-                    List<ItemEntry> items = readItems(entry.getListOrEmpty(KEY_ITEMS), registries);
-                    containers.put(pos, new PosRecord(typeId, blockId, state, items));
+        final Map<String, Map<String, Long>> fresh = VisionRegions.readIndex(storeDir);
+        if (fresh.isEmpty()) return false; // 半截写 / 损坏 → 保留旧 mtime，下轮重试
+        lastIndexMtime = mtime; // 只在成功读取后才推进
+
+        int reread = 0;
+        int failed = 0;
+        int dropped = 0;
+        for (final Map.Entry<String, Map<String, Long>> de : fresh.entrySet()) {
+            final String dim = de.getKey();
+            final String dimDirName = VisionRegions.dimDirName(dim);
+            final Map<String, Map<BlockPos, PosRecord>> mirrored =
+                    byDim.computeIfAbsent(dim, k -> new LinkedHashMap<>());
+            final Map<String, Long> cached = indexCache.computeIfAbsent(dim, k -> new LinkedHashMap<>());
+
+            for (final Map.Entry<String, Long> re : de.getValue().entrySet()) {
+                final String regionKey = re.getKey();
+                if (re.getValue().equals(cached.get(regionKey))) continue; // 未变 → 不读
+                final int[] rxrz = VisionRegions.parseRegionKey(regionKey);
+                if (rxrz == null) continue;
+                final CompoundTag root = VisionRegions.readRegion(
+                        VisionRegions.regionFile(storeDir, dim, rxrz[0], rxrz[1]), dimDirName, rxrz[0], rxrz[1]);
+                if (root == null) {
+                    failed++; // 不推进该区的 updatedAt ⇒ 下一轮重试
+                    continue;
                 }
-                containersByDim.put(e.getKey(), containers);
+                mirrored.put(regionKey, readRegionContainers(root, level.registryAccess()));
+                cached.put(regionKey, re.getValue());
+                reread++;
             }
 
-            // v2.29：末影箱玩家态始终在文件顶层（跨维全局；新/旧格式同位置）。
-            CompoundTag ender = root.getCompoundOrEmpty(KEY_ENDER_INVENTORY);
-            boolean enderPresent = !ender.isEmpty() && ender.contains(KEY_ITEMS);
-            List<ItemEntry> enderItems = enderPresent
-                    ? readItems(ender.getListOrEmpty(KEY_ITEMS), registries)
-                    : List.of();
-
-            return new FileData(containersByDim, enderPresent, enderItems);
-        } catch (IOException e) {
-            LOGGER.warn("[MemoryWorld] Failed to read container file {}: {}", source, e.getMessage());
-            return null;
+            // 本地有、新索引里没有的区：采集端把它删了（容器被清空的区会被整区摘掉，见 §11.11 的
+            // ⑤ 剪枝）。**必须连镜像一并摘掉**——否则"记录已被删除"这件事永远到不了世界，
+            // 该容器会被每一轮 reconcile 重新覆写回去。这是 ⑤ 与 ④ 的关键差别：④ 没有删除通道，
+            // 所以它只摘索引缓存；⑤ 有，所以它必须一路摘到数据。
+            final List<String> gone = new ArrayList<>();
+            for (final String regionKey : cached.keySet()) {
+                if (!de.getValue().containsKey(regionKey)) gone.add(regionKey);
+            }
+            for (final String regionKey : gone) {
+                cached.remove(regionKey);
+                mirrored.remove(regionKey);
+                dropped++;
+            }
         }
+
+        if (failed > 0) {
+            LOGGER.warn("[MemoryWorld] {} container region file(s) unreadable this poll — will retry", failed);
+        } else if (reread > 0 || dropped > 0) {
+            LOGGER.info("[MemoryWorld] Container index changed: re-read {} region(s), {} dropped", reread, dropped);
+        }
+        // reread == 0 但 dropped > 0 也算内容变了（记录被删是内容变更），故两者取或。
+        return reread > 0 || dropped > 0;
+    }
+
+    /** 区文件 → 该区的容器记录表（位置键由采集端用 {@code "x,y,z"} 写入）。 */
+    private Map<BlockPos, PosRecord> readRegionContainers(final CompoundTag regionRoot,
+                                                          final HolderLookup.Provider registries) {
+        final Map<BlockPos, PosRecord> containers = new LinkedHashMap<>();
+        final CompoundTag containersTag = regionRoot.getCompoundOrEmpty(KEY_CONTAINERS);
+        for (final String key : containersTag.keySet()) {
+            final BlockPos pos = VisionRegions.parsePosKey(key);
+            if (pos == null) continue;
+            final CompoundTag entry = containersTag.getCompoundOrEmpty(key);
+            containers.put(pos, new PosRecord(
+                    entry.getStringOr(KEY_TYPE_ID, ""),
+                    entry.getStringOr(KEY_BLOCK, ""),
+                    readState(entry.getCompoundOrEmpty(KEY_STATE)),
+                    readItems(entry.getListOrEmpty(KEY_ITEMS), registries)));
+        }
+        return containers;
+    }
+
+    /**
+     * v2.48：轮询 {@code ender.nbt}（独立的第二个 stat），更新末影箱玩家态记录。
+     *
+     * <p>末影箱从<b>原始 root 顶层</b>读，<b>不经</b> {@link WorldsFile#read}——那条路会把整份 root 包成
+     * overworld 桶，把末影段埋进桶内；而采集侧 load() 写的时候就是从原始 root 顶层取的，两侧对称。
+     * 旧/新格式在此处位置相同（旧文件在 root 顶层，{@code ender.nbt} 也在 root 顶层），故不需要 legacy
+     * 兼容分支——与 per-pos 容器不同，后者才依赖 {@code worlds} 分桶的回退。
+     *
+     * <p>文件缺席 → {@link #enderPresent} 置 false（= 不动玩家末影箱）。这与旧版"整个文件不见了 →
+     * {@code FileData.EMPTY} → 不覆写"一致：文件在 = 记录是权威快照（哪怕物品表为空），文件不在 =
+     * 本通道对此无话可说。
+     *
+     * @return 是否读进了新内容
+     */
+    private boolean pollEnder(final ServerLevel level, final Path storeDir) {
+        final Path file = storeDir.resolve(ENDER_FILE_NAME);
+        final FileTime mtime;
+        try {
+            mtime = Files.getLastModifiedTime(file);
+        } catch (IOException e) {
+            if (enderPresent) {
+                enderPresent = false; // 文件被删 → 撤回权威，不再覆写
+                enderItems = List.of();
+                lastEnderMtime = null;
+                return true;
+            }
+            return false;
+        }
+        if (mtime.equals(lastEnderMtime)) return false;
+
+        final CompoundTag root;
+        try {
+            root = NbtIo.readCompressed(file, NbtAccounter.unlimitedHeap());
+        } catch (IOException | RuntimeException e) {
+            // v2.48.1：连 RuntimeException 一起接——截断 gzip 流抛的是非受检的 ReportedNbtException。
+            LOGGER.warn("[MemoryWorld] Failed to read ender chest record {}: {}", file, e.getMessage());
+            return false; // 半截写 → 保留旧 mtime，下轮重试
+        }
+        if (root == null) return false;
+        lastEnderMtime = mtime; // 只在成功读取后才推进
+
+        final CompoundTag ender = root.getCompoundOrEmpty(KEY_ENDER_INVENTORY);
+        enderPresent = !ender.isEmpty() && ender.contains(KEY_ITEMS);
+        enderItems = enderPresent ? readItems(ender.getListOrEmpty(KEY_ITEMS), level.registryAccess()) : List.of();
+        return true;
     }
 
     /**
@@ -446,20 +583,6 @@ public class ContainerMemoryApplier {
         return state;
     }
 
-    private static BlockPos parsePos(final String key) {
-        String[] parts = key.split(",");
-        if (parts.length != 3) return null;
-        try {
-            return new BlockPos(
-                    Integer.parseInt(parts[0].trim()),
-                    Integer.parseInt(parts[1].trim()),
-                    Integer.parseInt(parts[2].trim())
-            );
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
     private static String brief(final CompoundTag tag) {
         String s = tag.toString();
         return s.length() <= 100 ? s : s.substring(0, 100) + "…";
@@ -478,18 +601,4 @@ public class ContainerMemoryApplier {
 
     /** 一条 per-pos 容器记录：BE id（建/挂 BE）+ 方块 + 状态 + 槽位内容。 */
     private record PosRecord(String typeId, String blockId, Map<String, String> state, List<ItemEntry> items) {}
-
-    /**
-     * v2.32 一次文件读取结果：各维 per-pos 容器表 + 末影箱玩家态（v2.29，顶层全局）。
-     * {@code enderPresent=false} 表示文件未含末影箱段 → 不动玩家末影箱（避免覆写本地已有内容）；
-     * 为 true（即使空物品表）→ 记录 = 权威快照，reconcile 会清空还原。
-     */
-    private record FileData(Map<String, Map<BlockPos, PosRecord>> containersByDim,
-                            boolean enderPresent, List<ItemEntry> enderItems) {
-        static final FileData EMPTY = new FileData(Map.of(), false, List.of());
-
-        boolean isEmpty() {
-            return containersByDim.isEmpty() && !enderPresent;
-        }
-    }
 }
