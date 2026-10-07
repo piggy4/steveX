@@ -1,0 +1,146 @@
+package net.minecraft.client.gui.screens.inventory;
+
+import net.fabricmc.api.EnvType;
+import net.fabricmc.api.Environment;
+import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.components.EditBox;
+import net.minecraft.client.input.KeyEvent;
+import net.minecraft.client.renderer.RenderPipelines;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.game.ServerboundRenameItemPacket;
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.inventory.AbstractContainerMenu;
+import net.minecraft.world.inventory.AnvilMenu;
+import net.minecraft.world.inventory.Slot;
+import net.minecraft.world.item.ItemStack;
+
+@Environment(EnvType.CLIENT)
+public class AnvilScreen extends ItemCombinerScreen<AnvilMenu> {
+	private static final Identifier TEXT_FIELD_SPRITE = Identifier.withDefaultNamespace("container/anvil/text_field");
+	private static final Identifier TEXT_FIELD_DISABLED_SPRITE = Identifier.withDefaultNamespace("container/anvil/text_field_disabled");
+	private static final Identifier ERROR_SPRITE = Identifier.withDefaultNamespace("container/anvil/error");
+	private static final Identifier ANVIL_LOCATION = Identifier.withDefaultNamespace("textures/gui/container/anvil.png");
+	private static final Component TOO_EXPENSIVE_TEXT = Component.translatable("container.repair.expensive");
+	private EditBox name;
+	private final Player player;
+
+	public AnvilScreen(AnvilMenu anvilMenu, Inventory inventory, Component component) {
+		super(anvilMenu, inventory, component, ANVIL_LOCATION);
+		this.player = inventory.player;
+		this.titleLabelX = 60;
+	}
+
+	@Override
+	protected void subInit() {
+		int i = (this.width - this.imageWidth) / 2;
+		int j = (this.height - this.imageHeight) / 2;
+		this.name = new EditBox(this.font, i + 62, j + 24, 103, 12, Component.translatable("container.repair"));
+		this.name.setCanLoseFocus(false);
+		this.name.setTextColor(-1);
+		this.name.setTextColorUneditable(-1);
+		this.name.setInvertHighlightedTextColor(false);
+		this.name.setBordered(false);
+		this.name.setMaxLength(50);
+		this.name.setResponder(this::onNameChanged);
+		this.name.setValue("");
+		this.addRenderableWidget(this.name);
+		this.name.setEditable(this.menu.getSlot(0).hasItem());
+	}
+
+	@Override
+	protected void containerTick() {
+		super.containerTick();
+		this.minecraft.player.experienceDisplayStartTick = this.minecraft.player.tickCount;
+	}
+
+	@Override
+	protected void setInitialFocus() {
+		this.setInitialFocus(this.name);
+	}
+
+	@Override
+	public void resize(int i, int j) {
+		String string = this.name.getValue();
+		this.init(i, j);
+		this.name.setValue(string);
+	}
+
+	@Override
+	public boolean keyPressed(KeyEvent keyEvent) {
+		if (keyEvent.isEscape()) {
+			this.minecraft.player.closeContainer();
+			return true;
+		} else {
+			return !this.name.keyPressed(keyEvent) && !this.name.canConsumeInput() ? super.keyPressed(keyEvent) : true;
+		}
+	}
+
+	private void onNameChanged(String string) {
+		Slot slot = this.menu.getSlot(0);
+		if (slot.hasItem()) {
+			String string2 = string;
+			if (!slot.getItem().has(DataComponents.CUSTOM_NAME) && string2.equals(slot.getItem().getHoverName().getString())) {
+				string2 = "";
+			}
+
+			if (this.menu.setItemName(string2)) {
+				this.minecraft.player.connection.send(new ServerboundRenameItemPacket(string2));
+			}
+		}
+	}
+
+	@Override
+	protected void renderLabels(GuiGraphics guiGraphics, int i, int j) {
+		super.renderLabels(guiGraphics, i, j);
+		int k = this.menu.getCost();
+		if (k > 0) {
+			int l = -8323296;
+			Component component;
+			if (k >= 40 && !this.minecraft.player.hasInfiniteMaterials()) {
+				component = TOO_EXPENSIVE_TEXT;
+				l = -40864;
+			} else if (!this.menu.getSlot(2).hasItem()) {
+				component = null;
+			} else {
+				component = Component.translatable("container.repair.cost", k);
+				if (!this.menu.getSlot(2).mayPickup(this.player)) {
+					l = -40864;
+				}
+			}
+
+			if (component != null) {
+				int m = this.imageWidth - 8 - this.font.width(component) - 2;
+				int n = 69;
+				guiGraphics.fill(m - 2, 67, this.imageWidth - 8, 79, 1325400064);
+				guiGraphics.drawString(this.font, component, m, 69, l);
+			}
+		}
+	}
+
+	@Override
+	protected void renderBg(GuiGraphics guiGraphics, float f, int i, int j) {
+		super.renderBg(guiGraphics, f, i, j);
+		guiGraphics.blitSprite(
+			RenderPipelines.GUI_TEXTURED, this.menu.getSlot(0).hasItem() ? TEXT_FIELD_SPRITE : TEXT_FIELD_DISABLED_SPRITE, this.leftPos + 59, this.topPos + 20, 110, 16
+		);
+	}
+
+	@Override
+	protected void renderErrorIcon(GuiGraphics guiGraphics, int i, int j) {
+		if ((this.menu.getSlot(0).hasItem() || this.menu.getSlot(1).hasItem()) && !this.menu.getSlot(this.menu.getResultSlot()).hasItem()) {
+			guiGraphics.blitSprite(RenderPipelines.GUI_TEXTURED, ERROR_SPRITE, i + 99, j + 45, 28, 21);
+		}
+	}
+
+	@Override
+	public void slotChanged(AbstractContainerMenu abstractContainerMenu, int i, ItemStack itemStack) {
+		if (i == 0) {
+			this.name.setValue(itemStack.isEmpty() ? "" : itemStack.getHoverName().getString());
+			this.name.setEditable(!itemStack.isEmpty());
+			this.setFocused(this.name);
+		}
+	}
+}

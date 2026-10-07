@@ -1,0 +1,190 @@
+package net.minecraft.world.level.block;
+
+import com.mojang.serialization.MapCodec;
+import java.util.Collection;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.TagKey;
+import net.minecraft.util.Mth;
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.LevelAccessor;
+import net.minecraft.world.level.block.state.BlockBehaviour;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BooleanProperty;
+import net.minecraft.world.level.material.FluidState;
+import net.minecraft.world.level.material.Fluids;
+
+public class SculkVeinBlock extends MultifaceSpreadeableBlock implements SculkBehaviour {
+	public static final MapCodec<SculkVeinBlock> CODEC = simpleCodec(SculkVeinBlock::new);
+	private final MultifaceSpreader veinSpreader = new MultifaceSpreader(new SculkVeinBlock.SculkVeinSpreaderConfig(MultifaceSpreader.DEFAULT_SPREAD_ORDER));
+	private final MultifaceSpreader sameSpaceSpreader = new MultifaceSpreader(
+		new SculkVeinBlock.SculkVeinSpreaderConfig(MultifaceSpreader.SpreadType.SAME_POSITION)
+	);
+
+	@Override
+	public MapCodec<SculkVeinBlock> codec() {
+		return CODEC;
+	}
+
+	public SculkVeinBlock(BlockBehaviour.Properties properties) {
+		super(properties);
+	}
+
+	@Override
+	public MultifaceSpreader getSpreader() {
+		return this.veinSpreader;
+	}
+
+	public MultifaceSpreader getSameSpaceSpreader() {
+		return this.sameSpaceSpreader;
+	}
+
+	public static boolean regrow(LevelAccessor levelAccessor, BlockPos blockPos, BlockState blockState, Collection<Direction> collection) {
+		boolean bl = false;
+		BlockState blockState2 = Blocks.SCULK_VEIN.defaultBlockState();
+
+		for (Direction direction : collection) {
+			if (canAttachTo(levelAccessor, blockPos, direction)) {
+				blockState2 = blockState2.setValue(getFaceProperty(direction), true);
+				bl = true;
+			}
+		}
+
+		if (!bl) {
+			return false;
+		}
+
+		if (!blockState.getFluidState().isEmpty()) {
+			blockState2 = blockState2.setValue(MultifaceBlock.WATERLOGGED, true);
+		}
+
+		levelAccessor.setBlock(blockPos, blockState2, 3);
+		return true;
+	}
+
+	@Override
+	public void onDischarged(LevelAccessor levelAccessor, BlockState blockState, BlockPos blockPos, RandomSource randomSource) {
+		if (blockState.is(this)) {
+			for (Direction direction : DIRECTIONS) {
+				BooleanProperty booleanProperty = getFaceProperty(direction);
+				if (blockState.getValue(booleanProperty) && levelAccessor.getBlockState(blockPos.relative(direction)).is(Blocks.SCULK)) {
+					blockState = blockState.setValue(booleanProperty, false);
+				}
+			}
+
+			if (!hasAnyFace(blockState)) {
+				FluidState fluidState = levelAccessor.getFluidState(blockPos);
+				blockState = (fluidState.isEmpty() ? Blocks.AIR : Blocks.WATER).defaultBlockState();
+			}
+
+			levelAccessor.setBlock(blockPos, blockState, 3);
+			SculkBehaviour.super.onDischarged(levelAccessor, blockState, blockPos, randomSource);
+		}
+	}
+
+	@Override
+	public int attemptUseCharge(
+		SculkSpreader.ChargeCursor chargeCursor, LevelAccessor levelAccessor, BlockPos blockPos, RandomSource randomSource, SculkSpreader sculkSpreader, boolean bl
+	) {
+		if (bl && this.attemptPlaceSculk(sculkSpreader, levelAccessor, chargeCursor.getPos(), randomSource)) {
+			return chargeCursor.getCharge() - 1;
+		} else {
+			return randomSource.nextInt(sculkSpreader.chargeDecayRate()) == 0 ? Mth.floor(chargeCursor.getCharge() * 0.5F) : chargeCursor.getCharge();
+		}
+	}
+
+	private boolean attemptPlaceSculk(SculkSpreader sculkSpreader, LevelAccessor levelAccessor, BlockPos blockPos, RandomSource randomSource) {
+		BlockState blockState = levelAccessor.getBlockState(blockPos);
+		TagKey<Block> tagKey = sculkSpreader.replaceableBlocks();
+
+		for (Direction direction : Direction.allShuffled(randomSource)) {
+			if (hasFace(blockState, direction)) {
+				BlockPos blockPos2 = blockPos.relative(direction);
+				BlockState blockState2 = levelAccessor.getBlockState(blockPos2);
+				if (blockState2.is(tagKey)) {
+					BlockState blockState3 = Blocks.SCULK.defaultBlockState();
+					levelAccessor.setBlock(blockPos2, blockState3, 3);
+					Block.pushEntitiesUp(blockState2, blockState3, levelAccessor, blockPos2);
+					levelAccessor.playSound(null, blockPos2, SoundEvents.SCULK_BLOCK_SPREAD, SoundSource.BLOCKS, 1.0F, 1.0F);
+					this.veinSpreader.spreadAll(blockState3, levelAccessor, blockPos2, sculkSpreader.isWorldGeneration());
+					Direction direction2 = direction.getOpposite();
+
+					for (Direction direction3 : DIRECTIONS) {
+						if (direction3 != direction2) {
+							BlockPos blockPos3 = blockPos2.relative(direction3);
+							BlockState blockState4 = levelAccessor.getBlockState(blockPos3);
+							if (blockState4.is(this)) {
+								this.onDischarged(levelAccessor, blockState4, blockPos3, randomSource);
+							}
+						}
+					}
+
+					return true;
+				}
+			}
+		}
+
+		return false;
+	}
+
+	public static boolean hasSubstrateAccess(LevelAccessor levelAccessor, BlockState blockState, BlockPos blockPos) {
+		if (!blockState.is(Blocks.SCULK_VEIN)) {
+			return false;
+		}
+
+		for (Direction direction : DIRECTIONS) {
+			if (hasFace(blockState, direction) && levelAccessor.getBlockState(blockPos.relative(direction)).is(BlockTags.SCULK_REPLACEABLE)) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	class SculkVeinSpreaderConfig extends MultifaceSpreader.DefaultSpreaderConfig {
+		private final MultifaceSpreader.SpreadType[] spreadTypes;
+
+		public SculkVeinSpreaderConfig(final MultifaceSpreader.SpreadType... spreadTypes) {
+			super(SculkVeinBlock.this);
+			this.spreadTypes = spreadTypes;
+		}
+
+		@Override
+		public boolean stateCanBeReplaced(BlockGetter blockGetter, BlockPos blockPos, BlockPos blockPos2, Direction direction, BlockState blockState) {
+			BlockState blockState2 = blockGetter.getBlockState(blockPos2.relative(direction));
+			if (!blockState2.is(Blocks.SCULK) && !blockState2.is(Blocks.SCULK_CATALYST) && !blockState2.is(Blocks.MOVING_PISTON)) {
+				if (blockPos.distManhattan(blockPos2) == 2) {
+					BlockPos blockPos3 = blockPos.relative(direction.getOpposite());
+					if (blockGetter.getBlockState(blockPos3).isFaceSturdy(blockGetter, blockPos3, direction)) {
+						return false;
+					}
+				}
+
+				FluidState fluidState = blockState.getFluidState();
+				if (!fluidState.isEmpty() && !fluidState.is(Fluids.WATER)) {
+					return false;
+				} else {
+					return blockState.is(BlockTags.FIRE)
+						? false
+						: blockState.canBeReplaced() || super.stateCanBeReplaced(blockGetter, blockPos, blockPos2, direction, blockState);
+				}
+			} else {
+				return false;
+			}
+		}
+
+		@Override
+		public MultifaceSpreader.SpreadType[] getSpreadTypes() {
+			return this.spreadTypes;
+		}
+
+		@Override
+		public boolean isOtherBlockValidAsSource(BlockState blockState) {
+			return !blockState.is(Blocks.SCULK_VEIN);
+		}
+	}
+}

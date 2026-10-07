@@ -1,0 +1,116 @@
+package net.minecraft.client.gui.screens;
+
+import com.google.common.collect.Maps;
+import com.mojang.logging.LogUtils;
+import java.util.Map;
+import net.fabricmc.api.EnvType;
+import net.fabricmc.api.Environment;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.inventory.AnvilScreen;
+import net.minecraft.client.gui.screens.inventory.BeaconScreen;
+import net.minecraft.client.gui.screens.inventory.BlastFurnaceScreen;
+import net.minecraft.client.gui.screens.inventory.BrewingStandScreen;
+import net.minecraft.client.gui.screens.inventory.CartographyTableScreen;
+import net.minecraft.client.gui.screens.inventory.ContainerScreen;
+import net.minecraft.client.gui.screens.inventory.CrafterScreen;
+import net.minecraft.client.gui.screens.inventory.CraftingScreen;
+import net.minecraft.client.gui.screens.inventory.DispenserScreen;
+import net.minecraft.client.gui.screens.inventory.EnchantmentScreen;
+import net.minecraft.client.gui.screens.inventory.FurnaceScreen;
+import net.minecraft.client.gui.screens.inventory.GrindstoneScreen;
+import net.minecraft.client.gui.screens.inventory.HopperScreen;
+import net.minecraft.client.gui.screens.inventory.LecternScreen;
+import net.minecraft.client.gui.screens.inventory.LoomScreen;
+import net.minecraft.client.gui.screens.inventory.MenuAccess;
+import net.minecraft.client.gui.screens.inventory.MerchantScreen;
+import net.minecraft.client.gui.screens.inventory.ShulkerBoxScreen;
+import net.minecraft.client.gui.screens.inventory.SmithingScreen;
+import net.minecraft.client.gui.screens.inventory.SmokerScreen;
+import net.minecraft.client.gui.screens.inventory.StonecutterScreen;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.chat.Component;
+import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.inventory.AbstractContainerMenu;
+import net.minecraft.world.inventory.MenuType;
+import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+
+@Environment(EnvType.CLIENT)
+public class MenuScreens {
+	private static final Logger LOGGER = LogUtils.getLogger();
+	private static final Map<MenuType<?>, MenuScreens.ScreenConstructor<?, ?>> SCREENS = Maps.newHashMap();
+
+	public static <T extends AbstractContainerMenu> void create(MenuType<T> menuType, Minecraft minecraft, int i, Component component) {
+		MenuScreens.ScreenConstructor<T, ?> screenConstructor = getConstructor(menuType);
+		if (screenConstructor == null) {
+			LOGGER.warn("Failed to create screen for menu type: {}", BuiltInRegistries.MENU.getKey(menuType));
+		} else {
+			screenConstructor.fromPacket(component, menuType, minecraft, i);
+		}
+	}
+
+	private static <T extends AbstractContainerMenu> MenuScreens.@Nullable ScreenConstructor<T, ?> getConstructor(MenuType<T> menuType) {
+		return (MenuScreens.ScreenConstructor<T, ?>)SCREENS.get(menuType);
+	}
+
+	public static <M extends AbstractContainerMenu, U extends Screen & MenuAccess<M>> void register(
+		MenuType<? extends M> menuType, MenuScreens.ScreenConstructor<M, U> screenConstructor
+	) {
+		MenuScreens.ScreenConstructor<?, ?> screenConstructor2 = SCREENS.put(menuType, screenConstructor);
+		if (screenConstructor2 != null) {
+			throw new IllegalStateException("Duplicate registration for " + BuiltInRegistries.MENU.getKey(menuType));
+		}
+	}
+
+	public static boolean selfTest() {
+		boolean bl = false;
+
+		for (MenuType<?> menuType : BuiltInRegistries.MENU) {
+			if (!SCREENS.containsKey(menuType)) {
+				LOGGER.debug("Menu {} has no matching screen", BuiltInRegistries.MENU.getKey(menuType));
+				bl = true;
+			}
+		}
+
+		return bl;
+	}
+
+	static {
+		register(MenuType.GENERIC_9x1, ContainerScreen::new);
+		register(MenuType.GENERIC_9x2, ContainerScreen::new);
+		register(MenuType.GENERIC_9x3, ContainerScreen::new);
+		register(MenuType.GENERIC_9x4, ContainerScreen::new);
+		register(MenuType.GENERIC_9x5, ContainerScreen::new);
+		register(MenuType.GENERIC_9x6, ContainerScreen::new);
+		register(MenuType.GENERIC_3x3, DispenserScreen::new);
+		register(MenuType.CRAFTER_3x3, CrafterScreen::new);
+		register(MenuType.ANVIL, AnvilScreen::new);
+		register(MenuType.BEACON, BeaconScreen::new);
+		register(MenuType.BLAST_FURNACE, BlastFurnaceScreen::new);
+		register(MenuType.BREWING_STAND, BrewingStandScreen::new);
+		register(MenuType.CRAFTING, CraftingScreen::new);
+		register(MenuType.ENCHANTMENT, EnchantmentScreen::new);
+		register(MenuType.FURNACE, FurnaceScreen::new);
+		register(MenuType.GRINDSTONE, GrindstoneScreen::new);
+		register(MenuType.HOPPER, HopperScreen::new);
+		register(MenuType.LECTERN, LecternScreen::new);
+		register(MenuType.LOOM, LoomScreen::new);
+		register(MenuType.MERCHANT, MerchantScreen::new);
+		register(MenuType.SHULKER_BOX, ShulkerBoxScreen::new);
+		register(MenuType.SMITHING, SmithingScreen::new);
+		register(MenuType.SMOKER, SmokerScreen::new);
+		register(MenuType.CARTOGRAPHY_TABLE, CartographyTableScreen::new);
+		register(MenuType.STONECUTTER, StonecutterScreen::new);
+	}
+
+	@Environment(EnvType.CLIENT)
+	public interface ScreenConstructor<T extends AbstractContainerMenu, U extends Screen & MenuAccess<T>> {
+		default void fromPacket(Component component, MenuType<T> menuType, Minecraft minecraft, int i) {
+			U screen = this.create(menuType.create(i, minecraft.player.getInventory()), minecraft.player.getInventory(), component);
+			minecraft.player.containerMenu = screen.getMenu();
+			minecraft.setScreen(screen);
+		}
+
+		U create(T abstractContainerMenu, Inventory inventory, Component component);
+	}
+}

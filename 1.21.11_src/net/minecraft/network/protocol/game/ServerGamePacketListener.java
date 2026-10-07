@@ -1,0 +1,122 @@
+package net.minecraft.network.protocol.game;
+
+import net.minecraft.network.ConnectionProtocol;
+import net.minecraft.network.protocol.common.ServerCommonPacketListener;
+import net.minecraft.network.protocol.ping.ServerPingPacketListener;
+
+public interface ServerGamePacketListener extends ServerCommonPacketListener, ServerPingPacketListener {
+	@Override
+	default ConnectionProtocol protocol() {
+		return ConnectionProtocol.PLAY;
+	}
+
+	void handleAnimate(ServerboundSwingPacket serverboundSwingPacket);
+
+	void handleChat(ServerboundChatPacket serverboundChatPacket);
+
+	void handleChatCommand(ServerboundChatCommandPacket serverboundChatCommandPacket);
+
+	void handleSignedChatCommand(ServerboundChatCommandSignedPacket serverboundChatCommandSignedPacket);
+
+	void handleChatAck(ServerboundChatAckPacket serverboundChatAckPacket);
+
+	void handleClientCommand(ServerboundClientCommandPacket serverboundClientCommandPacket);
+
+	void handleContainerButtonClick(ServerboundContainerButtonClickPacket serverboundContainerButtonClickPacket);
+
+	void handleContainerClick(ServerboundContainerClickPacket serverboundContainerClickPacket);
+
+	void handlePlaceRecipe(ServerboundPlaceRecipePacket serverboundPlaceRecipePacket);
+
+	void handleContainerClose(ServerboundContainerClosePacket serverboundContainerClosePacket);
+
+	void handleInteract(ServerboundInteractPacket serverboundInteractPacket);
+
+	void handleMovePlayer(ServerboundMovePlayerPacket serverboundMovePlayerPacket);
+
+	void handlePlayerAbilities(ServerboundPlayerAbilitiesPacket serverboundPlayerAbilitiesPacket);
+
+	void handlePlayerAction(ServerboundPlayerActionPacket serverboundPlayerActionPacket);
+
+	void handlePlayerCommand(ServerboundPlayerCommandPacket serverboundPlayerCommandPacket);
+
+	void handlePlayerInput(ServerboundPlayerInputPacket serverboundPlayerInputPacket);
+
+	void handleSetCarriedItem(ServerboundSetCarriedItemPacket serverboundSetCarriedItemPacket);
+
+	void handleSetCreativeModeSlot(ServerboundSetCreativeModeSlotPacket serverboundSetCreativeModeSlotPacket);
+
+	void handleSignUpdate(ServerboundSignUpdatePacket serverboundSignUpdatePacket);
+
+	void handleUseItemOn(ServerboundUseItemOnPacket serverboundUseItemOnPacket);
+
+	void handleUseItem(ServerboundUseItemPacket serverboundUseItemPacket);
+
+	void handleTeleportToEntityPacket(ServerboundTeleportToEntityPacket serverboundTeleportToEntityPacket);
+
+	void handlePaddleBoat(ServerboundPaddleBoatPacket serverboundPaddleBoatPacket);
+
+	void handleMoveVehicle(ServerboundMoveVehiclePacket serverboundMoveVehiclePacket);
+
+	void handleAcceptTeleportPacket(ServerboundAcceptTeleportationPacket serverboundAcceptTeleportationPacket);
+
+	void handleAcceptPlayerLoad(ServerboundPlayerLoadedPacket serverboundPlayerLoadedPacket);
+
+	void handleRecipeBookSeenRecipePacket(ServerboundRecipeBookSeenRecipePacket serverboundRecipeBookSeenRecipePacket);
+
+	void handleBundleItemSelectedPacket(ServerboundSelectBundleItemPacket serverboundSelectBundleItemPacket);
+
+	void handleRecipeBookChangeSettingsPacket(ServerboundRecipeBookChangeSettingsPacket serverboundRecipeBookChangeSettingsPacket);
+
+	void handleSeenAdvancements(ServerboundSeenAdvancementsPacket serverboundSeenAdvancementsPacket);
+
+	void handleCustomCommandSuggestions(ServerboundCommandSuggestionPacket serverboundCommandSuggestionPacket);
+
+	void handleSetCommandBlock(ServerboundSetCommandBlockPacket serverboundSetCommandBlockPacket);
+
+	void handleSetCommandMinecart(ServerboundSetCommandMinecartPacket serverboundSetCommandMinecartPacket);
+
+	void handlePickItemFromBlock(ServerboundPickItemFromBlockPacket serverboundPickItemFromBlockPacket);
+
+	void handlePickItemFromEntity(ServerboundPickItemFromEntityPacket serverboundPickItemFromEntityPacket);
+
+	void handleRenameItem(ServerboundRenameItemPacket serverboundRenameItemPacket);
+
+	void handleSetBeaconPacket(ServerboundSetBeaconPacket serverboundSetBeaconPacket);
+
+	void handleSetStructureBlock(ServerboundSetStructureBlockPacket serverboundSetStructureBlockPacket);
+
+	void handleSetTestBlock(ServerboundSetTestBlockPacket serverboundSetTestBlockPacket);
+
+	void handleTestInstanceBlockAction(ServerboundTestInstanceBlockActionPacket serverboundTestInstanceBlockActionPacket);
+
+	void handleSelectTrade(ServerboundSelectTradePacket serverboundSelectTradePacket);
+
+	void handleEditBook(ServerboundEditBookPacket serverboundEditBookPacket);
+
+	void handleEntityTagQuery(ServerboundEntityTagQueryPacket serverboundEntityTagQueryPacket);
+
+	void handleContainerSlotStateChanged(ServerboundContainerSlotStateChangedPacket serverboundContainerSlotStateChangedPacket);
+
+	void handleBlockEntityTagQuery(ServerboundBlockEntityTagQueryPacket serverboundBlockEntityTagQueryPacket);
+
+	void handleSetJigsawBlock(ServerboundSetJigsawBlockPacket serverboundSetJigsawBlockPacket);
+
+	void handleJigsawGenerate(ServerboundJigsawGeneratePacket serverboundJigsawGeneratePacket);
+
+	void handleChangeDifficulty(ServerboundChangeDifficultyPacket serverboundChangeDifficultyPacket);
+
+	void handleChangeGameMode(ServerboundChangeGameModePacket serverboundChangeGameModePacket);
+
+	void handleLockDifficulty(ServerboundLockDifficultyPacket serverboundLockDifficultyPacket);
+
+	void handleChatSessionUpdate(ServerboundChatSessionUpdatePacket serverboundChatSessionUpdatePacket);
+
+	void handleConfigurationAcknowledged(ServerboundConfigurationAcknowledgedPacket serverboundConfigurationAcknowledgedPacket);
+
+	void handleChunkBatchReceived(ServerboundChunkBatchReceivedPacket serverboundChunkBatchReceivedPacket);
+
+	void handleDebugSubscriptionRequest(ServerboundDebugSubscriptionRequestPacket serverboundDebugSubscriptionRequestPacket);
+
+	void handleClientTickEnd(ServerboundClientTickEndPacket serverboundClientTickEndPacket);
+}

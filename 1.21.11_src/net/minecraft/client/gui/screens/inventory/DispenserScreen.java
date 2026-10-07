@@ -1,0 +1,38 @@
+package net.minecraft.client.gui.screens.inventory;
+
+import net.fabricmc.api.EnvType;
+import net.fabricmc.api.Environment;
+import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.renderer.RenderPipelines;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.inventory.DispenserMenu;
+
+@Environment(EnvType.CLIENT)
+public class DispenserScreen extends AbstractContainerScreen<DispenserMenu> {
+	private static final Identifier CONTAINER_LOCATION = Identifier.withDefaultNamespace("textures/gui/container/dispenser.png");
+
+	public DispenserScreen(DispenserMenu dispenserMenu, Inventory inventory, Component component) {
+		super(dispenserMenu, inventory, component);
+	}
+
+	@Override
+	protected void init() {
+		super.init();
+		this.titleLabelX = (this.imageWidth - this.font.width(this.title)) / 2;
+	}
+
+	@Override
+	public void render(GuiGraphics guiGraphics, int i, int j, float f) {
+		super.render(guiGraphics, i, j, f);
+		this.renderTooltip(guiGraphics, i, j);
+	}
+
+	@Override
+	protected void renderBg(GuiGraphics guiGraphics, float f, int i, int j) {
+		int k = (this.width - this.imageWidth) / 2;
+		int l = (this.height - this.imageHeight) / 2;
+		guiGraphics.blit(RenderPipelines.GUI_TEXTURED, CONTAINER_LOCATION, k, l, 0.0F, 0.0F, this.imageWidth, this.imageHeight, 256, 256);
+	}
+}

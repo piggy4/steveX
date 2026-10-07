@@ -1,0 +1,33 @@
+package net.minecraft.client.gui.components;
+
+import net.fabricmc.api.EnvType;
+import net.fabricmc.api.Environment;
+import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.renderer.RenderPipelines;
+import net.minecraft.network.chat.CommonComponents;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.Identifier;
+
+@Environment(EnvType.CLIENT)
+public class ImageButton extends Button {
+	protected final WidgetSprites sprites;
+
+	public ImageButton(int i, int j, int k, int l, WidgetSprites widgetSprites, Button.OnPress onPress) {
+		this(i, j, k, l, widgetSprites, onPress, CommonComponents.EMPTY);
+	}
+
+	public ImageButton(int i, int j, WidgetSprites widgetSprites, Button.OnPress onPress, Component component) {
+		this(0, 0, i, j, widgetSprites, onPress, component);
+	}
+
+	public ImageButton(int i, int j, int k, int l, WidgetSprites widgetSprites, Button.OnPress onPress, Component component) {
+		super(i, j, k, l, component, onPress, DEFAULT_NARRATION);
+		this.sprites = widgetSprites;
+	}
+
+	@Override
+	public void renderContents(GuiGraphics guiGraphics, int i, int j, float f) {
+		Identifier identifier = this.sprites.get(this.isActive(), this.isHoveredOrFocused());
+		guiGraphics.blitSprite(RenderPipelines.GUI_TEXTURED, identifier, this.getX(), this.getY(), this.width, this.height);
+	}
+}

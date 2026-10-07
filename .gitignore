@@ -27,9 +27,6 @@ vendor/**/build/
 vendor/**/.gradle/
 vendor/**/run/
 
-# Decompiled Minecraft sources (local reference only — no build reads this; 6.6k files / 39 MB)
-1.21.11_src/
-
 # Python tooling artifacts
 __pycache__/
 *.pyc

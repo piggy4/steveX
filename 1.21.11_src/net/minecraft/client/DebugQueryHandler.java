@@ -1,0 +1,47 @@
+package net.minecraft.client;
+
+import java.util.function.Consumer;
+import net.fabricmc.api.EnvType;
+import net.fabricmc.api.Environment;
+import net.minecraft.client.multiplayer.ClientPacketListener;
+import net.minecraft.core.BlockPos;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.network.protocol.game.ServerboundBlockEntityTagQueryPacket;
+import net.minecraft.network.protocol.game.ServerboundEntityTagQueryPacket;
+import org.jspecify.annotations.Nullable;
+
+@Environment(EnvType.CLIENT)
+public class DebugQueryHandler {
+	private final ClientPacketListener connection;
+	private int transactionId = -1;
+	private @Nullable Consumer<CompoundTag> callback;
+
+	public DebugQueryHandler(ClientPacketListener clientPacketListener) {
+		this.connection = clientPacketListener;
+	}
+
+	public boolean handleResponse(int i, @Nullable CompoundTag compoundTag) {
+		if (this.transactionId == i && this.callback != null) {
+			this.callback.accept(compoundTag);
+			this.callback = null;
+			return true;
+		} else {
+			return false;
+		}
+	}
+
+	private int startTransaction(Consumer<CompoundTag> consumer) {
+		this.callback = consumer;
+		return ++this.transactionId;
+	}
+
+	public void queryEntityTag(int i, Consumer<CompoundTag> consumer) {
+		int j = this.startTransaction(consumer);
+		this.connection.send(new ServerboundEntityTagQueryPacket(j, i));
+	}
+
+	public void queryBlockEntityTag(BlockPos blockPos, Consumer<CompoundTag> consumer) {
+		int i = this.startTransaction(consumer);
+		this.connection.send(new ServerboundBlockEntityTagQueryPacket(i, blockPos));
+	}
+}

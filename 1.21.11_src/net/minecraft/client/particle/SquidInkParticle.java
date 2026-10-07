@@ -1,0 +1,71 @@
+package net.minecraft.client.particle;
+
+import net.fabricmc.api.EnvType;
+import net.fabricmc.api.Environment;
+import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.particles.SimpleParticleType;
+import net.minecraft.util.ARGB;
+import net.minecraft.util.RandomSource;
+
+@Environment(EnvType.CLIENT)
+public class SquidInkParticle extends SimpleAnimatedParticle {
+	SquidInkParticle(ClientLevel clientLevel, double d, double e, double f, double g, double h, double i, int j, SpriteSet spriteSet) {
+		super(clientLevel, d, e, f, spriteSet, 0.0F);
+		this.friction = 0.92F;
+		this.quadSize = 0.5F;
+		this.setAlpha(1.0F);
+		this.setColor(ARGB.redFloat(j), ARGB.greenFloat(j), ARGB.blueFloat(j));
+		this.lifetime = (int)(this.quadSize * 12.0F / (this.random.nextFloat() * 0.8F + 0.2F));
+		this.setSpriteFromAge(spriteSet);
+		this.hasPhysics = false;
+		this.xd = g;
+		this.yd = h;
+		this.zd = i;
+	}
+
+	@Override
+	public void tick() {
+		super.tick();
+		if (!this.removed) {
+			this.setSpriteFromAge(this.sprites);
+			if (this.age > this.lifetime / 2) {
+				this.setAlpha(1.0F - ((float)this.age - this.lifetime / 2) / this.lifetime);
+			}
+
+			if (this.level.getBlockState(BlockPos.containing(this.x, this.y, this.z)).isAir()) {
+				this.yd -= 0.0074F;
+			}
+		}
+	}
+
+	@Environment(EnvType.CLIENT)
+	public static class GlowInkProvider implements ParticleProvider<SimpleParticleType> {
+		private final SpriteSet sprites;
+
+		public GlowInkProvider(SpriteSet spriteSet) {
+			this.sprites = spriteSet;
+		}
+
+		public Particle createParticle(
+			SimpleParticleType simpleParticleType, ClientLevel clientLevel, double d, double e, double f, double g, double h, double i, RandomSource randomSource
+		) {
+			return new SquidInkParticle(clientLevel, d, e, f, g, h, i, ARGB.colorFromFloat(1.0F, 0.2F, 0.8F, 0.6F), this.sprites);
+		}
+	}
+
+	@Environment(EnvType.CLIENT)
+	public static class Provider implements ParticleProvider<SimpleParticleType> {
+		private final SpriteSet sprites;
+
+		public Provider(SpriteSet spriteSet) {
+			this.sprites = spriteSet;
+		}
+
+		public Particle createParticle(
+			SimpleParticleType simpleParticleType, ClientLevel clientLevel, double d, double e, double f, double g, double h, double i, RandomSource randomSource
+		) {
+			return new SquidInkParticle(clientLevel, d, e, f, g, h, i, -16777216, this.sprites);
+		}
+	}
+}

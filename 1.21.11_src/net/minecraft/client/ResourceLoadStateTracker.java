@@ -1,0 +1,108 @@
+package net.minecraft.client;
+
+import com.google.common.collect.ImmutableList;
+import com.mojang.logging.LogUtils;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.util.List;
+import net.fabricmc.api.EnvType;
+import net.fabricmc.api.Environment;
+import net.minecraft.CrashReport;
+import net.minecraft.CrashReportCategory;
+import net.minecraft.server.packs.PackResources;
+import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+
+@Environment(EnvType.CLIENT)
+public class ResourceLoadStateTracker {
+	private static final Logger LOGGER = LogUtils.getLogger();
+	private ResourceLoadStateTracker.@Nullable ReloadState reloadState;
+	private int reloadCount;
+
+	public void startReload(ResourceLoadStateTracker.ReloadReason reloadReason, List<PackResources> list) {
+		this.reloadCount++;
+		if (this.reloadState != null && !this.reloadState.finished) {
+			LOGGER.warn("Reload already ongoing, replacing");
+		}
+
+		this.reloadState = new ResourceLoadStateTracker.ReloadState(reloadReason, list.stream().map(PackResources::packId).collect(ImmutableList.toImmutableList()));
+	}
+
+	public void startRecovery(Throwable throwable) {
+		if (this.reloadState == null) {
+			LOGGER.warn("Trying to signal reload recovery, but nothing was started");
+			this.reloadState = new ResourceLoadStateTracker.ReloadState(ResourceLoadStateTracker.ReloadReason.UNKNOWN, ImmutableList.of());
+		}
+
+		this.reloadState.recoveryReloadInfo = new ResourceLoadStateTracker.RecoveryInfo(throwable);
+	}
+
+	public void finishReload() {
+		if (this.reloadState == null) {
+			LOGGER.warn("Trying to finish reload, but nothing was started");
+		} else {
+			this.reloadState.finished = true;
+		}
+	}
+
+	public void fillCrashReport(CrashReport crashReport) {
+		CrashReportCategory crashReportCategory = crashReport.addCategory("Last reload");
+		crashReportCategory.setDetail("Reload number", this.reloadCount);
+		if (this.reloadState != null) {
+			this.reloadState.fillCrashInfo(crashReportCategory);
+		}
+	}
+
+	@Environment(EnvType.CLIENT)
+	static class RecoveryInfo {
+		private final Throwable error;
+
+		RecoveryInfo(Throwable throwable) {
+			this.error = throwable;
+		}
+
+		public void fillCrashInfo(CrashReportCategory crashReportCategory) {
+			crashReportCategory.setDetail("Recovery", "Yes");
+			crashReportCategory.setDetail("Recovery reason", () -> {
+				StringWriter stringWriter = new StringWriter();
+				this.error.printStackTrace(new PrintWriter(stringWriter));
+				return stringWriter.toString();
+			});
+		}
+	}
+
+	@Environment(EnvType.CLIENT)
+	public enum ReloadReason {
+		INITIAL("initial"),
+		MANUAL("manual"),
+		UNKNOWN("unknown");
+
+		final String name;
+
+		ReloadReason(final String string2) {
+			this.name = string2;
+		}
+	}
+
+	@Environment(EnvType.CLIENT)
+	static class ReloadState {
+		private final ResourceLoadStateTracker.ReloadReason reloadReason;
+		private final List<String> packs;
+		ResourceLoadStateTracker.@Nullable RecoveryInfo recoveryReloadInfo;
+		boolean finished;
+
+		ReloadState(ResourceLoadStateTracker.ReloadReason reloadReason, List<String> list) {
+			this.reloadReason = reloadReason;
+			this.packs = list;
+		}
+
+		public void fillCrashInfo(CrashReportCategory crashReportCategory) {
+			crashReportCategory.setDetail("Reload reason", this.reloadReason.name);
+			crashReportCategory.setDetail("Finished", this.finished ? "Yes" : "No");
+			crashReportCategory.setDetail("Packs", () -> String.join(", ", this.packs));
+			if (this.recoveryReloadInfo != null) {
+				this.recoveryReloadInfo.fillCrashInfo(crashReportCategory);
+			}
+		}
+	}
+}
