@@ -27,6 +27,17 @@ vendor/**/build/
 vendor/**/.gradle/
 vendor/**/run/
 
+# Decompiled Minecraft sources (local reference only — no build reads this; 6.6k files / 39 MB)
+1.21.11_src/
+
 # Python tooling artifacts
 __pycache__/
 *.pyc
+
+# Vendored DeepSeek Harness (src/agent/deepseek-harness-master)
+# Entire subtree is tracked (~14000 files) because we modify it in-tree. Build
+# artifacts and dependencies are ignored by the harness's own nested .gitignore,
+# verified to cover: node_modules/ · lib/ · apps/web/dist/ · .env · .sessions/ ·
+# .storages/ · dist-exe/ · *.tsbuildinfo · .pnpm-store/.
+# Deliberately no path-level rules here: adding one would hide source we intend
+# to edit. Upstream github.com/deepseek-ai/deepseek-harness, v0.2.0-rc.2.
