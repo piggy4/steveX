@@ -91,10 +91,10 @@ final class VisionRegions {
     static Map<String, Map<String, Long>> readIndex(final Path storeDir) {
         final Map<String, Map<String, Long>> out = new LinkedHashMap<>();
         final Path idx = storeDir.resolve(INDEX_FILE_NAME);
-        if (!Files.isRegularFile(idx)) return out;
+        if (!Files.isRegularFile(idx)) return null;
         try {
             final CompoundTag root = NbtIo.readCompressed(idx, NbtAccounter.unlimitedHeap());
-            if (root == null) return out;
+            if (root == null) return null;
             final CompoundTag dims = root.getCompoundOrEmpty(KEY_DIMENSIONS);
             for (String dim : dims.keySet()) {
                 final CompoundTag regions = dims.getCompoundOrEmpty(dim);
@@ -108,6 +108,7 @@ final class VisionRegions {
             // v2.48.1：连 RuntimeException 一起接——截断 gzip 流抛的是非受检的 ReportedNbtException，
             // 只接 IOException 会漏过去崩服。此处按"空表"降级，调用方见空表即不推进 mtime、下轮重试。
             LOGGER.warn("[MemoryWorld] Failed to read region index {}: {}", idx, e.getMessage());
+            return null;
         }
         return out;
     }

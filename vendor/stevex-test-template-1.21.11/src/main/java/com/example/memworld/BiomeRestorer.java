@@ -168,7 +168,7 @@ public class BiomeRestorer {
         if (mtime.equals(lastIndexMtime)) return;
 
         final Map<String, Map<String, Long>> fresh = VisionRegions.readIndex(storeDir);
-        if (fresh.isEmpty()) return; // 半截写 / 损坏 → 保留旧 mtime，下轮重试
+        if (fresh == null) return; // 半截写 / 损坏 → 保留旧 mtime，下轮重试
         lastIndexMtime = mtime; // 只在成功读取后才推进
         readVersion++;
 
@@ -176,6 +176,7 @@ public class BiomeRestorer {
         int failed = 0;
         int changedCells = 0;
         int addedChunks = 0;
+        indexCache.keySet().removeIf(dim -> !fresh.containsKey(dim));
         for (final Map.Entry<String, Map<String, Long>> de : fresh.entrySet()) {
             final String dim = de.getKey();
             final String dimDirName = VisionRegions.dimDirName(dim);

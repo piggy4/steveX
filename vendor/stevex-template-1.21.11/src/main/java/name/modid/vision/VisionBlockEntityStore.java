@@ -275,6 +275,11 @@ public class VisionBlockEntityStore {
         index.clear();
         currentDimension = WorldsFile.LEGACY_DIMENSION;
         VisionRegions.deleteRecursively(storeDir);
+        try {
+            VisionRegions.writeIndex(storeDir, index);
+        } catch (IOException e) {
+            LOGGER.error("[Vision] Failed to publish empty region index after clear: {}", e.getMessage());
+        }
     }
 
     // ==================== 内部 ====================

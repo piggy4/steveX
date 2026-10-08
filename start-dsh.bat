@@ -72,7 +72,7 @@ goto :fail
 echo [ERROR] Dependencies are not installed. Run this first:
 echo.
 echo         cd /d "%HARNESS%"
-echo         CI=true pnpm install
+echo         set "CI=true" ^&^& pnpm install
 echo.
 goto :fail
 

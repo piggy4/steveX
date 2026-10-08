@@ -424,12 +424,18 @@ public class ContainerMemoryApplier {
         if (mtime.equals(lastIndexMtime)) return false;
 
         final Map<String, Map<String, Long>> fresh = VisionRegions.readIndex(storeDir);
-        if (fresh.isEmpty()) return false; // 半截写 / 损坏 → 保留旧 mtime，下轮重试
+        if (fresh == null) return false; // 半截写 / 损坏 → 保留旧 mtime，下轮重试
         lastIndexMtime = mtime; // 只在成功读取后才推进
 
         int reread = 0;
         int failed = 0;
         int dropped = 0;
+        for (final String dim : new ArrayList<>(indexCache.keySet())) {
+            if (fresh.containsKey(dim)) continue;
+            final Map<String, Map<BlockPos, PosRecord>> removed = byDim.remove(dim);
+            if (removed != null) dropped += removed.size();
+            indexCache.remove(dim);
+        }
         for (final Map.Entry<String, Map<String, Long>> de : fresh.entrySet()) {
             final String dim = de.getKey();
             final String dimDirName = VisionRegions.dimDirName(dim);
