@@ -152,28 +152,7 @@ public class VisionEntityStore {
 
         CompoundTag entitiesTag = new CompoundTag();
         for (VisionCollector.EntityLightSnapshot e : entities) {
-            CompoundTag entry = new CompoundTag();
-            entry.putInt(KEY_ID, e.id());
-            entry.putString(KEY_TYPE, e.typeId());
-            entry.put(KEY_POS, doubleList(e.x(), e.y(), e.z()));
-            entry.put(KEY_MOTION, doubleList(e.vx(), e.vy(), e.vz()));
-            entry.put(KEY_ROTATION, floatList(e.yaw(), e.pitch()));
-            entry.putBoolean(KEY_ON_GROUND, e.onGround());
-            entry.putFloat(KEY_HEALTH, e.health());
-            // v2.34：掉落物条目携带物品栈 tag（非 item 实体 / 空栈 → 无该键）。
-            if (e.item() != null) {
-                entry.put(KEY_ITEM, e.item());
-            }
-            // v2.35：展示实体条目携带整份可装载 NBT payload（非白名单类型 / 无 → 无该键）。
-            // 内容复原（§7.2）由记忆侧按 uuid 整份装载；此 tag 也天然承担"内容变更"指纹（§7.3）。
-            if (e.payload() != null) {
-                entry.put(KEY_NBT, e.payload());
-            }
-            // v2.41：活体条目携带全量属性（复原口径）——记忆侧 applyLiving 据此复原装备/名字/效果/体型/
-            // 姿态/着火。此 tag 也天然承担"属性变更"指纹（EntityData.fingerprint = records.toString）。
-            if (e.living() != null) {
-                entry.put(KEY_LIVING, e.living());
-            }
+            CompoundTag entry = entityEntry(e);
             entry.put(KEY_VIEW, buildView(e));
             entitiesTag.put(e.uuid().toString(), entry);
         }
@@ -214,6 +193,40 @@ public class VisionEntityStore {
         return entry.contains(KEY_VIEW) ? entry.getCompoundOrEmpty(KEY_VIEW) : null;
     }
 
+    /**
+     * 实体轻量快照 → 落盘条目（{@code entities.nbt} 的条目形态，<b>不含</b> {@code view}）。
+     *
+     * <p>v2.47（累积观测文件，见 docs/累积观测文件设计方案.md §3.3）：{@link EntityUnionStore} 复用
+     * <b>本实现</b>——union 条目的载荷键（{@code item} / {@code nbt} / {@code living}）要与本文件逐字
+     * 同形，共用一份是唯一能保证"逐字"的做法。{@code view}（agent 可见口径的薄摘要）只在本文件写出：
+     * union 的读者是 agent 且另有 {@code cells} 键，薄摘要对它是冗余。
+     */
+    static CompoundTag entityEntry(final VisionCollector.EntityLightSnapshot e) {
+        CompoundTag entry = new CompoundTag();
+        entry.putInt(KEY_ID, e.id());
+        entry.putString(KEY_TYPE, e.typeId());
+        entry.put(KEY_POS, doubleList(e.x(), e.y(), e.z()));
+        entry.put(KEY_MOTION, doubleList(e.vx(), e.vy(), e.vz()));
+        entry.put(KEY_ROTATION, floatList(e.yaw(), e.pitch()));
+        entry.putBoolean(KEY_ON_GROUND, e.onGround());
+        entry.putFloat(KEY_HEALTH, e.health());
+        // v2.34：掉落物条目携带物品栈 tag（非 item 实体 / 空栈 → 无该键）。
+        if (e.item() != null) {
+            entry.put(KEY_ITEM, e.item());
+        }
+        // v2.35：展示实体条目携带整份可装载 NBT payload（非白名单类型 / 无 → 无该键）。
+        // 内容复原（§7.2）由记忆侧按 uuid 整份装载；此 tag 也天然承担"内容变更"指纹（§7.3）。
+        if (e.payload() != null) {
+            entry.put(KEY_NBT, e.payload());
+        }
+        // v2.41：活体条目携带全量属性（复原口径）——记忆侧 applyLiving 据此复原装备/名字/效果/体型/
+        // 姿态/着火。此 tag 也天然承担"属性变更"指纹（EntityData.fingerprint = records.toString）。
+        if (e.living() != null) {
+            entry.put(KEY_LIVING, e.living());
+        }
+        return entry;
+    }
+
     /** Build the only representation that may cross the vision/entity API boundary. */
     private static CompoundTag buildView(final VisionCollector.EntityLightSnapshot e) {
         final CompoundTag view = new CompoundTag();
@@ -238,10 +251,15 @@ public class VisionEntityStore {
 
     // ==================== 内部 ====================
 
-    /** 整体覆盖写（当前维桶已更新，其余维桶由内存镜像带出）。 */
+    /**
+     * 整体覆盖写（当前维桶已更新，其余维桶由内存镜像带出）。
+     *
+     * <p>v2.48.1：<b>必须原子</b>——理由同 {@link VisionTerrainStore#writeFile()}：读方按 mtime 轮询，
+     * 非原子写会让它读到截断的 gzip 流，而那个异常是非受检的，读方拦不住会崩服。
+     */
     private void writeFile() {
         try {
-            NbtIo.writeCompressed(WorldsFile.wrap(currentDimension, worlds), filePath);
+            UnionSaveScheduler.writeAtomic(WorldsFile.wrap(currentDimension, worlds), filePath);
             LOGGER.debug("[Vision] Saved entities: {} dimension bucket(s), current={} → {}",
                     worlds.size(), currentDimension, filePath);
         } catch (IOException ex) {

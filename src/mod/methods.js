@@ -98,8 +98,8 @@ const METHODS = [
     ] },
 
   // ── 感知 / 查询（5）── 无参方法：params 填 {} 即可
-  { method: 'player', category: 'query', description: 'Player state (position/health/facing…)',
-    zh: '玩家状态：生命/食物/经验/坐标朝向/药水效果等，无参数', paramDefs: [] },
+  { method: 'player', category: 'query', description: 'Player state (vitals/flags/effects/attributes)',
+    zh: '玩家状态：生命/食物/经验/护甲/空气/状态标志/药水效果/**属性表**，无参数。**attributes** 是以**属性注册名**为键的表（如 minecraft:attack_damage），每项 {base, value, modifiers?}：**base**＝不含任何修饰符的基础值＝"玩家自身"的贡献，**value**＝此刻**实际生效**的最终值（已含装备与药水效果，且已 clamp 到该属性的上下限），**modifiers** 仅非空时给、每项 {id, amount, operation}——与 inventory/container/get 的 slots[].attributeModifiers **同名同义**（那个多一个 slot＝生效装备槽），可直接对照。三者都是**字符串**（两位小数），与 container/get 的进度类字段同一口径。**算例（铁剑）**：主手铁剑时 attributes["minecraft:attack_damage"] = {base:"1.00", value:"6.00", modifiers:[{id:"minecraft:base_attack_damage", amount:"5.00", operation:"add_value"}]}，而物品自己那一半读 slots[].attributeModifiers 的 amount＝"5.00" ⇒ 5.00 + base 1.00 = 6.00（＝界面上的"攻击伤害"）。**易错**：物品**已在主手**时 value 里**已经含**它，别再叠加一次；base + 物品修饰符只用于"这物品还没上手，想知道拿上会是多少"。**modifiers[].id 的来源**：minecraft:base_attack_damage/base_attack_speed＝**主手物品**；minecraft:effect.*＝**药水效果**（力量就是 attack_damage 上的 minecraft:effect.strength，+3/级，故它已体现在 value 里）；随机 UUID 形＝/attribute 或插件。modifier 只有 id/amount/operation、**不带来源对象**，只能解读到 id 这一层。**⚠️ 属性 ≠ 伤害**：Player.attack 里属性值只是**第一行**，之后还有锋利等附魔、攻击冷却、暴击 ×1.5——"这一剑砍多少"要自己叠。属性表是**完整已知集合**：没有的属性直接不出现（不是"未知"）；**非同步属性**（attack_damage/attack_knockback/follow_range/tempt_range）在服务端用 /attribute 改过 base 时客户端收不到更新。注意 **vitals.armor** = floor(attributes["minecraft:armor"].value)、**vitals.armorToughness** 与 attributes["minecraft:armor_toughness"].value 同值（精度差一位：前者 1 位、后者 2 位）。', paramDefs: [] },
   { method: 'inventory', category: 'query', description: 'Inventory contents',
     zh: '背包内容：主手/副手/护甲/36 格物品及其组件（附魔/耐久/药水的 potionContents、旗帜的 bannerPatterns 等），无参数', paramDefs: [] },
   { method: 'f3', category: 'query', description: 'F3 debug screen data',

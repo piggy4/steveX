@@ -1372,7 +1372,10 @@ gate(type) = min(removalMaxRayDist, max(0, (type.clientTrackingRange() - 1) × 1
 6. 超出门限：站在 ~90 格外看一个 6 区块追踪范围的类型（掉落物）→ 欠删（预期）；
 7. 诊断读数：`[Vision] entityPresence:` 行的 `unloaded` 非零属正常、`visibleSkipped` 恒应为 0（非零即"可见实体与直读不一致"的矛盾指示器，同 §15.7 第 3 条）。
 
-**次要发现（同源现象，未验证，待确认后另立）**：镜像世界 `entities/r.-1.0.mca` 区块 (-2,1) 共 8 个实体，而本会话启动时 `Entity sync … total 0 entities`、全会话只追踪 1 个 —— 余下 7 个（3 armor_stand / 2 item_frame / villager / zombie）**极可能是上一会话遗留的孤儿**：`EntityRestorer.onServerStart()` 只清 `appliedByDim`，世界里已保存的实体仍在，却再不会被收养 ⇒ 既永远无法被丢弃（不在 `uuids(dimension)` 里），也会在快照重新上报同一 uuid 时**被重复生成**。若确认，这对"重启后记忆世界实体只增不减"是独立缺陷，须另立章节。
+**次要发现（同源现象，~~未验证，待确认后另立~~ → 已确认，已修 v2.48.2，见 `展示实体内容记忆设计方案.md` §7.5）**：镜像世界 `entities/r.-1.0.mca` 区块 (-2,1) 共 8 个实体，而本会话启动时 `Entity sync … total 0 entities`、全会话只追踪 1 个 —— 余下 7 个（3 armor_stand / 2 item_frame / villager / zombie）**极可能是上一会话遗留的孤儿**：`EntityRestorer.onServerStart()` 只清 `appliedByDim`，世界里已保存的实体仍在，却再不会被收养 ⇒ 既永远无法被丢弃（不在 `uuids(dimension)` 里），也会在快照重新上报同一 uuid 时**被重复生成**。若确认，这对"重启后记忆世界实体只增不减"是独立缺陷，须另立章节。
+
+> **【2026-10-07 实测回填】** 缺陷已确认：本轮记忆端日志共 32 条 `Failed to add entity <uuid>`（22:01:39 / 22:02:00 / 22:02:22 / 22:04:10），即快照重报的 uuid 在记忆世界里已有同名实体、`addFreshEntity` 被原版拒绝。但**上文推测的"被重复生成"不成立** —— 原版按 UUID 强制唯一，重复实体根本进不了世界；真实症状是「反复尝试生成并失败 + 旧实体永不被管理（幽灵，只增不减）」。修法与认定语义的取舍见 §7.5
+（**已实机验证 ✅**：22:16 会话 17 条 vanilla 重 UUID 告警 → 0 失败、17 认领、其后 `moved` 正常）。
 
 ---
 

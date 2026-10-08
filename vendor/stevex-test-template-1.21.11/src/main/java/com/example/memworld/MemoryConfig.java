@@ -17,7 +17,7 @@ import org.slf4j.LoggerFactory;
  * <pre>{@code
  * {
  *   "worldName": "MemoryWorld",        // 记忆世界存档名 / 文件夹名
- *   "sourceFile": "",                  // 方块实体源 NBT 文件；留空则自动探测
+ *   "sourceFile": "",                  // 方块实体源【目录】（v2.48 起为按区拆分的目录，原 .nbt 单文件）；留空则自动探测
  *   "terrainFile": "",                 // 地形源 NBT 文件；留空则自动探测
  *   "entityFile": "",                  // 实体源 NBT 文件；留空则自动探测
  *   "pollIntervalTicks": 1,            // 每隔多少 tick 做一次源文件 mtime 检查（1 = 每 tick；
@@ -34,11 +34,10 @@ import org.slf4j.LoggerFactory;
  *   "memoryCellsFile": "",             // v2.23：memory_cells.bin 路径；留空自动探测
  *   "memorySpritesFile": "",           // v2.37（§7.13）：memory_sprites.bin 路径（sprite alpha 掩码表，
  *                                      //   独立文件 + 增量下发）；留空自动探测（与 cells 同级）
- *   "containerFile": "",               // v2.28（§5.2.2）：容器内容源 NBT 文件（containers.nbt）；留空自动探测
+ *   "containerFile": "",               // v2.28（§5.2.2）：容器内容源【目录】（containers/）；留空自动探测
  *   "containerReconcileOnPoll": true,  // v2.28：每轮 reconcile 覆写容器内容（权威还原玩家改动）；
  *                                      //   false = 仅文件变化时覆写（允许手动摆放实验）
- *   "biomeFile": ""                    // v2.31（§5）：群系源 NBT 文件（biomes.nbt）；留空则自动探测
- * }
+ *   "biomeFile": ""                    // v2.31（§5）：群系源【目录】（biomes/）；留空则自动探测
  * }</pre>
  */
 public class MemoryConfig {
@@ -75,12 +74,14 @@ public class MemoryConfig {
      *  留空则自动探测（与 memory_cells.bin 同级，采集侧读同一路径）。 */
     public String memorySpritesFile = "";
     // v2.28（§5.2.2）：容器内容记忆（独立交互通道，见 ContainerMemoryApplier）。
-    /** containers.nbt 自定义路径；留空则自动探测（源 block_entities.nbt 同级，采集侧写同一路径）。 */
+    /** v2.48：容器 store <b>目录</b>自定义路径（原 containers.nbt 文件）；留空则自动探测
+     *  （源 block_entities store 同级，采集侧写同一路径）。目录内含区文件 + {@code _index.nbt} + {@code ender.nbt}。 */
     public String containerFile = "";
     /** 每轮 reconcile 覆写容器内容（权威还原玩家改动，定案 C）；false = 仅文件变化时覆写。 */
     public boolean containerReconcileOnPoll = true;
-    // v2.31（§5）：生物群系独立通道（采集侧写 biomes.nbt，见 BiomeRestorer）。
-    /** biomes.nbt 自定义路径；留空则自动探测（与 terrain.nbt 同级，采集侧写同一路径）。 */
+    // v2.31（§5）：生物群系独立通道（采集侧写 biomes store，见 BiomeRestorer）。
+    /** v2.48：生物群系 store <b>目录</b>自定义路径（原 biomes.nbt 文件）；留空则自动探测
+     *  （与 terrain.nbt 同级，采集侧写同一路径）。目录内含区文件 + {@code _index.nbt}。 */
     public String biomeFile = "";
 
     private static MemoryConfig INSTANCE;
@@ -132,11 +133,11 @@ public class MemoryConfig {
             writeDefaultConfig(configFile);
         }
 
-        Path source = resolveSourceFile();
+        Path source = resolveBlockEntityDir();
         if (source != null) {
-            LOGGER.info("[MemoryWorld] Source NBT file: {}", source);
+            LOGGER.info("[MemoryWorld] Source store directory: {}", source);
         } else {
-            LOGGER.warn("[MemoryWorld] Source NBT file not found (gameDir={}). Run the stevex mod first to collect "
+            LOGGER.warn("[MemoryWorld] Source store directory not found (gameDir={}). Run the stevex mod first to collect "
                     + "vision data, or set 'sourceFile' in {}.", gameDir, configFile);
         }
     }
@@ -177,30 +178,51 @@ public class MemoryConfig {
     }
 
     /**
-     * 解析源 NBT 文件路径；找不到时返回 null（运行后会定期重试）。
-     *
-     * <p>探测顺序：配置的 sourceFile → 本客户端 stevex 的存储 → 兄弟项目（stevex-template）的运行目录。
+     * v2.48：三个累积 store 的目录名（与采集端 {@code VisionRegions.STORE_DIR_NAME} 逐一对应）。
+     * 分片前它们是同名 {@code .nbt} 单文件，现在是同名目录（内含 {@code _index.nbt} + 各维子目录）。
      */
-    public Path resolveSourceFile() {
+    private static final String BLOCK_ENTITY_DIR_NAME = "block_entities";
+    private static final String CONTAINER_DIR_NAME = "containers";
+    private static final String BIOME_DIR_NAME = "biomes";
+
+    /**
+     * 三个 store 目录共用的探测逻辑；找不到时返回 null（运行后会定期重试）。
+     *
+     * <p>探测顺序：配置覆盖 → 本客户端 stevex 的存储 → 兄弟项目（stevex-template）的运行目录
+     * （同级需 {@code ../..}）→ 上级嵌套的兄弟（{@code ..}）→ 配置目录。
+     *
+     * <p><b>v2.48 起配置覆盖项指向「目录」而非「文件」</b>（分片把每个 store 从一个 {@code .nbt}
+     * 变成了一个目录）。旧配置里写的是文件路径，此处会明确告知而不是静默走自动探测——静默会让
+     * 用户以为配置生效了、实际读的是别处。
+     */
+    private Path resolveStoreDir(final String configured, final String dirName) {
         if (Minecraft.getInstance() == null) return null;
 
-        if (sourceFile != null && !sourceFile.isBlank()) {
-            Path p = Path.of(sourceFile);
-            return Files.exists(p) ? p : null;
+        if (configured != null && !configured.isBlank()) {
+            final Path p = Path.of(configured);
+            if (Files.isDirectory(p)) return p;
+            LOGGER.warn("[MemoryWorld] Configured path '{}' is not a directory. Since v2.48 the source is a "
+                    + "region-split directory (`{}`), not a single .nbt file — fix it or leave it blank to auto-detect.",
+                    configured, dirName);
+            return null;
         }
 
-        Path gameDir = Minecraft.getInstance().gameDirectory.toPath();
-        // 候选路径：本客户端 stevex 存储 → 兄弟项目 run 目录（同级需 ../..）→ 上级嵌套的兄弟（..）→ 配置目录。
-        List<Path> candidates = List.of(
-                gameDir.resolve("stevex/vision/block_entities.nbt"),
-                gameDir.resolve("..").resolve("..").resolve("stevex-template-1.21.11").resolve("run/stevex/vision/block_entities.nbt"),
-                gameDir.resolve("..").resolve("stevex-template-1.21.11").resolve("run/stevex/vision/block_entities.nbt"),
-                gameDir.resolve("config").resolve("stevex-test").resolve("block_entities.nbt")
+        final Path gameDir = Minecraft.getInstance().gameDirectory.toPath();
+        final List<Path> candidates = List.of(
+                gameDir.resolve("stevex/vision").resolve(dirName),
+                gameDir.resolve("..").resolve("..").resolve("stevex-template-1.21.11").resolve("run/stevex/vision").resolve(dirName),
+                gameDir.resolve("..").resolve("stevex-template-1.21.11").resolve("run/stevex/vision").resolve(dirName),
+                gameDir.resolve("config").resolve("stevex-test").resolve(dirName)
         );
         for (Path c : candidates) {
-            if (Files.exists(c)) return c.normalize();
+            if (Files.isDirectory(c)) return c.normalize();
         }
         return null;
+    }
+
+    /** 解析方块实体源<b>目录</b>（{@code block_entities/}）；找不到时返回 null（运行后会定期重试）。 */
+    public Path resolveBlockEntityDir() {
+        return resolveStoreDir(sourceFile, BLOCK_ENTITY_DIR_NAME);
     }
 
     /**
@@ -256,57 +278,23 @@ public class MemoryConfig {
     }
 
     /**
-     * 解析容器内容源 NBT 文件（containers.nbt）；找不到时返回 null（运行后会定期重试）。
+     * 解析容器内容源<b>目录</b>（{@code containers/}，内含 {@code _index.nbt} 与 {@code ender.nbt}）；
+     * 找不到时返回 null（运行后会定期重试）。
      *
-     * <p>v2.28（§5.2.2）：交互内容通道的独立文件。探测顺序与 {@link #resolveSourceFile()} 相同，
-     * 只是把文件名换成 containers.nbt（与 block_entities.nbt 同目录 —— 采集侧写进同一 stevex/vision/）。
+     * <p>v2.28（§5.2.2）：交互内容通道的独立 store；v2.48 起为按区拆分的目录（§11），末影箱玩家态
+     * 单独落在该目录根下的 {@code ender.nbt}（它跨维全局、无坐标，进不了任何区文件）。
      */
-    public Path resolveContainerFile() {
-        if (Minecraft.getInstance() == null) return null;
-
-        if (containerFile != null && !containerFile.isBlank()) {
-            Path p = Path.of(containerFile);
-            return Files.exists(p) ? p : null;
-        }
-
-        Path gameDir = Minecraft.getInstance().gameDirectory.toPath();
-        List<Path> candidates = List.of(
-                gameDir.resolve("stevex/vision/containers.nbt"),
-                gameDir.resolve("..").resolve("..").resolve("stevex-template-1.21.11").resolve("run/stevex/vision/containers.nbt"),
-                gameDir.resolve("..").resolve("stevex-template-1.21.11").resolve("run/stevex/vision/containers.nbt"),
-                gameDir.resolve("config").resolve("stevex-test").resolve("containers.nbt")
-        );
-        for (Path c : candidates) {
-            if (Files.exists(c)) return c.normalize();
-        }
-        return null;
+    public Path resolveContainerDir() {
+        return resolveStoreDir(containerFile, CONTAINER_DIR_NAME);
     }
 
     /**
-     * 解析群系源 NBT 文件（biomes.nbt）；找不到时返回 null（运行后会定期重试）。
+     * 解析群系源<b>目录</b>（{@code biomes/}）；找不到时返回 null（运行后会定期重试）。
      *
-     * <p>v2.31（§5）：生物群系独立通道。探测顺序与 {@link #resolveSourceFile()} 相同，
-     * 只是把文件名换成 biomes.nbt（与 terrain.nbt 同目录 —— 采集侧写进同一 stevex/vision/）。
+     * <p>v2.31（§5）：生物群系独立通道；v2.48 起为按区拆分的目录（§11）。
      */
-    public Path resolveBiomeFile() {
-        if (Minecraft.getInstance() == null) return null;
-
-        if (biomeFile != null && !biomeFile.isBlank()) {
-            Path p = Path.of(biomeFile);
-            return Files.exists(p) ? p : null;
-        }
-
-        Path gameDir = Minecraft.getInstance().gameDirectory.toPath();
-        List<Path> candidates = List.of(
-                gameDir.resolve("stevex/vision/biomes.nbt"),
-                gameDir.resolve("..").resolve("..").resolve("stevex-template-1.21.11").resolve("run/stevex/vision/biomes.nbt"),
-                gameDir.resolve("..").resolve("stevex-template-1.21.11").resolve("run/stevex/vision/biomes.nbt"),
-                gameDir.resolve("config").resolve("stevex-test").resolve("biomes.nbt")
-        );
-        for (Path c : candidates) {
-            if (Files.exists(c)) return c.normalize();
-        }
-        return null;
+    public Path resolveBiomeDir() {
+        return resolveStoreDir(biomeFile, BIOME_DIR_NAME);
     }
 
     /**

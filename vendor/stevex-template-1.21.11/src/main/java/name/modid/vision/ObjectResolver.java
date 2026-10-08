@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.function.Consumer;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.ItemBlockRenderTypes;
@@ -430,9 +431,42 @@ public final class ObjectResolver {
         final Map<String, Object> entityStats = VisionCollector.getEntityStore().sync(
                 entities, agentPos, agentYaw, agentPitch, agentFov, worldTime, dimensionId);
 
+        // v2.47（累积观测文件，见 docs/累积观测文件设计方案.md §4.4）：两个**只给 agent 读**的累积文件。
+        // 挂载点选在此刻——blocks / entities / deletions / signalLossDeletions / entityDeletions 全部
+        // 就位，union 只是这些既有输出的又一个消费者，不改上游任何环节（设计 §8：判据一行不动）。
+        // 位置必须在各 store 的 sync **之后**：union 要并的是"本帧真正落了盘的那一份"，而上游 sync
+        // 正是在这里完成的。
+        // 两个文件都是纯本地副本：记忆端不知道它们存在，反向通道（两个 .bin）也一个字不动。
+        final Map<UUID, AABB> boxByUuid = new HashMap<>(snap.entities().size() * 2 + 1);
+        for (DepthCapture.EntitySnapshotData e : snap.entities()) {
+            boxByUuid.put(e.uuid(), e.box());
+        }
+        final Map<String, Object> terrainUnionStats = VisionCollector.getTerrainUnionStore().sync(
+                terrain, deletions, signalLossDeletions, dimensionId);
+        final Map<String, Object> entityUnionStats = VisionCollector.getEntityUnionStore().sync(
+                entities, boxByUuid, entityDeletions, BlockPos.containing(cam), dimensionId);
+        // 诊断（设计 §10 第 15/18/19 条同款）：只在**有事发生**时打一行——重复看到同一批方块/实体
+        // 每帧全零，打出来只会淹没真正有事的那几帧。
+        if (changed(terrainUnionStats) || changed(entityUnionStats)) {
+            LOGGER.info("[Vision] union: terrain[added={}, updated={}, removed={}, total={}] | "
+                            + "entity[added={}, updated={}, removed={}, total={}]",
+                    terrainUnionStats.get("added"), terrainUnionStats.get("updated"),
+                    terrainUnionStats.get("removed"), terrainUnionStats.get("total"),
+                    entityUnionStats.get("added"), entityUnionStats.get("updated"),
+                    entityUnionStats.get("removed"), entityUnionStats.get("total"));
+        }
+
         return new ResolveResult(terrain, blockEntities, entities, deletions, dimensionId,
                 terrainStats, beStats, entityStats,
                 Map.of("cells", biomeStats.cells(), "added", biomeStats.added()));
+    }
+
+    /** v2.47：union 的本次同步是否真的动了内容（added / updated / removed 任一非零）。 */
+    private static boolean changed(final Map<String, Object> unionStats) {
+        for (String key : new String[]{"added", "updated", "removed"}) {
+            if (unionStats.get(key) instanceof Integer n && n != 0) return true;
+        }
+        return false;
     }
 
     /**
@@ -492,19 +526,37 @@ public final class ObjectResolver {
     private static Set<BlockPos> visibleEntityCells(final DepthCapture.DepthSnapshot snap) {
         final Set<BlockPos> out = new HashSet<>();
         for (DepthCapture.EntitySnapshotData e : snap.entities()) {
-            final AABB box = e.box();
-            final int minX = Mth.floor(box.minX), maxX = Mth.floor(box.maxX);
-            final int minY = Mth.floor(box.minY), maxY = Mth.floor(box.maxY);
-            final int minZ = Mth.floor(box.minZ), maxZ = Mth.floor(box.maxZ);
-            for (int x = minX; x <= maxX; x++) {
-                for (int y = minY; y <= maxY; y++) {
-                    for (int z = minZ; z <= maxZ; z++) {
-                        out.add(new BlockPos(x, y, z));
-                    }
+            forEachBoxCell(e.box(), out::add);
+        }
+        return out;
+    }
+
+    /**
+     * 一个 AABB 覆盖的全部格 → 逐格回调。<b>格枚举口径的唯一实现</b>：{@code floor(min)..floor(max)}
+     * 三轴闭区间。
+     *
+     * <p>v2.47（累积观测文件）把这一口径提成单一实现——此前它已在三处被逐字复制：记忆端写候选
+     * （{@code MemoryCellReporter} 实体段）、本类的 {@link #visibleEntityCells}（双保险）、记忆端判全空
+     * （{@code EntityRestorer#allCellsEmpty}）。三处必须一致，否则"两边对同一实体的格集不一致，
+     * 双保险会假触发"。记忆端在另一个 mod、无法共用代码（那份只能继续靠约定），但<b>采集端内部</b>
+     * 至少不该再分叉：{@link EntityUnionStore} 的 {@code cells} 与 {@link #visibleEntityCells} 现在共用
+     * 本方法。
+     *
+     * <p>注意盒的语义：快照盒是<b>渲染帧插值</b>后的盒（{@code DepthCapture} 在采集帧按 partialTick 平移，
+     * 与 {@code x/y/z} 用同一个 lerp），而查询读的是 tick 位置——快移实体可能因此多覆盖一格。这是
+     * {@code entityPresence} 日志里 {@code visibleSkipped} 零星非零的良性来源（欠删，方向安全）。
+     */
+    static void forEachBoxCell(final AABB box, final Consumer<BlockPos> consumer) {
+        final int minX = Mth.floor(box.minX), maxX = Mth.floor(box.maxX);
+        final int minY = Mth.floor(box.minY), maxY = Mth.floor(box.maxY);
+        final int minZ = Mth.floor(box.minZ), maxZ = Mth.floor(box.maxZ);
+        for (int x = minX; x <= maxX; x++) {
+            for (int y = minY; y <= maxY; y++) {
+                for (int z = minZ; z <= maxZ; z++) {
+                    consumer.accept(new BlockPos(x, y, z));
                 }
             }
         }
-        return out;
     }
 
     /** 由实体快照构建 SectionPos 桶（§5.3 粗过滤；桶与命中盒统一 inflate 0.5，v2.10）。 */
