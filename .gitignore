@@ -27,6 +27,9 @@ vendor/**/build/
 vendor/**/.gradle/
 vendor/**/run/
 
+# Decompiled Minecraft sources (local reference only — not tracked, no build reads this)
+1.21.11_src/
+
 # Python tooling artifacts
 __pycache__/
 *.pyc
