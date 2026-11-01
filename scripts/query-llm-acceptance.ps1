@@ -1,13 +1,17 @@
 param([switch]$Configure, [ValidateSet('query', 'craft', 'craft-stress', 'bugs')][string]$Suite = 'query', [string]$Case, [int]$MaxModelCalls = 0, [switch]$Standalone)
 $ErrorActionPreference = 'Stop'
+# A desktop launched from PowerShell 7 can pass its module paths to Windows
+# PowerShell 5.1. Load this host's Security module before asking for the key.
+Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
 $root = Split-Path -Parent $PSScriptRoot
 $secretPath = Join-Path $root 'runs\secrets\deepseek-key.dpapi'
 if ($Configure) {
     $secret = Read-Host 'DeepSeek API key (hidden)' -AsSecureString
-    if ($secret.Length -eq 0) { throw 'Empty API key' }
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $secretPath) | Out-Null
-    $secret | ConvertFrom-SecureString | Set-Content -LiteralPath $secretPath -Encoding ASCII
-    $secret.Dispose()
+    try {
+        if ($secret.Length -eq 0) { throw 'Empty API key' }
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $secretPath) | Out-Null
+        $secret | ConvertFrom-SecureString | Set-Content -LiteralPath $secretPath -Encoding ASCII
+    } finally { $secret.Dispose() }
     Write-Host 'Key saved with Windows DPAPI. No model calls made.'
     exit 0
 }
