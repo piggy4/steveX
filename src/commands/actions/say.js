@@ -9,6 +9,6 @@ module.exports = {
     if (args.length < 1) return { ok: false, error: 'Usage: say <message>' }
     const message = args.join(' ')
     await bot.chat(message)
-    return { ok: true, confirmed:false, output: `Chat/command send request: ${JSON.stringify(message)}; server execution/delivery not confirmed` }
+    return { ok: true, confirmed:false, output: 'Chat/command send requested; server execution/delivery not confirmed' }
   }
 }

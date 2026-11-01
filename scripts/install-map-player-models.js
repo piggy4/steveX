@@ -6,6 +6,15 @@ const hashes={
   'items-registry.json':'182544995faa1c1619c7d17fcdca48d9fdb3d5c4ac48cf119b85d98314cbb316',
   LICENSE:'3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986'
 }
+function syncPlayerLabel(app, instance) {
+  const marker = app.playerMarkerManager?.getPlayerMarker(instance.data.uuid)
+  if (!marker || marker.data?.foreign || !marker.visible) return
+  // CSS2D projects matrixWorld, not position. Follow the interpolated model even
+  // after movement stops, instead of BlueMap's separate one-second animation.
+  const p = instance.currentPos
+  marker.position.set(p.x, p.y + 1.8, p.z)
+  marker.updateMatrixWorld(true)
+}
 function adapt(source) {
   let js=source.replaceAll('\r\n','\n')
   const replace=(from,to)=>{if(js.split(from).length!==2)throw Error('Upstream adaptation mismatch: '+from.slice(0,80));js=js.replace(from,to)}
@@ -24,6 +33,8 @@ function adapt(source) {
   replace('        function registerAnimatedTexture(img, canvas, ctx, tex, mcmetaUrl) {',
     '        function registerAnimatedTexture(img, canvas, ctx, tex, mcmetaUrl) { return; // Lightweight monitor: first texture frame only.\n')
   replace('            glintUniforms.uGlintTime.value += delta;','            // Enchantment glint is not enabled in the appearance feed.')
+  replace('                parts.root.position.copy(currentPos);',
+    '                parts.root.position.copy(currentPos);\n                ('+syncPlayerLabel.toString()+')(app, instance);')
   replace('        function updateScene() {',`        function updateScene() {
             if (stopped || document.hidden) return;
             app.mapViewer.redraw(); // Keep BlueMap itself on foreground vsync, not its idle 20 FPS.`)
@@ -100,4 +111,4 @@ if(require.main===module) {
   if(!webroot||!clientJar)throw Error('Usage: node scripts/install-map-player-models.js <BlueMap webroot> <1.21.11 client jar>')
   install(webroot,clientJar).then(console.log).catch(error=>{console.error(error);process.exitCode=1})
 }
-module.exports={adapt,install,hashes}
+module.exports={adapt,install,hashes,syncPlayerLabel}

@@ -21,6 +21,10 @@ function healthState(bot) {
     }
   } else if (!attribute && finite(bot?.maxHealth) && bot.maxHealth > 0) {
     maxHealth = bot.maxHealth
+  } else if (!attribute && bot?.entity && finite(definition?.default) && definition.default > 0) {
+    // Vanilla does not send unchanged attributes on join. Its client uses the
+    // versioned registry default until an explicit attribute override arrives.
+    maxHealth = definition.default
   }
   const absorptionKey = bot?.registry?.entitiesByName?.player?.metadataKeys?.indexOf('player_absorption') ?? -1
   const absorption = absorptionKey >= 0 ? bot?.entity?.metadata?.[absorptionKey] : undefined

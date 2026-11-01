@@ -9,7 +9,9 @@ module.exports = {
   usage: 'hp',
   async handler(bot) {
     const state = healthState(bot)
-    const { effectText = '', ...effects } = require('../../agent/hud_effects').hudEffects(bot, ['regeneration','poison','wither','health_boost','absorption'])
+    const names = ['regeneration','poison','wither','health_boost']
+    if (state.absorption > 0) names.push('absorption')
+    const { effectText = '', ...effects } = require('../../agent/hud_effects').hudEffects(bot, names)
     const extra = state.absorption > 0 ? ` | Absorption: ${state.absorption}` : ''
     return { ok: true, output: `HP: ${state.health?.toFixed(1) ?? '?'}/${state.maxHealth ?? '?'}${extra}${effectText}`, ...state, ...effects }
   }

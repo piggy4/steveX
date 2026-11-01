@@ -3,7 +3,7 @@
  */
 module.exports = {
   name: 'findplayer',
-  description: 'Find players by name and show their info',
+  description: 'Find players by name; coordinates and current dimension are available only for valid entities still tracked locally. Untracked tab-list names may be in another dimension or out of range; never navigate using an old position',
   usage: 'findplayer <name>',
   async handler(bot, args) {
     if (args.length < 1) return { ok: false, error: 'Usage: findplayer <name>' }
@@ -16,10 +16,14 @@ module.exports = {
     if (matches.length === 0) return { ok: true, output: `No players matching "${search}"`, players: [] }
 
     const players = matches.map(p => {
-      const pos = p.entity?.position
-      const loaded = pos && [pos.x, pos.y, pos.z].every(Number.isFinite)
+      const entity = p.entity
+      const pos = entity?.position
+      // Tab-list entries can outlive entity tracking, including across respawns/dimensions.
+      const loaded = require('../../agent/player_tracking').isTrackedPlayerEntity(bot, entity)
+        && pos && [pos.x, pos.y, pos.z].every(Number.isFinite)
       return { name: p.username, loaded: !!loaded,
-        ...(loaded ? { position: { x: pos.x, y: pos.y, z: pos.z } } : {}),
+        ...(loaded ? { position: { x: pos.x, y: pos.y, z: pos.z },
+          ...(typeof bot.game?.dimension === 'string' ? { dimension: bot.game.dimension } : {}) } : {}),
         ...(Number.isFinite(p.ping) ? { ping: p.ping } : {}) }
     })
 
