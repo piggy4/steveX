@@ -1,4 +1,4 @@
-param([switch]$Configure, [ValidateSet('query', 'craft', 'craft-stress')][string]$Suite = 'query', [string]$Case, [int]$MaxModelCalls = 0, [switch]$Standalone)
+param([switch]$Configure, [ValidateSet('query', 'craft', 'craft-stress', 'bugs')][string]$Suite = 'query', [string]$Case, [int]$MaxModelCalls = 0, [switch]$Standalone)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $secretPath = Join-Path $root 'runs\secrets\deepseek-key.dpapi'
@@ -19,20 +19,20 @@ try {
     $secret = (Get-Content -LiteralPath $secretPath -Raw).Trim() | ConvertTo-SecureString
     $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
     $env:DEEPSEEK_API_KEY = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
-    $scriptName = if ($Suite -eq 'query') { 'query-llm-acceptance.js' } else { 'craft-llm-acceptance.js' }
+    $scriptName = if ($Suite -eq 'bugs') { 'api-bug-acceptance.js' } elseif ($Suite -eq 'query') { 'query-llm-acceptance.js' } else { 'craft-llm-acceptance.js' }
     $runArgs = @('--live')
     if ($Standalone) {
-        if ($Suite -eq 'query') { throw '-Standalone is only supported with crafting suites' }
+        if ($Suite -in @('query', 'bugs')) { throw '-Standalone is only supported with crafting suites' }
         $runArgs += '--standalone'
     }
     if ($Suite -eq 'craft-stress') { $runArgs += '--stress' }
     if ($MaxModelCalls -lt 0) { throw 'MaxModelCalls cannot be negative' }
     if ($MaxModelCalls -gt 0) {
-        if ($Suite -eq 'query') { throw '-MaxModelCalls is only supported with crafting suites' }
+        if ($Suite -in @('query', 'bugs')) { throw '-MaxModelCalls is only supported with crafting suites' }
         $runArgs += @('--max-model-calls', [string]$MaxModelCalls)
     }
     if ($Case) {
-        if ($Suite -eq 'query') { throw '-Case is only supported with crafting suites' }
+        if ($Suite -in @('query', 'bugs')) { throw '-Case is only supported with crafting suites' }
         $runArgs += @('--case', $Case)
     }
     & node (Join-Path $PSScriptRoot $scriptName) @runArgs

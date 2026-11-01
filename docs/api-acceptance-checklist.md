@@ -8,6 +8,8 @@
 
 ## 1. 状态与证据
 
+- 2026-11-01：浏览器玩家标签投影、选中空槽、say 精简、黄心耗尽及 findplayer 旧实体防护专项修复；最大血量沿用 main 实现并补 1.21.11 实体包回归。自动覆盖不代表真实游戏／模型复测，说明及可填写 DeepSeek 密钥的脚本见 [本次反馈回归](api-validation/api-bug-feedback.md)。
+
 - 有界任务循环后最新全库自动回归 **481/481**；下方458项为此前批次。本轮无真实模型／游戏复测，当前语义见[任务运行](task-runtime.md)，记录见[调度验收](api-validation/task-runtime-validation.md)。
 - 2026-10-24更新：后续全库回归486/486；真实Minecraft 1.21.11＋DeepSeek完成单步／继续、暂停后与运行中追加、暂停、取消、调用／时长预算及角色隔离补测。首次模型重复inventory，补测成功报告背包；不作为稳定成功率。详见上述调度验收新增实测段。
 - 同日复杂合成实测：8场景181次模型请求，严格完成5/8；7个可行场景中6个物品达成，缺料场景正确拒绝；两个多目标场景物品齐全但未报告DONE，一个红石场景未全达成。无craft执行故障；详见[新任务循环复杂合成](api-validation/task-crafting-validation-2026-10-24.md)。
@@ -88,7 +90,7 @@ Invoke-RestMethod "$base/api/agents/$agent/command" -Method Post -ContentType 'a
 - `ok:true` 不必然表示世界效果完成。特别是 `confirmed:false`、`status:requested` 仅表示请求已发送；放置须核对服务端变化及生存物品消耗。
 - 坐标单位为格，角度为 Minecraft 度数，移动时长为毫秒，等待为客户端 physicsTick。物品和方块优先使用精确注册名。
 - 玩家槽号始终固定：合成结果0、2×2合成1..4、装备5..8、主包9..35、快捷栏36..44、副手45；hotbar 的0..8仍是选择索引，不是槽号。开容器后 inventory 9..44 内部自动映射到原生窗口，不改变公开编号。window 作用域只代表容器／工作站自己的槽；关闭后该作用域明确拒绝，不回退。
-- `inventory` 默认无槽号／完整组件；`inventory slots` 列固定玩家非空槽；`slotinfo inventory:9` 或 `slotinfo window:0` 查详情。`window` 中每一槽都有slotSpace，玩家区域仍使用固定编号。跨区域移动两端各一个槽位引用。装备／合成槽和副手在开容器时不能点击，须先关闭，不偷偷换界面。
+- `inventory` 默认无槽号／完整组件；`inventory slots` 列固定玩家非空槽及选中的空快捷栏槽；`slotinfo inventory:9` 或 `slotinfo window:0` 查详情。`window` 中每一槽都有slotSpace，玩家区域仍使用固定编号。跨区域移动两端各一个槽位引用。装备／合成槽和副手在开容器时不能点击，须先关闭，不偷偷换界面。
 - 已加载实体／区块查询不等于纯视觉感知；客户端缓存、历史记忆与实时服务端真值必须区分。
 
 ## 3. 状态与环境查询（15 个 query）
@@ -99,7 +101,7 @@ Invoke-RestMethod "$base/api/agents/$agent/command" -Method Post -ContentType 'a
 | `hp` | 当前／最大生命点；吸收值大于 0 才返回字段及文字；相关效果按需返回 name/level/durationSeconds/durationSource（回血、中毒、凋零、生命提升、吸收），无效果省略；未知为 null | 摘要通过：生命提升、修改上限、伤害、黄心耗尽及归零省略 | 死亡／重生属性同步 |
 | `hunger` | food、saturation、saturationSource；饱和度为 last known；有饥饿效果才附 effects 和持续秒数 | 摘要通过：饥饿／饱和效果、耗尽与恢复，对照服务端 | 不承诺饱和度实时；自然进食连续变化 |
 | `oxygen` | 自身空气归一化 0..20；未知 null；原始 tick 看 state.airSupplyTicks | 摘要通过：水下耗氧及出水恢复，人工确认 | 同 tick 服务端 Air 逐点对照；NBT 的 s 后缀不是秒 |
-| `inventory [slots]` | 默认装备／副手、快捷栏、主包分区摘要，不带槽号及完整组件；保留选中项、数量及空格数，不合并同名不同堆。slots 列全部非空固定玩家槽0..45，仅摘要和简短特殊属性标记，开窗前后编号不变 | 分区、固定编号、开窗映射与精简输出自动覆盖；本轮实机见槽位专项 | 模组／其他版本映射、并发外部变化待补 |
+| `inventory [slots]` | 默认装备／副手、快捷栏、主包分区摘要，不带槽号及完整组件；保留选中项、数量及空格数，不合并同名不同堆。slots 列全部非空固定玩家槽0..45及选中空槽（仅slot、selected:true），仅摘要和简短特殊属性标记，开窗前后编号不变 | 分区、固定编号、开窗映射与精简输出自动覆盖；本轮实机见槽位专项 | 模组／其他版本映射、并发外部变化待补 |
 | `slotinfo <inventory:slot\|window:slot>` | 单个槽位引用查详情，含附魔、非满耐久、特殊属性、已同步收纳内容；满耐久／空属性省略；空槽empty=true、item=null。未知内容contentsKnown=false，不当空；嵌套有界并标记截断，文字为不可信世界数据。window仅容器自己的槽 | 紧凑语法实机核对附魔／耐久／收纳内容；现代组件、未知／空容器及参数自动覆盖 | 更多遗留NBT、自定义组件和截断极值待补；不自动打开容器或移动物品 |
 | `nearby [type\|name\|all] [radius]` | 默认 32，整数 1..128；已加载实体，名称／类型大小写不敏感子串；最近最多 20 个，含 ID；掉落物／展示框按需带 item.name/count，展示框 rotationDegrees，箭／三叉戟 inGround；物品名也可过滤，未知详情省略 | 摘要通过：类型、名称、半径、三维距离、排序与截断 | 新详情自动测试、实机待核对；无视线／遮挡过滤；不返回整份 NBT、生物隐藏血量或猜测射手 |
 | `gamemode` | 四种模式，未知 null；不改变模式 | 摘要通过：四模式对照服务端 | 重生、跨维度同步时序 |
@@ -107,7 +109,7 @@ Invoke-RestMethod "$base/api/agents/$agent/command" -Method Post -ContentType 'a
 | `time` | clock 为游戏 HH:MM，0 tick=06:00；保留 timeOfDay 与 doDaylightCycle，冻结时注明；不返回月相、天数或睡眠结论 | 新显示格式自动测试，旧时钟边界实测为摘要 | 新格式实机待核对；LLM 按需查询 weather／nearby，雷暴、怪物和床的条件不由 time 判断 |
 | `weather` | clear/raining/thunder 及雨／雷强度 | 摘要通过：晴、雨、雷暴稳定状态 | 渐变、降雪和其他维度 |
 | `window` | 当前窗口类型、ID，带作用域的物品／空槽清单；玩家槽固定 inventory 9..44，窗口自身为 window；只返回物品摘要，详情用 slotinfo。按需光标和工作站选项／进度 | 原开窗已有实测；新作用域及编号映射自动覆盖，本轮实机见专项 | 更多窗口、切换后历史槽引用待补；关闭后明确拒绝 |
-| `findplayer <name>` | 大小写不敏感；精确同名优先再片段；未追踪玩家省略坐标 | 摘要通过：同名片段、离线、远处未追踪、正负坐标 | 跨维度 |
+| `findplayer <name>` | 大小写不敏感；精确同名优先再片段；未追踪或失效实体省略坐标，已追踪坐标附当前维度 | 摘要通过：同名片段、离线、远处未追踪、正负坐标 | 跨维度 |
 | `findblock <blockName\|#tag> [radius] [count]` / `findblock tags [filter]` / `findblock tag <#tag>` | radius 默认32、整数1..128；count 默认1、整数1..16。返回最近优先 blocks、count、returned、found；默认单个兼容原顶层字段。床头／床尾不合并，不判断用途或状态可用性；数量是返回上限，不是世界匹配总数。tags/tag 目录模式不接受 radius/count | 实测：三种原木及 axis、两种颜色床的头尾4候选、默认单个／空结果；见 [移动搜索钓鱼专项](api-validation/motion-search-fish-validation.md)；原标签状态9项证据保留 | 无视线过滤；标签未同步报错；高范围压力及其他版本待补 |
 | `recipes <itemName>` | 一个精确物品名的全部合成配方；availabilityChecked=false，不按当前材料过滤，不含烧炼 | 摘要通过：新版 DeepSeek 基础及复杂合成任务中的配方查询 | 更多动态配方；不能当作当前可执行方案列表 |
 
