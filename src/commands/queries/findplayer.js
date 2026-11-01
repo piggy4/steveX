@@ -19,7 +19,7 @@ module.exports = {
       const entity = p.entity
       const pos = entity?.position
       // Tab-list entries can outlive entity tracking, including across respawns/dimensions.
-      const loaded = entity?.isValid !== false && (!bot.entities || bot.entities[entity?.id] === entity)
+      const loaded = require('../../agent/player_tracking').isTrackedPlayerEntity(bot, entity)
         && pos && [pos.x, pos.y, pos.z].every(Number.isFinite)
       return { name: p.username, loaded: !!loaded,
         ...(loaded ? { position: { x: pos.x, y: pos.y, z: pos.z },

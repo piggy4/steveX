@@ -21,6 +21,7 @@ function protocolBot() {
 
 test('1.21.11 entity packets carry health boost, all five HUD effects and remaining yellow hearts', async () => {
   const bot = protocolBot()
+  assert.equal((await hp(bot, [])).maxHealth, 20, 'unchanged vanilla attributes use the versioned registry default')
   bot._client.emit('entity_update_attributes', { entityId: 1, properties: [
     { key: 'generic.max_health', value: 20, modifiers: [{ uuid: 'minecraft:effect.health_boost', amount: 8, operation: 0 }] }
   ] })
@@ -51,6 +52,17 @@ test('1.21.11 entity packets carry health boost, all five HUD effects and remain
   assert.equal((await hp(bot, [])).maxHealth, 20)
   assert.equal(manager.getStatus({ name: 'test' })[0].maxHealth, 20)
   bot.emit('end')
+})
+
+test('missing explicit max-health uses registry default, never a hardcoded fallback', async () => {
+  const bot = { health: 10, entity: { attributes: {} }, registry: { attributesArray: [
+    { name: 'maxHealth', resource: 'minecraft:max_health', default: 30 }
+  ] } }
+  assert.equal((await hp(bot, [])).maxHealth, 30)
+  bot.entity.attributes['generic.max_health'] = { value: 42, modifiers: [] }
+  assert.equal((await hp(bot, [])).maxHealth, 42)
+  bot.entity.attributes['generic.max_health'] = { value: NaN, modifiers: [] }
+  assert.equal((await hp(bot, [])).maxHealth, null, 'invalid override is unknown, not the default')
 })
 
 test('slots omit every ordinary empty slot but retain the selected empty slot across window mapping', async () => {
@@ -109,4 +121,27 @@ test('name tag updates the matrix used by CSS2D at the moving and final model po
   assert.equal(marker.projectedPosition.x, 12)
   const source = require('node:fs').readFileSync(require.resolve('../vendor/bluemap-player-models/player-models.js'), 'utf8')
   assert.ok(adapt(source).includes(syncPlayerLabel.toString()))
+})
+
+test('observer respawn invalidates retained entities until a new spawn, without requiring entity_destroy', async () => {
+  const bot = protocolBot(), entity = { id: 2, username: 'Alpha', position: new Vec3(10, 64, 10), isValid: true }
+  bot.players.Alpha = { username: 'Alpha', entity }
+  bot.entities[2] = entity
+  assert.equal((await findplayer(bot, ['Alpha'])).players[0].loaded, true)
+  bot._client.emit('respawn', {})
+  bot.game.dimension = 'the_nether'
+  let result = (await findplayer(bot, ['Alpha'])).players[0]
+  assert.equal(result.loaded, false)
+  assert.equal(Object.hasOwn(result, 'position'), false)
+  assert.equal(Object.hasOwn(result, 'dimension'), false)
+  assert.equal(bot.entities[2], entity, 'do not mutate Mineflayer entity storage')
+  const fresh = { ...entity, position: new Vec3(1, 70, 2) }
+  bot.entities[2] = fresh; bot.players.Alpha.entity = fresh
+  bot.emit('entitySpawn', fresh)
+  result = (await findplayer(bot, ['Alpha'])).players[0]
+  assert.equal(result.loaded, true)
+  assert.equal(result.dimension, 'the_nether')
+  assert.deepEqual(result.position, { x: 1, y: 70, z: 2 })
+  bot.emit('end')
+  assert.equal(bot._client.listenerCount('respawn'), 0)
 })
