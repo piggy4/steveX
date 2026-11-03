@@ -1,4 +1,9 @@
 function error(code,message){throw Object.assign(new Error(message),{code})}
+const playerSlotLayout={result:0,crafting:[1,4],head:5,torso:6,legs:7,feet:8,backpack:[9,35],hotbar:[36,44],offHand:45}
+function resultSlot(w) {
+  return Number.isInteger(w.craftingResultSlot)&&w.craftingResultSlot>=0?w.craftingResultSlot:
+    w.type==='minecraft:inventory'?0:null
+}
 function parseSlotRef(value) {
   const match=typeof value==='string'&&/^(inventory|window):(\d+)$/i.exec(value)
   if(!match||!Number.isSafeInteger(Number(match[2])))error('INVALID_SLOT_REFERENCE','Use inventory:<slot> or window:<slot>; bare numbers are not inferred')
@@ -50,4 +55,4 @@ function querySlot(bot,scope,slot) {
   return {item:slots[slot]??null,slotSpace:scope,slot,...(scope==='window'?{windowId:w.id,windowType:w.type}:{}),
     source:scope==='window'||(bot.currentWindow&&slot>=9&&slot<=44)?'current-window-cache':'player-inventory-cache'}
 }
-module.exports={resolveScope,playerSlots,querySlot,nativeSlot,logicalSlot,parseSlotRef}
+module.exports={resolveScope,playerSlots,querySlot,nativeSlot,logicalSlot,parseSlotRef,playerSlotLayout,resultSlot}

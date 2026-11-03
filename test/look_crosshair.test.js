@@ -39,6 +39,8 @@ test('look block rejects missing shapes/decimal grids; relative offsets floor fe
   assert.deepEqual({...((await handler(bot,['block','~','~1','~3'])).target)},{x:0,y:1,z:0})
   bot.blockAt=()=>null;assert.equal((await handler(bot,['block','0','1','0'])).errorCode,'BLOCK_UNAVAILABLE')
   bot.blockAt=()=>({name:'air',position:new Vec3(0,1,0),shapes:[]})
+  assert.equal((await handler(bot,['block','0','1','0'])).errorCode,'TARGET_IS_AIR')
+  bot.blockAt=()=>({name:'unknown_shape',position:new Vec3(0,1,0),shapes:[]})
   assert.equal((await handler(bot,['block','0','1','0'])).errorCode,'AIM_SHAPE_UNAVAILABLE')
   const f=fixture('chest');f.bot.entity.position=new Vec3(.5,0,-20)
   const r=await handler(f.bot,['block','0','1','0']);assert.equal(r.crosshair,null);assert.equal(r.targetMatched,false)

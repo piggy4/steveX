@@ -70,6 +70,8 @@ function describe(bot, { compact = false } = {}) {
   } : { windowId: w.id, type: w.type, windowSlotCount:w.inventoryStart, playerSlotRange:[9,44],
     source: 'mineflayer-window-cache', properties: { ...p },
     slots: w.slots.map((item, index) => {const data=itemView(item);if(data)delete data.slot;return {...require('./slot_scope').logicalSlot(w,index),item:data}}), cursor: itemView(w.selectedItem) }
+  const resultSlot=require('./slot_scope').resultSlot(w)
+  if(resultSlot!==null)data.resultSlot={...require('./slot_scope').logicalSlot(w,resultSlot),takeOnly:true}
   if (w.trades) data.trades = w.trades.map((t, index) => ({ index, input: view(t.inputItem1),
     secondInput: view(t.inputItem2), output: view(t.outputItem), price: t.realPrice,
     disabled: t.tradeDisabled, uses: t.nbTradeUses, maxUses: t.maximumNbTradeUses }))

@@ -61,6 +61,9 @@ function action(name,execute,{resolve,state}={}) {
 function emptyCursor(w) {if(w.selectedItem)fail('CURSOR_NOT_EMPTY','Empty the cursor first')}
 function ensureCurrent(bot,w,signal) {signal?.throwIfAborted();if(windowOf(bot)!==w)fail('WINDOW_CHANGED','Window changed; no further clicks sent')}
 async function move(bot,w,source,dest,count,signal) {
+  const result=require('./slot_scope').resultSlot(w)
+  if(dest===result)fail('RESULT_SLOT_READ_ONLY','Cannot place into an output slot; inventory hotbar is 36..44, not 0..8')
+  if(source===result)fail('RESULT_SLOT_REQUIRES_CLICK','Use slotclick to take a result; moveslot does not choose or repeat recipes')
   emptyCursor(w)
   const item=itemAt(w,source),target=itemAt(w,dest)
   if(source===dest)fail('SAME_SLOT','Source and destination must differ')
@@ -101,4 +104,4 @@ function inventoryRange(w) {
     fail('INVALID_WINDOW_RANGE','Invalid player inventory range')
   return [w.inventoryStart,w.inventoryEnd]
 }
-module.exports={action,fail,windowOf,itemAt,move,intoRange,inventoryRange,emptyCursor,ensureCurrent}
+module.exports={action,fail,windowOf,itemAt,move,intoRange,inventoryRange,emptyCursor,ensureCurrent,same}
