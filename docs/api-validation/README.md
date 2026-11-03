@@ -4,6 +4,7 @@
 
 | 记录 | 类型与范围 |
 | --- | --- |
+| [WQT API diagnostics follow-up](wqt-api-validation-2026-11-03.md) | Enchanted digging, output-slot preflight, cursor feedback and stable indices; 592 automated tests, 8 real Minecraft/DeepSeek scenario attempts |
 | [Scoped reliability maintenance](maintenance-2026-10-25.md) | Exception cleanup, entity rechecks, atomic config saves, local ETags, drag handling, dependency/test discovery cleanup; 546 automated checks |
 | [Held-use request boundaries](held-use-request-validation-2026-10-25.md) | User-confirmed manual acceptance; selected-hand requests, unsupported tools, instant vs sustained lifecycles; 26 automated inventory/use checks |
 | [Book gift and repeated inventory queries](book-gift-context-validation-2026-10-25.md) | Real DeepSeek two-page save and drop; server evidence and human screenshot; steps 24–26 audited against actual context, repetition distinguished from missing feedback and manual Continue |

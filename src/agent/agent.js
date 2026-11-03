@@ -65,6 +65,7 @@ class SteveXAgent {
     this.bot.loadPlugin(velocityCompatibility)
     this.bot.loadPlugin(spectatorCompatibility)
     this.bot.loadPlugin(raycastCompatibility)
+    this.bot.loadPlugin(require('./digging_compat').diggingCompatibility)
     this.bot.loadPlugin(require('./hud_effects').hudEffectsPlugin)
     this.bot.loadPlugin(require('./player_tracking').playerTrackingPlugin)
     this.registerEvents()
