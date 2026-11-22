@@ -7,20 +7,20 @@ const coordinate = value => finite(value) && Math.abs(Number(value)) <= Number.M
 const relativeCoordinate = value => value==='~'||coordinate(value.startsWith('~')?value.slice(1):value)
 const integer = (min, max = Number.MAX_SAFE_INTEGER) => value => /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) >= min && Number(value) <= max
 const registryName = value => /^(?:minecraft:)?[a-z0-9_]+$/i.test(value)
-const slotReference=value=>/^(inventory|window):\d+$/i.test(value)&&Number.isSafeInteger(Number(value.split(':')[1]))
+const slotReference=require('./slot_scope').isSlotRef
 const field = (name, check, expected, values) => ({ name, check, expected, values })
 const enumField = (name, values) => field(name, value => values.includes(value.toLowerCase()), values.join(' | '), values)
 const contracts = Object.fromEntries('pos hp hunger oxygen inventory gamemode xp time weather window jump stop collect'.split(' ').map(name => [name, { usage:name, min:0, fields:[] }]))
 Object.assign(contracts, {
   inventory:{usage:'inventory [slots]',min:0,fields:[enumField('mode',['slots'])]},
-  slotinfo:{usage:'slotinfo <inventory:slot|window:slot>',min:1,fields:[field('slot',slotReference,'inventory:<slot> or window:<slot>')]},
+  slotinfo:{usage:'slotinfo <ref>',min:1,fields:[field('slot',slotReference,'a typed slot reference')]},
   fish: {usage:'fish',min:0,fields:[]},
   attack: {usage:'attack <entityName|id>',min:1,fields:[field('target',()=>true,'entity name fragment or exact numeric id')]},
   collect: {usage:'collect [entityId]',min:0,fields:[field('entityId',integer(0),'nonnegative entity id')]},
-  slotclick: {usage:'slotclick <inventory:slot|window:slot> [left|right|shift-left]',min:1,fields:[field('slot',slotReference,'inventory:<slot> or window:<slot>'),enumField('button',['left','right','shift-left'])]},
-  moveslot: {usage:'moveslot <sourceRef> <destRef> [count]',min:2,fields:[field('source',slotReference,'inventory:<slot> or window:<slot>'),field('destination',slotReference,'inventory:<slot> or window:<slot>'),field('count',integer(1,64),'item count 1..64')]},
-  putaway: {usage:'putaway <inventory:slot|window:slot>',min:1,fields:[field('slot',slotReference,'inventory:<slot> or window:<slot>')]},
-  transfer: {usage:'transfer <deposit|withdraw> <sourceSlot> [count]',min:2,fields:[enumField('direction',['deposit','withdraw']),field('sourceSlot',integer(0),'direction-specific source slot'),field('count',integer(1,64),'item count 1..64')]},
+  slotclick: {usage:'slotclick <ref> [left|right|shift-left]',min:1,fields:[field('slot',slotReference,'a typed slot reference'),enumField('button',['left','right','shift-left'])]},
+  moveslot: {usage:'moveslot <sourceRef> <destRef> [count]',min:2,fields:[field('source',slotReference,'a typed slot reference'),field('destination',slotReference,'a typed slot reference'),field('count',integer(1,64),'item count 1..64')]},
+  putaway: {usage:'putaway <ref>',min:1,fields:[field('slot',slotReference,'a typed slot reference')]},
+  transfer: {usage:'transfer <deposit|withdraw> <sourceSlot> [count]',min:2,fields:[enumField('direction',['deposit','withdraw']),field('sourceSlot',slotReference,'explicit source reference'),field('count',integer(1,64),'item count 1..64')]},
   wake: {usage:'wake',min:0,fields:[]},
   respawn: {usage:'respawn',min:0,fields:[]},
   jump: {usage:'jump [durationMs]',min:0,fields:[field('durationMs',integer(1,30000),'integer milliseconds 1..30000')]},
@@ -40,9 +40,9 @@ Object.assign(contracts, {
   wait: { usage:'wait <ticks>', min:1, fields:[field('ticks',integer(1),'positive safe integer physics ticks')] },
   craft: { usage:'craft <itemName> [times] [auto|hand|table] [recipeIndex]', min:1, fields:[field('itemName',registryName,'exact registry name, optional minecraft: prefix'),field('times',integer(1,64),'integer recipe executions 1..64'),enumField('station',['auto','hand','table']),field('recipeIndex',v=>/^[1-9]\d*$/.test(v)&&Number.isSafeInteger(Number(v)),'positive safe integer catalog index')] },
   equip: { usage:'equip item <itemName> [destination] | equip slot <slot> [destination] | equip <itemName> [destination]', min:1, fields:[field('source',()=>true,'item name, item or slot'),field('selection',()=>true,'item name, slot or destination'),enumField('destination',['hand','head','torso','legs','feet','off-hand'])] },
-  hotbar: { usage:'hotbar <slot>', min:1, fields:[field('slot',integer(0,8),'integer quickbar index 0..8')] },
+  hotbar: { usage:'hotbar <index>', min:1, fields:[field('index',integer(1,9),'keyboard hotbar index 1..9')] },
   unequip: { usage:'unequip [hand|head|torso|legs|feet|off-hand]', min:0, fields:[enumField('destination',['hand','head','torso','legs','feet','off-hand'])] },
-  drop: {usage:'drop <itemName> [count] | drop slot <slot> [count]',min:1,fields:[field('itemName',registryName,'exact registry item name or slot'),field('selection',()=>true,'item count or fixed inventory slot 9..44'),field('count',integer(1),'positive item count')]},
+  drop: {usage:'drop <itemName> [count] | drop slot <slot> [count]',min:1,fields:[field('itemName',registryName,'exact registry item name or slot'),field('selection',()=>true,'item count or inventory: or hotbar: reference'),field('count',integer(1),'positive item count')]},
 })
 
 function normalizeFailure(name, value) {
@@ -67,8 +67,8 @@ function invalid(name, message, argument) {
 }
 function validateArguments(name, args) {
   if(name==='drop'){
-    if(!Array.isArray(args)||args.some(v=>typeof v!=='string'||!v||/\s/.test(v)))return invalid(name,'Expected exact name [count] or slot <9..44> [count]')
-    if(args[0]?.toLowerCase()==='slot')return args.length>=2&&args.length<=3&&integer(9,44)(args[1])&&(args[2]===undefined||integer(1)(args[2]))?null:invalid(name,'drop slot requires fixed player slot 9..44 and optional positive count')
+    if(!Array.isArray(args)||args.some(v=>typeof v!=='string'||!v||/\s/.test(v)))return invalid(name,'Expected exact name [count] or slot inventory: or hotbar: reference [count]')
+    if(args[0]?.toLowerCase()==='slot')return args.length>=2&&args.length<=3&&require('./slot_scope').storageIndex(args[1])>=0&&(args[2]===undefined||integer(1)(args[2]))?null:invalid(name,'drop slot requires inventory: or hotbar: reference and optional positive count')
     return args.length>=1&&args.length<=2&&registryName(args[0])&&(args[1]===undefined||integer(1)(args[1]))?null:invalid(name,'Expected exact item name and optional positive count')
   }
   if (name === 'findblock' && Array.isArray(args) && typeof args[0] === 'string' && ['tags','tag'].includes(args[0].toLowerCase())) {
@@ -77,7 +77,7 @@ function validateArguments(name, args) {
     if (args[1] !== undefined && (typeof args[1] !== 'string' || !(mode === 'tag' ? /^#(?:[a-z0-9_.-]+:)?[a-z0-9_./-]+$/i : /^[a-z0-9_./:#-]+$/i).test(args[1]))) return invalid(name, 'Invalid tag name/filter; tag lookup requires #')
     return null
   }
-  if (name === 'equip') return require('./equip_input').parseEquip(args) ? null : invalid(name, 'Use an exact item name or a player-inventory slot 9..44; destination: hand/head/torso/legs/feet/off-hand')
+  if (name === 'equip') return require('./equip_input').parseEquip(args) ? null : invalid(name, 'Use an exact item name or a inventory: or hotbar: reference; destination: hand/head/torso/legs/feet/off-hand')
   if (name === 'right' && Array.isArray(args) && typeof args[0] === 'string' && args[0].toLowerCase() === 'up' && args.length !== 1) return invalid(name, 'right up takes no hand argument')
   if (name === 'look') {
     const reason = require('./look_input').validateLook(args)

@@ -8,8 +8,9 @@ function parseEquip(args) {
   const destination = (args[explicit ? 2 : 1] || 'hand').toLowerCase()
   if (!destinations.has(destination)) return null
   if (mode === 'slot') {
-    if (!/^\d+$/.test(value) || Number(value) < 9 || Number(value) > 44) return null
-    return { mode, slot: Number(value), destination }
+    const slot=require('./slot_scope').storageIndex(value)
+    if(slot<0)return null
+    return { mode, slot, destination }
   }
   if (!/^(?:minecraft:)?[a-z0-9_]+$/i.test(value)) return null
   return { mode: 'item', name: value.toLowerCase().replace(/^minecraft:/, ''), destination }

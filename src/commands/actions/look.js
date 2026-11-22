@@ -3,7 +3,7 @@ const { Vec3 } = require('vec3')
 const { crosshairFeedback, blockAim } = require('../look_feedback')
 module.exports = {
   name: 'look',
-  description: 'Turn once; no movement, click or tracking. angle: Minecraft degrees (0 south, 90 west, -90 east, positive pitch down). at: exact world-space point, not a block-grid position. block: recommended before block interaction; integer grid coordinates, aims at the first supported shape box center. Buttons use selection boxes; others use registry collision boxes, not complete vanilla outlines; missing shapes fail. ~ offsets current angles/feet; block floors feet first. All modes return first crosshair block/entity within 4.5 blocks; block also returns targetMatched. Check these before clicking; ok means turned, not interaction success. No visible-face search, ^ or radians',
+  description: 'Turn once; no movement, click or tracking. angle: Minecraft degrees (0 south, 90 west, -90 east, positive pitch down). at: exact world-space point, not a block-grid position. block: recommended before block interaction; integer grid coordinates, aims at the first supported shape box center. For placement aim at existing support, not the empty destination. Buttons use selection boxes; others use registry collision boxes, not complete vanilla outlines; missing shapes fail. ~ offsets current angles/feet; block floors feet first. All modes return first crosshair block/entity within 4.5 blocks; block also returns targetMatched. Check these before clicking; ok means turned, not interaction success. No visible-face search, ^ or radians',
   usage: 'look angle <yaw> <pitch> | look at <x> <y> <z> | look block <x> <y> <z>',
   async handler(bot, args) {
     if (args[0] === 'angle') {
@@ -19,6 +19,7 @@ module.exports = {
     if(args[0]==='block') {
       const block=bot.blockAt(target)
       if(!block)return {ok:false,errorCode:'BLOCK_UNAVAILABLE',error:'Target block is not loaded',target}
+      if(['air','cave_air','void_air'].includes(block.name))return {ok:false,errorCode:'TARGET_IS_AIR',error:'Air has no selectable shape. For placement, aim at an existing support block, not the empty destination',target,block:block.name}
       const aim=blockAim(block)
       if(!aim)return {ok:false,errorCode:'AIM_SHAPE_UNAVAILABLE',error:'No supported selection/shape data for target; use look at with an explicit point',target}
       await bot.lookAt(aim.point)

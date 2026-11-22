@@ -20,7 +20,7 @@ test('inventory tooltips explicitly list direct and stored enchantments, levels 
   assert.match(text, /Enchantments:\n  sharpness 3/)
   assert.match(text, /Stored enchantments:\n  mending 1/)
   assert.match(text, /Durability: 1524 \/ 1561/)
-  assert.equal(context.itemTooltipText({ slot: 9, item: null }), 'Slot 9: Empty')
+  assert.equal(context.itemTooltipText({ ref: 'inventory:1', item: null }), 'Slot inventory:1: Empty')
 })
 
 test('tooltip data is escaped text and does not depend on native title timing', () => {

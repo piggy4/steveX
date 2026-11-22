@@ -31,9 +31,9 @@ test('compact window partitions all slots into occupied and empty while retainin
   bot.currentWindow.slots[27] = { name: 'book', count: 1, slot: 27, components: [{ type: 'writable_book_content', data: { pages: ['text'] } }] }
   const data = api.describe(bot, { compact: true })
   assert.equal(data.slotCount, 63)
-  assert.deepEqual(data.slots.map(i => [i.slotSpace,i.slot]), [['window',0],['window',26],['inventory',9]])
-  assert.deepEqual(data.slots[1], { name: 'pickaxe', count: 1, slotSpace:'window',slot: 26 })
-  const references=[...data.slots,...data.emptySlots].map(i=>i.slotSpace+':'+i.slot)
+  assert.deepEqual(data.slots.map(i => i.ref), ['storage_9x3:1','storage_9x3:27','inventory:1'])
+  assert.deepEqual(data.slots[1], { name: 'pickaxe', count: 1, ref:'storage_9x3:27' })
+  const references=[...data.slots,...data.emptySlots].map(i=>i.ref)
   assert.equal(new Set(references).size,63)
   for (const key of ['id', 'properties', 'source', 'cursor']) assert.equal(Object.hasOwn(data, key), false)
   bot.currentWindow.selectedItem = { name: 'diamond', count: 2 }
@@ -93,11 +93,11 @@ test('enchant operations delegate to upstream methods using the current window i
   w.enchantments = [{ level: 1 }]
   w.enchant = async value => calls.push(['enchant', value])
   w.takeTargetItem = async () => calls.push(['take'])
-  await native.enchant(bot, ['put', '9']); await native.enchant(bot, ['lapis', '10'])
+  await native.enchant(bot, ['put', 'inventory:1']); await native.enchant(bot, ['lapis', 'inventory:2'])
   await native.enchant(bot, ['choose', '0'])
   item(bot, 0, 'diamond_sword'); await native.enchant(bot, ['take'])
   assert.deepEqual(calls, [['put', 2], ['lapis', 3], ['enchant', 0], ['take']])
-  await assert.rejects(native.enchant(bot, ['lapis', '9']), /lapis/)
+  await assert.rejects(native.enchant(bot, ['lapis', 'inventory:1']), /lapis/)
   await assert.rejects(native.enchant(bot, ['choose', '3']), /choice/)
 })
 
@@ -107,18 +107,18 @@ test('anvil and furnace delegate complete operations and reject invalid slots/co
   let name, pair
   a.currentWindow.rename = async (value, text) => { assert.equal(value, first); name = text }
   a.currentWindow.combine = async (...values) => { pair = values }
-  await native.anvil(a, ['rename', '9', 'Test', 'Sword'])
-  await native.anvil(a, ['combine', '9', '10'])
+  await native.anvil(a, ['rename', 'inventory:1', 'Test', 'Sword'])
+  await native.anvil(a, ['combine', 'inventory:1', 'inventory:2'])
   assert.equal(name, 'Test Sword'); assert.deepEqual(pair.slice(0, 2), [first, second])
-  await assert.rejects(native.anvil(a, ['combine', '9', '9']), /different/)
+  await assert.rejects(native.anvil(a, ['combine', 'inventory:1', 'inventory:1']), /different/)
   const f = fixture('minecraft:furnace', 3)
   item(f, 3, 'raw_iron'); item(f, 2, 'iron_ingot', 1)
   let took = false
   f.clickWindow=async(slot,button)=>{const w=f.currentWindow;if(!w.selectedItem){w.selectedItem=w.slots[slot];w.slots[slot]=null}else if(button===1){w.slots[slot]={...w.selectedItem,count:(w.slots[slot]?.count||0)+1};if(--w.selectedItem.count===0)w.selectedItem=null}else{w.slots[slot]=w.selectedItem;w.selectedItem=null}}
   f.currentWindow.takeOutput = async () => { took = true }
-  await native.furnace(f, ['input', '9', '2']); await native.furnace(f, ['take', 'output'])
+  await native.furnace(f, ['input', 'inventory:1', '2']); await native.furnace(f, ['take','furnace:output'])
   assert.equal(f.currentWindow.slots[0].count, 2); assert.equal(took, true)
-  await assert.rejects(native.furnace(f, ['input', '9', '5']), /count/)
+  await assert.rejects(native.furnace(f, ['input', 'inventory:1', '5']), /count/)
 })
 
 test('selection waits for the correct server property and does not accept unrelated window updates', async () => {
@@ -151,13 +151,13 @@ test('crafter enabled boolean is inverse of disabled property and updates requir
   const bot = fixture('minecraft:crafter_3x3', 10)
   let packet
   bot._client.write = (name, body) => { packet = [name, body]; queueMicrotask(() => property(bot, body.slot_id, body.state ? 0 : 1)) }
-  await api.station(bot, ['crafter', '0', 'disabled'])
+  await api.station(bot, ['crafter', 'crafter:1', 'disabled'])
   assert.deepEqual(packet, ['set_slot_state', { slot_id: 0, window_id: 3, state: false }])
   assert.equal(api.describe(bot).disabledSlots[0], true)
-  await api.station(bot, ['crafter', '0', 'enabled'])
+  await api.station(bot, ['crafter', 'crafter:1', 'enabled'])
   assert.equal(packet[1].state, true)
   item(bot, 0)
-  await assert.rejects(api.station(bot, ['crafter', '0', 'disabled']), /empty/)
+  await assert.rejects(api.station(bot, ['crafter', 'crafter:1', 'disabled']), /empty/)
 })
 
 test('beacon validates tiers/payment and preserves zero-based effect IDs in packets', async () => {

@@ -35,9 +35,9 @@ function inventoryAction(name,execute) {
 }
 function dropAction(name) {
   return inventoryAction(name,async(bot,args,signal)=>{
-    const bySlot=args[0].toLowerCase()==='slot',slot=bySlot?Number(args[1]):null
+    const bySlot=args[0].toLowerCase()==='slot',slot=bySlot?require('./slot_scope').storageIndex(args[1]):null
     const item=bySlot?bot.inventory.slots[slot]:findItem(bot,args[0])
-    if(!item)return failure('EMPTY_SLOT',`Player inventory slot ${slot} is empty`)
+    if(!item)return failure('EMPTY_SLOT',`Slot ${args[1]} is empty`)
     if(item.ok===false)return item
     const selected=compactItemView(item),matching=bySlot?[item]:bot.inventory.items().filter(i=>sameItem(i,item))
     const rawCount=args[bySlot?2:1],requested=rawCount===undefined?item.count:Number(rawCount),available=matching.reduce((n,i)=>n+i.count,0)
@@ -55,7 +55,7 @@ function dropAction(name) {
       await bot.transfer({window:bot.inventory,itemType:current.type,metadata:current.metadata,count,sourceStart:source.slot,sourceEnd:source.slot+1,destStart:-999})
       remaining-=count
     }
-    return {target:{item:selected,requestedCount:requested,...(bySlot?{source:{slotSpace:'inventory',slot}}:{})},output:`Dropped ${requested} ${item.name}; inventory reduction confirmed, world pickup is not guaranteed`,verify:()=>!bot.inventory.selectedItem && before-variantCount(bot,item)===requested}
+    return {target:{item:selected,requestedCount:requested,...(bySlot?{source:{ref:args[1]}}:{})},output:`Dropped ${requested} ${item.name}; inventory reduction confirmed, world pickup is not guaranteed`,verify:()=>!bot.inventory.selectedItem && before-variantCount(bot,item)===requested}
   })
 }
 module.exports={failure,sameItem,variantCount,findItem,inventoryAction,dropAction,compactItemView}

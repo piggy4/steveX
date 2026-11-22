@@ -42,6 +42,21 @@ test('aborted native open closes its late window and does not claim successful o
  await assert.rejects(action)
  assert.equal(closed,1);bot.emit('end')
 })
+test('known block source follows the window instance and not the reused ID or changed aim',async()=>{
+ const bot=fixture(),{commands}=loadCommands(),position={x:2,y:65,z:0}
+ bot.game={dimension:'overworld'}
+ bot.openBlock=async()=>bot.currentWindow={id:4,type:'minecraft:generic_9x3',slots:[]}
+ const result=await openWindow(bot,{name:'chest',position})
+ const expected={kind:'block',name:'chest',position:{x:2,y:65,z:0},dimension:'overworld'}
+ position.z=2
+ assert.deepEqual(result.window.openedFrom,expected)
+ assert.deepEqual((await commands.window(bot)).window.openedFrom,expected)
+ bot.currentWindow={...bot.currentWindow}
+ assert.equal((await commands.window(bot)).window.openedFrom,null)
+ await openWindow(bot,{name:'chest',position})
+ assert.equal((await commands.window(bot)).window.openedFrom.position.z,2)
+ bot.emit('end')
+})
 test('wrong or missing windows reject operations without opening or moving items',async()=>{
  const {commands}=loadCommands(),bot={}
  assert.equal((await commands.furnace(bot,['input','1'])).errorCode,'WINDOW_REQUIRED')
