@@ -60,6 +60,8 @@ class SteveXAgent {
 
     require('./block_tags').attachBlockTags(this.bot)
     require('./chat_context').attachChatContext(this.bot)
+    require('../commands/workstations').attach(this.bot)
+    require('../commands/item_metadata').attach(this.bot)
     this.bot.loadPlugin(pathfinder)
     // Load after Mineflayer's built-ins so this corrects their legacy scaling.
     this.bot.loadPlugin(velocityCompatibility)
@@ -74,7 +76,6 @@ class SteveXAgent {
   registerEvents() {
     this.bot.once('spawn', () => {
       require('../commands/inventory_sync').installInventorySync(this.bot)
-      require('../commands/workstations').attach(this.bot)
       this.interactionMemory.attach(this.bot)
       this.connected = true
       this.connecting = false
@@ -225,6 +226,8 @@ class SteveXAgent {
       return await this.executor.run(command, async signal => {
         options.onCallStarted?.()
         if (!this.connected) throw new Error('Agent is offline')
+        const stale=options.checkWindow?.()
+        if(stale)return normalizeFailure(command,stale)
         if (command !== 'swing') this.stopPhysicalActions({ preserveItemUse: itemUseCompatibleActions.has(command), preserveSneak:true })
         this.currentAction = command
         try {

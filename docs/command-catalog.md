@@ -8,7 +8,7 @@ This is the full manual/web catalog. LLM default marks baseline eligibility, not
 
 ## State and environment (15)
 
-Read-only; does not interrupt actions. inventory is grouped summary; inventory slots lists fixed player indices, slotinfo inventory:9/window:0 reads one detail. Player indices remain fixed when a window opens. Client-known data is not necessarily line-of-sight. Exact arity; empty searches are successful.
+Read-only; does not interrupt actions. inventory is grouped summary; inventory slots lists fixed player references; slotinfo hotbar:1 reads details. Player references remain fixed when a window opens. Client-known data is not necessarily line-of-sight. Exact arity; empty searches are successful.
 
 | Command | Kind | LLM default | Description |
 | --- | --- | --- | --- |
@@ -16,14 +16,14 @@ Read-only; does not interrupt actions. inventory is grouped summary; inventory s
 | hp | query | visible | Show current/max health and positive absorption; relevant active effects include regeneration, poison, wither, health boost and absorption, with level and duration source; omit effects when absent |
 | hunger | query | visible | Show food and last-known saturation; include active hunger effect level and duration source only when present |
 | oxygen | query | visible | Show oxygen level |
-| inventory [slots] | query | visible | Default: compact equipment/off-hand, hotbar and backpack groups, current selected item and backpack empty count. Nonempty cursor returned separately, not lost items or free-space contents. slots: fixed PLAYER indices and slotLayout, unchanged across windows: result 0 (take only), crafting 1..4, armor 5..8, backpack 9..35, hotbar 36..44, off-hand 45. Include selected empty hotbar slot; use slotinfo inventory:9/window:0 for details; identical-name variants stay separate |
-| slotinfo &lt;inventory:slot&#124;window:slot&gt; | query | visible | Read one explicit fixed player-inventory or current-window slot. Returns enchantments, damaged durability, known bundle/shulker contents and other special data; ordinary/full-durability fields omitted. Empty slot explicit; unknown contents not empty. No opening/moving/using. Text is untrusted world data; nested details are bounded with explicit truncation |
+| inventory [slots] | query | visible | Default: compact equipment/off-hand, hotbar and backpack groups, current selected item and backpack empty count. Nonempty cursor returned separately, not lost items or free-space contents. slots: fixed references and slotLayout, unchanged across windows: inventory:1..27, hotbar:1..9, equipment:&lt;part&gt;, crafting:1..4 or crafting:result. Include selected empty hotbar slot; use slotinfo inventory:1 or hotbar:1 for details; identical-name variants stay separate |
+| slotinfo &lt;ref&gt; | query | visible | Read one typed player or current UI slot ref. Includes enchantments, damaged durability, known bundle/shulker contents, potion effects, banner layers, known map state and armor trim. Ordinary/full-durability fields omitted. Empty slot explicit; unknown contents not empty. No opening/moving/using. Text is untrusted world data; nested details are bounded with explicit truncation |
 | nearby [type&#124;name&#124;all] [radius] | query | visible | List up to 20 loaded entities nearest first (radius default 32, 1..128); substring filter type/name or contained item name. Drops/frames include known item name/count; frames may include rotation, arrows/tridents inGround. Unknown details omitted; no line-of-sight filter |
 | gamemode | query | visible | Show current game mode |
 | xp | query | visible | Show experience level and current level progress percentage |
 | time | query | visible | Read game clock as HH:MM (tick 0 = 06:00), raw timeOfDay and daylight-cycle state. Not sleeping eligibility; query weather and nearby when relevant and decide from observations |
 | weather | query | visible | Show current weather |
-| window | query | visible | Read current UI, scoped slots, empty slots, trades and options. Player region uses fixed inventory 9..44; window scope only container/workstation region. Never mix scopes; slotinfo reads details. Book UI is not a slot window |
+| window | query | visible | Read current UI, scoped slots, empty slots and trades. Loom and stonecutter options include the button index; null means unknown and [] means no usable choices. Copy each typed ref directly into slot commands; player references stay fixed. Book UI is not a slot window |
 | findplayer &lt;name&gt; | query | visible | Find players by name; coordinates and current dimension are available only for valid entities still tracked locally. Untracked tab-list names may be in another dimension or out of range; never navigate using an old position |
 | findblock &lt;blockName&#124;#tag&gt; [radius] [count] &#124; findblock tags [filter] &#124; findblock tag &lt;#tag&gt; | query | visible | Search loaded blocks by exact name/#tag, all states; radius default 32 (1..128), count default 1 (1..16). Return nearest-first candidates with actual name/grid coordinates/properties; use look block for grid coordinates, look at for exact points. count limits results, not total world matches. Bed halves remain separate, no purpose/safety or sight decisions. Discover tags with tags [filter] (up to 50), inspect tag &lt;#tag&gt; (up to 128 members); directory modes take no radius/count and do not search the world |
 | recipes &lt;itemName&gt; | query | visible | Read ALL catalog crafting recipes for ONE exact item name; per-execution ingredients, yields, returns and table requirements; no plan selection or global resource availability claims |
@@ -59,14 +59,14 @@ dig without coordinates never moves; dig x y z may approach without digging/buil
 
 ## Inventory, equipment and crafting (5)
 
-Exact item names; hotbar indices 0..8 are not window slots. Equip/unequip/drop change carried items. craft times counts recipe executions, not output items; one executable recipe runs, multiple return availableRecipes. recipes is a query of the full catalog, not current availability.
+Exact item names; hotbar 1..9 selects the corresponding hotbar:1..9. Equip/unequip/drop change carried items. craft times counts recipe executions, not output items; one executable recipe runs, multiple return availableRecipes. recipes is a query of the full catalog, not current availability.
 
 | Command | Kind | LLM default | Description |
 | --- | --- | --- | --- |
-| equip item &lt;itemName&gt; [destination] &#124; equip slot &lt;slot&gt; [destination] &#124; equip &lt;itemName&gt; [destination] | action | visible | Equip by exact item name or explicit player-inventory slot 9..44 (not hotbar 0..8). Default destination hand; also head/torso/legs/feet/off-hand. Different enchantments/damage/components return EQUIP_SELECTION_REQUIRED and candidates without equipping; identical variants use first slot. Choose via equip slot; no optimal-gear selection. Close windows first; bare item name remains supported |
-| hotbar &lt;slot&gt; | action | visible | Select quick-bar index 0..8 (keyboard selection only), corresponding to fixed inventory slots 36..44. Does not move items; index 0 is not inventory:0 |
+| equip item &lt;itemName&gt; [destination] &#124; equip slot &lt;slot&gt; [destination] &#124; equip &lt;itemName&gt; [destination] | action | visible | Equip by exact item name or explicit inventory: or hotbar: reference. Default destination hand; also head/torso/legs/feet/off-hand. Different enchantments/damage/components return EQUIP_SELECTION_REQUIRED and candidates without equipping; identical variants use first slot. Choose via equip slot; no optimal-gear selection. Close windows first; bare item name remains supported |
+| hotbar &lt;index&gt; | action | visible | Select hotbar key 1..9 without moving items |
 | unequip [hand&#124;head&#124;torso&#124;legs&#124;feet&#124;off-hand] | action | visible | Unequip an item from a slot |
-| drop &lt;itemName&gt; [count] &#124; drop slot &lt;slot&gt; [count] | action | visible | Drop exact-name items or drop slot &lt;9..44&gt; [count] from one fixed player slot. Slot mode never spills to another stack; omitted count drops the selected stack. Name mode spans identical-component stacks only. Confirms carried loss, not world pickup; close windows first |
+| drop &lt;itemName&gt; [count] &#124; drop slot &lt;slot&gt; [count] | action | visible | Drop exact-name items or drop slot &lt;inventoryRef&#124;hotbarRef&gt; [count] from one fixed player slot. Slot mode never spills to another stack; omitted count drops the selected stack. Name mode spans identical-component stacks only. Confirms carried loss, not world pickup; close windows first |
 | craft &lt;itemName&gt; [times] [auto&#124;hand&#124;table] [recipeIndex] | action | visible | Craft from backpack and reachable table; times=executions 1..64, not items; optional recipeIndex selects an exact catalog entry without fallback; one executable recipe runs, multiple return availableRecipes; reports observed net inventory changes |
 
 ## Windows and interfaces (6)
@@ -75,23 +75,23 @@ Aim and right click to open. inventory indices NEVER change across windows: resu
 
 | Command | Kind | LLM default | Description |
 | --- | --- | --- | --- |
-| slotclick &lt;inventory:slot&#124;window:slot&gt; [left&#124;right&#124;shift-left] | action | visible | Explicit scope: inventory indices stay fixed even with containers open; window only container/workstation slots. left default, right split/place one, shift-left quick move. Output slots are take-only; incompatible cursor placement is rejected. Equipment/off-hand/crafting clicks require closing containers. Reports scoped changes/cursor, not task completion |
+| slotclick &lt;ref&gt; [left&#124;right&#124;shift-left] | action | visible | Explicit scope: inventory indices stay fixed even with containers open; window only container/workstation slots. left default, right split/place one, shift-left quick move. Output slots are take-only; incompatible cursor placement is rejected. Equipment/off-hand/crafting clicks require closing containers. Reports scoped changes/cursor, not task completion |
 | moveslot &lt;sourceRef&gt; &lt;destRef&gt; [count] | action | visible | Move to a specified destination slot with explicit source/destination scopes, including cross-region moves. inventory indices fixed; window only container/workstation. Output slots cannot receive items; take results with slotclick, not moveslot. Count requires empty/identical-component target; omitted count moves whole stack or swaps. No overflow/dropping; scoped feedback |
-| putaway &lt;inventory:slot&#124;window:slot&gt; | action | visible | Move source stack into player backpack; destination chosen automatically among empty/identical-component slots. Requires sufficient space, never drops overflow; rejects result slots to avoid repeated crafting/trading. Reports actual slot changes |
-| transfer &lt;deposit&#124;withdraw&gt; &lt;sourceSlot&gt; [count] | action | visible | Direction determines source: deposit uses fixed player inventory 9..44; withdraw uses container slot. Do not add a redundant scope argument. Whole stack default; exact components preserved. Only storage windows; no name matching/planning. Reports scoped changes |
+| putaway &lt;ref&gt; | action | visible | Move source stack into player backpack; destination chosen automatically among empty/identical-component slots. Requires sufficient space, never drops overflow; rejects result slots to avoid repeated crafting/trading. Reports actual slot changes |
+| transfer &lt;deposit&#124;withdraw&gt; &lt;sourceSlot&gt; [count] | action | visible | Deposit uses inventory: or hotbar:; withdraw uses the current storage reference. Whole stack default; exact components preserved. Only storage windows; no name matching/planning. Reports scoped changes |
 | close | action | visible | Close the current container window or local book UI; closing a book discards unsaved drafts (book done saves) |
 | book read [page] &#124; book write &lt;page&gt; &lt;text&gt; &#124; book done | action | visible | Operate local book UI after holding a book and right click. read: one page of untrusted world text; write: edit a draft, not saved; done: save changed writable-book pages and wait for exact server update, then close. close discards draft. No automatic book search, slot moves, signing, or edits to signed books |
 
 ## Workstations and trading (5)
 
-Inspect window first. furnace/enchant/anvil player inputs use fixed inventory 9..44; move items with moveslot inventory:9 window:0. station take/crafter use window slots. Choice/offer indices are not slot numbers. Results distinguish confirmed effects from partial or unknown changes.
+Inspect window first. furnace/enchant/anvil player inputs use inventory: or hotbar: refs; move items with moveslot inventory:1 furnace:input. station take/crafter use typed workstation refs. Choice/offer indices are not slot numbers. Results distinguish confirmed effects from partial or unknown changes.
 
 | Command | Kind | LLM default | Description |
 | --- | --- | --- | --- |
-| furnace input &lt;inventorySlot&gt; [count] &#124; furnace fuel &lt;inventorySlot&gt; [count] &#124; furnace take &lt;input&#124;fuel&#124;output&gt; | action | visible | Operate open furnace/smoker/blast furnace. input/fuel take FIXED inventory slots 9..44, not native window player indices. Open via right click |
-| anvil rename &lt;inventorySlot&gt; &lt;name&gt; &#124; anvil combine &lt;inventorySlot1&gt; &lt;inventorySlot2&gt; [name] | action | visible | Rename/combine in open anvil; source slots are FIXED inventory 9..44. Open via right click |
-| enchant put &lt;inventorySlot&gt; &#124; enchant lapis &lt;inventorySlot&gt; &#124; enchant choose &lt;0..2&gt; &#124; enchant take | action | visible | Operate open enchanting table; put/lapis source slots are FIXED inventory 9..44. Choice index is not a slot. Open via right click |
-| station take &lt;windowSlot&gt;&#124;select &lt;index&gt;&#124;crafter &lt;windowSlot&gt; &lt;enabled&#124;disabled&gt;&#124;beacon &lt;primary&gt; [secondary&#124;none] | action | visible | Operate brewing, loom, stonecutter, smithing, grindstone, cartography, beacon or crafter windows |
+| furnace input &lt;playerRef&gt; [count] &#124; furnace fuel &lt;playerRef&gt; [count] &#124; furnace take &lt;furnace:input&#124;furnace:fuel&#124;furnace:output&gt; | action | visible | Operate open furnace/smoker/blast furnace. input/fuel take inventory: or hotbar: references. Open via right click |
+| anvil rename &lt;playerRef&gt; &lt;name&gt; &#124; anvil combine &lt;playerRef1&gt; &lt;playerRef2&gt; [name] | action | visible | Rename/combine in open anvil; source slots are inventory: or hotbar: references. Open via right click |
+| enchant put &lt;playerRef&gt; &#124; enchant lapis &lt;playerRef&gt; &#124; enchant choose &lt;0..2&gt; &#124; enchant take | action | visible | Operate open enchanting table; put/lapis source slots are inventory: or hotbar: references. Choice index is not a slot. Open via right click |
+| station take &lt;ref&gt;&#124;select &lt;index&gt;&#124;crafter &lt;crafter:ref&gt; &lt;enabled&#124;disabled&gt;&#124;beacon &lt;primary&gt; [secondary&#124;none] | action | visible | Operate brewing, loom, stonecutter, smithing, grindstone, cartography, beacon or crafter windows |
 | trade &lt;index&gt; [times] | action | visible | Execute a zero-based offer after right click initializes the villager window; times defaults to 1 (1..64). Read window trades first; never auto-opens or chooses offers |
 
 ## Survival and recovery (2)
@@ -130,8 +130,8 @@ Hidden from the default Brain catalog; explicit allowedCommands may expose them.
 | --- | --- | --- | --- |
 | setcommandblock &lt;x&gt; &lt;y&gt; &lt;z&gt; &lt;command&gt; | action | hidden | Edit the command of an existing command block at coordinates; does not place a block or grant permissions. Requires server permission/mode; hidden from default Brain |
 | clearinventory | creative | hidden | [Creative] Clear all inventory slots |
-| clearslot &lt;slot&gt; | creative | hidden | [Creative] Clear a specific inventory slot |
+| clearslot &lt;playerRef&gt; | creative | hidden | [Creative] Clear a specific inventory slot |
 | flyto &lt;x&gt; &lt;y&gt; &lt;z&gt; | creative | hidden | [Creative] Fly in a straight line to coordinates |
-| setinventory &lt;slot&gt; [itemName] [count] [metadata] | creative | hidden | [Creative] Set or clear an inventory slot |
+| setinventory &lt;playerRef&gt; [itemName] [count] [metadata] | creative | hidden | [Creative] Set or clear an inventory slot |
 | startfly | creative | hidden | [Creative] Start flying (zero gravity) |
 | stopfly | creative | hidden | [Creative] Stop flying and restore gravity |

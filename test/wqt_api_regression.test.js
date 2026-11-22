@@ -6,8 +6,8 @@ test('result destination rejects before pickup in player, crafting and furnace w
   for(const [start,type,result]of [[9,'minecraft:inventory',0],[10,'minecraft:crafting',0],[3,'minecraft:furnace',2]]){
     const f=fixture(start,type);f.w.craftingResultSlot=result;f.put(start,'stone',2)
     if(type==='minecraft:inventory'){f.bot.inventory=f.w;f.bot.currentWindow=null}
-    const dest=type==='minecraft:inventory'?'inventory:0':`window:${result}`
-    const r=await commands.moveslot(f.bot,['inventory:9',dest])
+    const dest=type==='minecraft:inventory'?'crafting:result':type==='minecraft:furnace'?'furnace:output':'workbench:result'
+    const r=await commands.moveslot(f.bot,['inventory:1',dest])
     assert.equal(r.errorCode,'RESULT_SLOT_READ_ONLY');assert.equal(f.calls.length,0);assert.equal(f.w.selectedItem,null)
     assert.equal(f.w.slots[start].count,2)
     f.w.selectedItem={name:'stone',count:1}
@@ -17,9 +17,9 @@ test('result destination rejects before pickup in player, crafting and furnace w
 
 test('result extraction remains slotclick; moveslot cannot repeat a recipe',async()=>{
   const f=fixture(10,'minecraft:crafting');f.w.craftingResultSlot=0;f.put(0,'stone',1)
-  assert.equal((await commands.moveslot(f.bot,['window:0','inventory:9'])).errorCode,'RESULT_SLOT_REQUIRES_CLICK')
+  assert.equal((await commands.moveslot(f.bot,['workbench:result','inventory:1'])).errorCode,'RESULT_SLOT_REQUIRES_CLICK')
   assert.equal(f.calls.length,0)
-  assert.equal((await commands.slotclick(f.bot,['window:0'])).ok,true)
+  assert.equal((await commands.slotclick(f.bot,['workbench:result'])).ok,true)
 })
 
 test('slotclick still takes a result onto a compatible cursor stack',async()=>{
@@ -27,7 +27,7 @@ test('slotclick still takes a result onto a compatible cursor stack',async()=>{
   f.w.selectedItem={...f.w.slots[0],count:2}
   // A real result slot allows taking, never placing. Model that server response.
   f.bot.clickWindow=async()=>{f.calls.push('take');f.w.selectedItem.count++;f.w.slots[0]=null}
-  assert.equal((await commands.slotclick(f.bot,['window:0'])).ok,true)
+  assert.equal((await commands.slotclick(f.bot,['workbench:result'])).ok,true)
   assert.equal(f.w.selectedItem.count,3);assert.deepEqual(f.calls,['take'])
 })
 
@@ -36,8 +36,8 @@ test('inventory exposes cursor separately and stable layout across open/closed w
   f.bot.inventory.selectedItem={name:'stone',count:2};f.w.selectedItem={name:'apple',count:3}
   f.put(54,'torch',4)
   const a=await commands.inventory(f.bot,['slots']);assert.deepEqual(a.cursor,{name:'apple',count:3})
-  assert.deepEqual(a.slotLayout.hotbar,[36,44]);assert.equal(a.slotLayout.result,0)
-  assert.equal(a.slots.find(i=>i.name==='torch').slot,36)
+  assert.deepEqual(a.slotLayout.hotbar,'hotbar:1..9');assert.match(a.slotLayout.crafting,/crafting:result/)
+  assert.equal(a.slots.find(i=>i.name==='torch').ref,'hotbar:1')
   f.bot.currentWindow=null
   assert.deepEqual((await commands.inventory(f.bot,[])).cursor,{name:'stone',count:2})
   f.bot.inventory.selectedItem=null

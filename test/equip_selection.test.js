@@ -39,13 +39,13 @@ for (const extra of [
   assert.equal(result.confirmed,false)
   assert.equal(f.calls(),0)
   assert.deepEqual(result.changes,[])
-  assert.deepEqual(result.candidates.map(item=>item.slot),[9,10])
+  assert.deepEqual(result.candidates.map(item=>item.ref),['inventory:1','inventory:2'])
   assert.equal(result.destination,'off-hand')
   assert.equal(result.slotSpace,'player-inventory')
   assert.match(result.output,/Nothing equipped.*equip slot/)
   assert.ok(result.output.includes(JSON.stringify(result.candidates)))
   const selected = f.slots[10]
-  assert.equal((await handler(f.bot,['slot','10','OFF-HAND'])).ok,true)
+  assert.equal((await handler(f.bot,['slot','inventory:2','OFF-HAND'])).ok,true)
   assert.equal(f.slots[45],selected)
 })
 
@@ -64,18 +64,18 @@ test('equip identical variants ignores stack size and chooses the first slot for
 
 test('equip reads an explicit slot at execution, rejects empty/unknown names, and never falls back', async () => {
   const f=fixture()
-  assert.equal((await handler(f.bot,['slot','9'])).errorCode,'EMPTY_SLOT')
+  assert.equal((await handler(f.bot,['slot','inventory:1'])).errorCode,'EMPTY_SLOT')
   assert.equal((await handler(f.bot,['item','missing'])).errorCode,'UNKNOWN_ITEM')
   assert.equal((await handler(f.bot,['item','diamond_pickaxe'])).errorCode,'ITEM_NOT_FOUND')
   f.put(10)
-  assert.equal((await handler(f.bot,['slot','9'])).errorCode,'EMPTY_SLOT')
+  assert.equal((await handler(f.bot,['slot','inventory:1'])).errorCode,'EMPTY_SLOT')
   assert.equal(f.calls(),0)
-  assert.equal((await handler(f.bot,['slot','10'])).ok,true)
+  assert.equal((await handler(f.bot,['slot','inventory:2'])).ok,true)
 })
 
 test('equip validates selection and destination before reading game state', async () => {
   const bot=new Proxy({}, {get(){throw Error('must not read bot')}})
-  for (const args of [[],['slot'],['slot','8'],['slot','45'],['slot','-1'],['slot','9.5'],['slot','9abc'],['slot','9007199254740992'],['item'],['item','diamond_pickaxe','left'],['slot','9','hand','extra'],['diamond_pickaxe','hand','extra'],[null]]) {
+  for (const args of [[],['slot'],['slot','8'],['slot','45'],['slot','-1'],['slot','9.5'],['slot','9abc'],['slot','9007199254740992'],['item'],['item','diamond_pickaxe','left'],['slot','inventory:1','hand','extra'],['diamond_pickaxe','hand','extra'],[null]]) {
     assert.equal(validateArguments('equip',args).errorCode,'INVALID_ARGUMENTS')
     assert.equal((await handler(bot,args)).errorCode,'INVALID_ARGUMENTS')
   }
@@ -84,9 +84,9 @@ test('equip validates selection and destination before reading game state', asyn
 test('equip keeps window and cursor guards and does not claim an ignored equipment change succeeded', async () => {
   const f=fixture(); f.put(9)
   f.bot.currentWindow={}
-  assert.equal((await handler(f.bot,['slot','9'])).errorCode,'WINDOW_OPEN')
+  assert.equal((await handler(f.bot,['slot','inventory:1'])).errorCode,'WINDOW_OPEN')
   f.bot.currentWindow=null; f.bot.inventory.selectedItem={name:'stone'}
-  assert.equal((await handler(f.bot,['slot','9'])).errorCode,'CURSOR_NOT_EMPTY')
+  assert.equal((await handler(f.bot,['slot','inventory:1'])).errorCode,'CURSOR_NOT_EMPTY')
   f.bot.inventory.selectedItem=null; f.bot.equip=async()=>{}
-  assert.equal((await handler(f.bot,['slot','9'])).errorCode,'INVENTORY_STATE_NOT_CONFIRMED')
+  assert.equal((await handler(f.bot,['slot','inventory:1'])).errorCode,'INVENTORY_STATE_NOT_CONFIRMED')
 })

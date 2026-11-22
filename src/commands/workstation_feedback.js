@@ -1,7 +1,7 @@
 const api=require('./workstations')
 const {action}=require('./window_actions')
 function state(bot){
-  const {slots,emptySlots,cursor,slotCount,windowSlotCount,playerSlotRange,type,windowId,...visible}=api.describe(bot,{compact:true})
+  const {slots,emptySlots,cursor,slotCount,windowSlotCount,playerSlotLayout,type,windowId,...visible}=api.describe(bot,{compact:true})
   return visible
 }
 function workstationAction(name,execute){

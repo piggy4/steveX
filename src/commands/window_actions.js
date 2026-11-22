@@ -1,7 +1,7 @@
 const {isDeepStrictEqual} = require('node:util')
 const {withContract,exceptionFailure} = require('./command_contract')
 const {compactItemView} = require('../agent/interaction_memory')
-const {resolveScope,logicalSlot,parseSlotRef}=require('./slot_scope')
+const {resolveScope,logicalSlot,}=require('./slot_scope')
 const {syncWindow}=require('./inventory_sync')
 const fail = (code,message) => { const e=new Error(message);e.code=code;throw e }
 const same = (a,b) => !!a && !!b && a.type===b.type && a.metadata===b.metadata &&
@@ -26,12 +26,14 @@ function changes(before,after,w,isPlayerWindow) {
   return result
 }
 function action(name,execute,{resolve,state}={}) {
-  return withContract(name,async(bot,args=[],agent,{signal}={})=>{
+  return withContract(name,async(bot,args=[],agent,{signal,checkWindow}={})=>{
     let w,before,data,error,delta=null,verified=false,beforeState,stateChanges=[]
     try {
-      w=resolve?resolve(bot,args):resolveScope(bot,name==='transfer'?(args[0]==='deposit'?'inventory':'window'):parseSlotRef(args[0]).slotSpace,{write:true})
+      w=resolve?resolve(bot,args):resolveScope(bot,'inventory',{write:true})
       await syncWindow(bot,w,{signal})
       if(windowOf(bot)!==w)fail('WINDOW_CHANGED','Window changed before operation')
+      const stale=checkWindow?.()
+      if(stale)return stale
       before=snapshot(w)
       beforeState=state?.(bot,w)
       signal?.throwIfAborted()
@@ -46,23 +48,29 @@ function action(name,execute,{resolve,state}={}) {
       if(state){const after=state(bot,w);for(const key of new Set([...Object.keys(beforeState||{}),...Object.keys(after||{})]))if(!isDeepStrictEqual(beforeState?.[key],after?.[key]))stateChanges.push({property:key,before:beforeState?.[key]??null,after:after?.[key]??null})}
     }catch(e){error=error||e}
     const evidence=verified?['server-inventory-snapshot']:[]
+    const observedEffect=!verified?'unknown':delta.length||stateChanges.length?'changed':'unchanged'
+    const recovery=observedEffect==='unknown'
+      ? 'Slot and cursor effects could not be confirmed; inspect the current window and inventory before retrying'
+      : observedEffect==='changed'
+        ? 'Observed changes may be partial; inspect changes and cursor before retrying'
+        : 'No slot, cursor, or tracked state changes observed'
     if(error) {
       const failure=exceptionFailure(name,error,signal)
       return {...failure,error:error.message,...(!signal?.aborted&&typeof error.code==='string'?{errorCode:error.code}:{}),action:name,status:signal?.aborted?'cancelled':'failed',confirmed:false,changes:delta,evidence,
-        stateChanges,output:'Please inspect observed changes and cursor before retrying; an interrupted operation may have partially applied'}
+        stateChanges,observedEffect,output:recovery}
     }
     const {verify,allowUnchanged,output,window,ok,...details}=data||{}
     const confirmed=!!(verified&&(delta.length>0||stateChanges.length>0||allowUnchanged)&&(!verify||verify()))
     return {ok:confirmed,action:name,status:confirmed?'completed':'failed',confirmed,...details,changes:delta,evidence,
-      ...(!confirmed?{errorCode:'SLOT_CHANGE_NOT_CONFIRMED',error:'No server-confirmed slot change'}:{}),
-      stateChanges,output:`${name}: ${confirmed?'server-confirmed effect':'no effect confirmed'}`}
+      ...(!confirmed?{errorCode:'SLOT_CHANGE_NOT_CONFIRMED',error:'Requested effect was not confirmed',observedEffect}:{}),
+      stateChanges,output:confirmed?`${name}: server-confirmed effect`:recovery}
   })
 }
 function emptyCursor(w) {if(w.selectedItem)fail('CURSOR_NOT_EMPTY','Empty the cursor first')}
 function ensureCurrent(bot,w,signal) {signal?.throwIfAborted();if(windowOf(bot)!==w)fail('WINDOW_CHANGED','Window changed; no further clicks sent')}
 async function move(bot,w,source,dest,count,signal) {
   const result=require('./slot_scope').resultSlot(w)
-  if(dest===result)fail('RESULT_SLOT_READ_ONLY','Cannot place into an output slot; inventory hotbar is 36..44, not 0..8')
+  if(dest===result)fail('RESULT_SLOT_READ_ONLY','Cannot place into an output slot; use hotbar:1..9 for hotbar slots')
   if(source===result)fail('RESULT_SLOT_REQUIRES_CLICK','Use slotclick to take a result; moveslot does not choose or repeat recipes')
   emptyCursor(w)
   const item=itemAt(w,source),target=itemAt(w,dest)

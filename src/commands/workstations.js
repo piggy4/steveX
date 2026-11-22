@@ -16,7 +16,14 @@ function integer(value, label, min = 0, max = Number.MAX_SAFE_INTEGER) {
 
 function attach(bot) {
   if (states.has(bot)) return states.get(bot)
-  const state = { properties: new WeakMap() }
+  const state = { properties: new WeakMap(), stonecutterRecipes:null, itemTags:null }
+  const recipes = packet => { state.stonecutterRecipes=packet.stoneCutterRecipes??null }
+  const tags = packet => {
+    const items=packet.tags?.find(group=>['item','minecraft:item'].includes(group.tagType))
+    state.itemTags=items?new Map(items.tags.map(tag=>[tag.tagName.replace(/^minecraft:/,''),tag.entries])):null
+  }
+  bot._client.on('declare_recipes',recipes)
+  bot._client.on('tags',tags)
   const update = packet => {
     const w = bot.currentWindow
     if (!w || packet.windowId !== w.id) return
@@ -27,6 +34,9 @@ function attach(bot) {
   }
   bot._client.on('craft_progress_bar', update)
   const opened = w => {
+    if (bot.version === '1.21.11' && w.type === 'minecraft:crafter_3x3') {
+      w.inventoryStart=9;w.inventoryEnd=45;w.hotbarStart=36
+    }
     if (bot.version === '1.21.11' && w.type === 'minecraft:smithing') {
       // prismarine-windows 2.10 still uses the pre-template layout for smithing.
       w.inventoryStart = 4; w.inventoryEnd = 40; w.hotbarStart = 31; w.craftingResultSlot = 3
@@ -36,6 +46,7 @@ function attach(bot) {
   bot.on('windowOpen', opened)
   if (bot.currentWindow) opened(bot.currentWindow)
   bot.once('end', () => {
+    bot._client.removeListener('declare_recipes',recipes);bot._client.removeListener('tags',tags)
     bot._client.removeListener('craft_progress_bar', update); bot.removeListener('windowOpen', opened); states.delete(bot)
   })
   states.set(bot, state)
@@ -49,8 +60,27 @@ function current(bot, types) {
   return w
 }
 function properties(bot, w = current(bot)) { return attach(bot).properties.get(w) || {} }
+function stonecutterOptions(bot,w) {
+  const item=w.slots[0]
+  if(!item)return []
+  const {stonecutterRecipes,itemTags}=attach(bot)
+  if(!stonecutterRecipes)return null
+  const options=[]
+  for(const {input,slotDisplay} of stonecutterRecipes){
+    const ids=input?.ids??(typeof input?.name==='string'?itemTags?.get(input.name.replace(/^minecraft:/,'')):null)
+    // Unknown membership could shift every later button index.
+    if(!Array.isArray(ids))return null
+    if(!ids.includes(item.type))continue
+    const display=slotDisplay?.data
+    const id=slotDisplay?.type==='item'?display:slotDisplay?.type==='item_stack'?display?.itemId:null
+    const name=bot.registry?.items?.[id]?.name
+    options.push({index:options.length,output:name?{name,count:display?.itemCount??1}:null})
+  }
+  return options
+}
 function slot(w, value, inventoryOnly = false) {
-  const logical=integer(value,'slot',inventoryOnly?9:0,inventoryOnly?44:w.inventoryStart-1)
+  const logical=inventoryOnly?require('./slot_scope').storageIndex(value):integer(value,'slot',0,w.inventoryStart-1)
+  if(logical<0)throw Object.assign(new Error('Expected inventory:1..27 or hotbar:1..9'),{code:'INVALID_SLOT_REFERENCE'})
   const index=inventoryOnly?w.inventoryStart+logical-9:logical
   if (!w.slots[index]) throw new Error(`Slot ${index} is empty`)
   return w.slots[index]
@@ -60,14 +90,14 @@ function describe(bot, { compact = false } = {}) {
   const w = current(bot), p = properties(bot, w)
   const view = compact ? require('./item_details').brief : itemView
   const data = compact ? {
-    type: w.type, windowId:w.id, slotCount: w.slots.length, windowSlotCount:w.inventoryStart, playerSlotRange:[9,44],
+    type: w.type, windowId:w.id, slotCount: w.slots.length, windowSlotCount:w.inventoryStart, playerSlotLayout:require('./slot_scope').playerSlotLayout,
     slots: Array.from({ length: w.slots.length }, (_, index) => {
       if(!w.slots[index])return null
       const {slot,...item}=view(w.slots[index]);return {...item,...require('./slot_scope').logicalSlot(w,index)}
     }).filter(Boolean),
     emptySlots: Array.from({ length: w.slots.length }, (_, slot) => slot).filter(slot => !w.slots[slot]).map(slot=>require('./slot_scope').logicalSlot(w,slot)),
     ...(w.selectedItem ? { cursor: view(w.selectedItem) } : {})
-  } : { windowId: w.id, type: w.type, windowSlotCount:w.inventoryStart, playerSlotRange:[9,44],
+  } : { windowId: w.id, type: w.type, windowSlotCount:w.inventoryStart, playerSlotLayout:require('./slot_scope').playerSlotLayout,
     source: 'mineflayer-window-cache', properties: { ...p },
     slots: w.slots.map((item, index) => {const data=itemView(item);if(data)delete data.slot;return {...require('./slot_scope').logicalSlot(w,index),item:data}}), cursor: itemView(w.selectedItem) }
   const resultSlot=require('./slot_scope').resultSlot(w)
@@ -75,10 +105,14 @@ function describe(bot, { compact = false } = {}) {
   if (w.trades) data.trades = w.trades.map((t, index) => ({ index, input: view(t.inputItem1),
     secondInput: view(t.inputItem2), output: view(t.outputItem), price: t.realPrice,
     disabled: t.tradeDisabled, uses: t.nbTradeUses, maxUses: t.maximumNbTradeUses }))
-  if (w.enchantments) data.enchantments = w.enchantments
+  if (w.enchantments) data.enchantments = w.enchantments.map((option,index)=>({choiceIndex:index,...option,expectedName:option.expected?.enchant>=0?bot.registry?.enchantments?.[option.expected.enchant]?.name??null:null}))
   if (w.type === 'minecraft:brewing_stand') data.brewing = { remainingTicks: p[0] ?? null, fuelUses: p[1] ?? null, maxFuelUses: 20 }
+  if(w.type==='minecraft:anvil')data.anvilCost=p[0]??null
   if (w.type === 'minecraft:crafter_3x3') data.disabledSlots = Array.from({ length: 9 }, (_, i) => p[i] === undefined ? null : p[i] === 1)
+  if(w.type==='minecraft:crafter_3x3')data.crafter={powered:p[9]===undefined?null:p[9]!==0,preview:{ref:'crafter:preview',readOnly:true,...(45 in w.slots?{item:w.slots[45]?view(w.slots[45]):null}:{})}}
   if (w.type === 'minecraft:loom' || w.type === 'minecraft:stonecutter') data.selectedIndex = p[0] ?? null
+  if(w.type==='minecraft:stonecutter')data.options=stonecutterOptions(bot,w)
+  if(w.type==='minecraft:loom')data.options=require('./item_metadata').loomOptions(bot,w)
   if (w.type === 'minecraft:beacon') data.beacon = { levels: p[0] ?? null, primaryEncoded: p[1] ?? null, secondaryEncoded: p[2] ?? null }
   if (['minecraft:furnace', 'minecraft:blast_furnace', 'minecraft:smoker'].includes(w.type)) {
     if (compact) {
@@ -130,9 +164,10 @@ async function station(bot, args = [], signal) {
   const w = current(bot, Object.values(stations).map(def=>def[1]))
   attach(bot)
   if (args[0] === 'move') {
-    throw Object.assign(new Error('station move was removed; use moveslot <inventory:slot|window:slot> <inventory:slot|window:slot> [count]'),{code:'INVALID_ARGUMENTS'})
+    throw Object.assign(new Error('station move was removed; use moveslot <ref> <ref> [count]'),{code:'INVALID_ARGUMENTS'})
   } else if (args[0] === 'take') {
-    const index = integer(args[1], 'container slot', 0, w.inventoryStart - 1)
+    const index = require('./slot_scope').writeRef(bot,args[1])
+    if(index>=w.inventoryStart)throw new Error('Expected a workstation slot')
     slot(w, String(index)); await bot.putAway(index)
   } else if (args[0] === 'select') {
     current(bot, ['minecraft:loom', 'minecraft:stonecutter'])
@@ -142,7 +177,8 @@ async function station(bot, args = [], signal) {
       p => p[0] === index && !!w.slots[output], signal)
   } else if (args[0] === 'crafter') {
     current(bot, ['minecraft:crafter_3x3'])
-    const index = integer(args[1], 'crafter slot', 0, 8)
+    const index = require('./slot_scope').writeRef(bot,args[1])
+    if(index>=9)throw new Error('Expected crafter:1..9')
     if (!['enabled', 'disabled'].includes(args[2])) throw new Error('Expected enabled or disabled')
     if (w.slots[index] || w.selectedItem) throw new Error('Crafter state changes require an empty slot and cursor')
     const enabled = args[2] === 'enabled'
@@ -165,7 +201,7 @@ async function station(bot, args = [], signal) {
     await confirmedPacket(bot, w, 'set_beacon_effect', { primary_effect: primaryId, secondary_effect: secondaryId },
       p => p[1] === primaryId + 1 && p[2] === (secondaryId === null ? 0 : secondaryId + 1), signal)
   } else throw new Error('Usage: station take <slot>|select <index>|crafter <slot> <enabled|disabled>|beacon <primary> [secondary|none]')
-  const verify=()=>args[0]==='crafter'?properties(bot,w)[Number(args[1])] === (args[2]==='enabled'?0:1):args[0]==='select'?properties(bot,w)[0]===Number(args[1]):args[0]==='take'?!w.slots[Number(args[1])]:true
+  const verify=()=>args[0]==='crafter'?properties(bot,w)[require('./slot_scope').writeRef(bot,args[1])] === (args[2]==='enabled'?0:1):args[0]==='select'?properties(bot,w)[0]===Number(args[1]):args[0]==='take'?!w.slots[require('./slot_scope').writeRef(bot,args[1])]:true
   return {...success(bot, `Station operation ${args.join(' ')} completed`),verify,allowUnchanged:['crafter','select'].includes(args[0])}
 }
 module.exports = { attach, integer, current, slot, describe, guarded, success, station }

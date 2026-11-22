@@ -5,10 +5,10 @@ const groups={equipment:[5,6,7,8,45],hotbar:Array.from({length:9},(_,i)=>36+i),b
 const equipmentNames={5:'head',6:'torso',7:'legs',8:'feet',45:'off-hand'}
 const command={
   name:'inventory',usage:'inventory [slots]',
-  description:'Default: compact equipment/off-hand, hotbar and backpack groups, current selected item and backpack empty count. Nonempty cursor returned separately, not lost items or free-space contents. slots: fixed PLAYER indices and slotLayout, unchanged across windows: result 0 (take only), crafting 1..4, armor 5..8, backpack 9..35, hotbar 36..44, off-hand 45. Include selected empty hotbar slot; use slotinfo inventory:9/window:0 for details; identical-name variants stay separate',
+  description:'Default: compact equipment/off-hand, hotbar and backpack groups, current selected item and backpack empty count. Nonempty cursor returned separately, not lost items or free-space contents. slots: fixed references and slotLayout, unchanged across windows: inventory:1..27, hotbar:1..9, equipment:<part>, crafting:1..4 or crafting:result. Include selected empty hotbar slot; use slotinfo inventory:1 or hotbar:1 for details; identical-name variants stay separate',
   handler:withContract('inventory',async(bot,args)=>{
     const slots=playerSlots(bot),showSlots=args[0]==='slots'
-    const make=slot=>({...brief(slots[slot]),...(showSlots?{slot}:{}),...(slot===36+bot.quickBarSlot?{selected:true}:{}),...(equipmentNames[slot]?{destination:equipmentNames[slot]}:{})})
+    const make=slot=>({...brief(slots[slot]),...(showSlots?{ref:require('../slot_scope').playerRefs[slot]}:{}),...(slot===36+bot.quickBarSlot?{selected:true}:{}),...(equipmentNames[slot]?{destination:equipmentNames[slot]}:{})})
     const data={slotSpace:'inventory',mode:showSlots?'slots':'summary',source:bot.currentWindow?'mapped-window-player-region-and-player-cache':'player-inventory-cache',
       emptySlotCount:slots.slice(9,45).filter(i=>!i).length,capacity:36}
     const cursor=(bot.currentWindow||bot.inventory).selectedItem

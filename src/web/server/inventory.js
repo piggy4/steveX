@@ -1,14 +1,14 @@
 const path = require('node:path')
 const { createHash } = require('node:crypto')
 const { details } = require('../../commands/item_details')
-const { playerSlots } = require('../../commands/slot_scope')
+const { playerSlots,playerRefs,logicalSlot } = require('../../commands/slot_scope')
 
 function inventorySnapshot(agent) {
   if (!agent.isOnline() || !agent.bot?.inventory) return { agentName: agent.name, online: false, sessionId: agent.sessionId ?? null }
   const bot = agent.bot
-  const item = (value, slot) => {
-    if (!value) return { slot, item: null }
-    return { slot, item: { ...details(value, bot), displayName: value.displayName || value.name } }
+  const item = (value, ref) => {
+    if (!value) return { ref, item: null }
+    return { ref, item: { ...details(value, bot), displayName: value.displayName || value.name } }
   }
   const window = bot.currentWindow
   const player = playerSlots(bot)
@@ -16,24 +16,26 @@ function inventorySnapshot(agent) {
   const storage = Array.from({ length: 36 }, (_, index) => {
     const slot = index + 9
     const value = player[slot]
-    return item(value, slot)
+    return item(value, playerRefs[slot])
   })
   return {
     agentName: agent.name, sessionId: agent.sessionId ?? null, online: true,
     version: bot.version, readOnly: true, slotSpace: 'inventory',
-    selectedSlot: Number.isInteger(bot.quickBarSlot) ? 36 + bot.quickBarSlot : null,
+    selectedRef: Number.isInteger(bot.quickBarSlot) ? playerRefs[36 + bot.quickBarSlot] : null,
     equipmentFreshness: window ? 'last-known' : 'player-inventory-cache',
     storage,
     equipment: ['head', 'torso', 'legs', 'feet', 'off-hand'].map(destination => {
       const slot = bot.getEquipmentDestSlot?.(destination)
-      return { destination, ...item(Number.isInteger(slot) ? bot.inventory.slots?.[slot] : null, slot ?? null) }
+      return { destination, ...item(Number.isInteger(slot) ? bot.inventory.slots?.[slot] : null, playerRefs[slot] ?? null) }
     }),
     cursor: item((window || bot.inventory).selectedItem, null).item,
     container: window ? {
       id: window.id, type: window.type, title: typeof window.title === 'string' ? window.title : window.type,
       slotSpace: 'window',
       slots: Array.from({ length: Math.max(0, Math.min(window.inventoryStart || 0, window.slots.length, 256)) },
-        (_, slot) => item(window.slots[slot], slot))
+        (_, slot) => item(window.slots[slot], logicalSlot(window,slot).ref)),
+      ...(window.type==='minecraft:crafter_3x3'&&45 in window.slots?
+        {preview:{...item(window.slots[45],'crafter:preview'),readOnly:true}}:{})
     } : null
   }
 }

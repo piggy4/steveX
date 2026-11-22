@@ -3,8 +3,8 @@ import { setFreshness } from './freshness.js'
 
 export function itemTooltipText(entry) {
   const item = entry.item
-  if (!item) return `Slot ${entry.slot ?? '-'}: Empty`
-  const lines = [`${item.displayName || item.name} x${item.count}`, `Slot ${entry.slot ?? '-'}`]
+  if (!item) return `Slot ${entry.ref ?? '-'}: Empty`
+  const lines = [`${item.displayName || item.name} x${item.count}`, entry.ref ? `Slot ${entry.ref}` : 'Cursor']
   for (const [field, label] of [['enchantments', 'Enchantments'], ['storedEnchantments', 'Stored enchantments']]) {
     if (!item[field]?.length) continue
     lines.push(label + ':')
@@ -14,6 +14,15 @@ export function itemTooltipText(entry) {
     }
   }
   if (item.durability) lines.push(`Durability: ${item.durability.remaining ?? '?'} / ${item.durability.max ?? '?'} (used ${item.durability.used})`)
+  if (item.potion) {
+    lines.push(`Potion: ${item.potion.type ?? 'Unknown'}`)
+    for(const effect of item.potion.effects??item.potion.customEffects??[])
+      lines.push(`  ${effect.name ?? 'Unknown'} ${effect.level}: ${effect.durationTicks<0?'infinite':effect.durationTicks/20+' s'}`)
+  }
+  for(const layer of item.bannerPatterns??[])lines.push(`Banner: ${layer.color??'Unknown'} / ${layer.pattern??'Unknown'}`)
+  if(item.map)lines.push(`Map #${item.map.id}; scale ${item.map.scale??'unknown'}; lock ${item.map.locked??'unknown'}`)
+  if(item.map?.pendingOperation)lines.push(`Pending on extraction: ${item.map.pendingOperation}`)
+  if(item.trim)lines.push(`Trim: ${item.trim.pattern??'Unknown'} / ${item.trim.material??'Unknown'}`)
   lines.push('', JSON.stringify(item, null, 2))
   return lines.join('\n')
 }
@@ -26,17 +35,17 @@ function slotHtml(entry, version, selected = false) {
   return `<div class="inventory-slot${selected ? ' selected' : ''}" tabindex="0" data-tooltip="${escapeHtml(text)}" aria-label="${escapeHtml(text)}">
     ${item ? `<span class="item-fallback">${escapeHtml(item.name.replaceAll('_', ' '))}</span><img alt="" loading="lazy" src="/api/item-textures/${encodeURIComponent(version || 'unknown')}/${encodeURIComponent(item.name)}"><span class="item-count">${item.count > 1 ? item.count : ''}</span>` : ''}
     ${percent !== null ? `<span class="item-durability" style="--remaining:${percent}%"></span>` : ''}
-    <small class="item-slot-number">${entry.slot ?? ''}</small>
+    <small class="item-slot-number">${escapeHtml(entry.ref?.split(':').at(-1) ?? '')}</small>
   </div>`
 }
 
 export function inventoryHtml(data) {
   if (!data.online) return '<p class="inventory-status">Agent offline</p>'
-  const slots = entries => entries.map(entry => slotHtml(entry, data.version, entry.slot === data.selectedSlot)).join('')
+  const slots = entries => entries.map(entry => slotHtml(entry, data.version, entry.ref === data.selectedRef)).join('')
   return `<div class="inventory-sections">
     <section><h4>Equipment / Offhand${data.equipmentFreshness === 'last-known' ? ' <span>Last known</span>' : ''}</h4>${data.equipmentFreshness === 'last-known' ? '<p class="inventory-status equipment-freshness">Container open: equipment updates may be delayed.</p>' : ''}<div class="inventory-equipment">${data.equipment.map(entry => `<div><span class="inventory-equipment-label">${escapeHtml(entry.destination)}</span>${slotHtml(entry, data.version)}</div>`).join('')}</div></section>
     <section><h4>Inventory <span>Player slots</span></h4><div class="inventory-grid">${slots(data.storage.slice(0, 27))}</div><div class="inventory-grid inventory-hotbar">${slots(data.storage.slice(27))}</div></section>
-    <section><h4>Current Container <span>Window slots</span></h4>${data.container ? `<p class="inventory-window-title">${escapeHtml(data.container.type)} #${data.container.id}</p><div class="inventory-grid">${slots(data.container.slots)}</div>` : '<p class="inventory-status">No container open</p>'}${data.cursor ? `<h4>Cursor</h4>${slotHtml({ slot: null, item: data.cursor }, data.version)}` : ''}</section>
+    <section><h4>Current Container</h4>${data.container ? `<p class="inventory-window-title">${escapeHtml(data.container.type)} #${data.container.id}</p><div class="inventory-grid">${slots(data.container.slots)}</div>` : '<p class="inventory-status">No container open</p>'}${data.container?.preview ? `<h4>Preview</h4>${slotHtml(data.container.preview,data.version)}` : ''}${data.cursor ? `<h4>Cursor</h4>${slotHtml({ item: data.cursor }, data.version)}` : ''}</section>
   </div>`
 }
 

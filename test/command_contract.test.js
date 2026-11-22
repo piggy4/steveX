@@ -6,8 +6,8 @@ const { loadCommands } = require('../src/commands')
 const { SteveXAgent } = require('../src/agent/agent')
 const { sleep } = require('../src/agent/action_executor')
 
-const defaults = {nearby:[],findplayer:['SteveX-Test'],findblock:['stone'],recipes:['oak_planks'],look:['angle','0','0'],goto:['0','0','0'],dig:['0','0','0'],move:['forward'],right:['click'],swing:[],follow:['SteveX-Test'],wait:['1'],craft:['oak_planks'],equip:['stone'],hotbar:['0'],drop:['stone'],interactentity:['cow']}
-function valid(name){return ({attack:['cow'],slotinfo:['inventory:9'],slotclick:['inventory:9'],moveslot:['inventory:9','inventory:10'],putaway:['inventory:9'],transfer:['deposit','9'],sneak:['off']})[name]||defaults[name]||[]}
+const defaults = {nearby:[],findplayer:['SteveX-Test'],findblock:['stone'],recipes:['oak_planks'],look:['angle','0','0'],goto:['0','0','0'],dig:['0','0','0'],move:['forward'],right:['click'],swing:[],follow:['SteveX-Test'],wait:['1'],craft:['oak_planks'],equip:['stone'],hotbar:['1'],drop:['stone'],interactentity:['cow']}
+function valid(name){return ({attack:['cow'],slotinfo:['inventory:1'],slotclick:['inventory:1'],moveslot:['inventory:1','inventory:2'],putaway:['inventory:1'],transfer:['deposit','inventory:1'],sneak:['off']})[name]||defaults[name]||[]}
 test('contracts cover core commands, slot operations and recovery with shared catalog usage', () => {
   const expected = categories.filter(c=>['query','motion','interaction','inventory','survival'].includes(c.id)).flatMap(c=>c.names.split(' ')).concat(['slotclick','moveslot','putaway','transfer']).sort(), {list}=loadCommands()
   assert.equal(expected.length,41);assert.deepEqual(Object.keys(contracts).sort(),expected)

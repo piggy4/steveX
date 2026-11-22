@@ -57,7 +57,7 @@ async function furnace(bot, args = [], signal) {
     verify=()=>before-(sameItem(w.slots[source],identity)?w.slots[source].count:0)===count
   } else if (args[0] === 'take') {
     const methods = { input: ['takeInput', 0], fuel: ['takeFuel', 1], output: ['takeOutput', 2] }
-    const op = Object.hasOwn(methods, args[1]) ? methods[args[1]] : null
+    const op = args[1].startsWith('furnace:') && Object.hasOwn(methods,args[1].slice(8)) ? methods[args[1].slice(8)] : null
     if (!op) throw new Error('Expected input, fuel or output')
     api.slot(w, String(op[1])); await w[op[0]]()
     verify=()=>!w.slots[op[1]]

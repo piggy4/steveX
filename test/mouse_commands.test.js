@@ -62,8 +62,8 @@ test('dig stop works directly and malformed subcommands never stop digging',asyn
 test('slotclick keeps window-slot behavior and left/right button mapping',async()=>{
   const handler=require('../src/commands/actions/slotclick').handler,calls=[]
   const bot={inventory:{slots:Array(12).fill(null)},_syncWindow:async()=>{},clickWindow:async(...args)=>calls.push(args)}
-  assert.equal((await handler(bot,['inventory:9'])).confirmed,false)
-  assert.equal((await handler(bot,['inventory:10','right'])).confirmed,false)
+  assert.equal((await handler(bot,['inventory:1'])).confirmed,false)
+  assert.equal((await handler(bot,['inventory:2','right'])).confirmed,false)
   assert.deepEqual(calls,[[9,0,0],[10,1,0]])
   assert.match((await handler(bot,[])).error,/slotclick/)
 })

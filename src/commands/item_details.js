@@ -15,6 +15,7 @@ function details(item,bot,depth=0,budget={remaining:128}) {
   if(depth>=4||budget.remaining--<=0)return {...brief(item),detailsTruncated:true}
   const compact=compactItemView(item),{slot,...result}=compact,c=item.components||[],n=legacy(item)
   if(item.legacyData)result.legacyData={...n}
+  Object.assign(result,require('./item_metadata').describe(item,bot))
   // Decode readable fields without repeating nested container payloads or full-durability defaults.
   result.components=c.filter(c=>!['container','bundle_contents','enchantments','stored_enchantments','damage','max_damage'].includes(c.type))
   if(!result.components.length)delete result.components

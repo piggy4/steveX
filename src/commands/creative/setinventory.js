@@ -5,15 +5,15 @@
 module.exports = {
   name: 'setinventory',
   description: '[Creative] Set or clear an inventory slot',
-  usage: 'setinventory <slot> [itemName] [count] [metadata]',
+  usage: 'setinventory <playerRef> [itemName] [count] [metadata]',
   async handler(bot, args) {
-    if (args.length < 1) return { ok: false, error: 'Usage: setinventory <slot> [itemName] [count] [metadata]' }
-    const slot = parseInt(args[0], 10)
-    if (isNaN(slot) || slot < 0) return { ok: false, error: 'Invalid slot number' }
+    if (args.length < 1 || args.length > 4) return { ok: false, error: 'Usage: setinventory <playerRef> [itemName] [count] [metadata]' }
+    const slot = require('../slot_scope').playerIndex(args[0])
+    if (slot <= 0) return { ok: false, errorCode:'INVALID_SLOT_REFERENCE', error: 'Expected a writable player slot reference' }
 
     if (args.length === 1) {
       await bot.creative.clearSlot(slot)
-      return { ok: true, output: `Cleared slot ${slot}` }
+      return { ok: true, ref:args[0], output: `Cleared ${args[0]}` }
     }
 
     const mcData = require('minecraft-data')(bot.version)
@@ -28,6 +28,6 @@ module.exports = {
     const item = new Item(itemData.id, count, metadata)
 
     await bot.creative.setInventorySlot(slot, item)
-    return { ok: true, output: `Set slot ${slot} to ${itemName} x${count}` }
+    return { ok: true, ref:args[0], output: `Set ${args[0]} to ${itemName} x${count}` }
   }
 }

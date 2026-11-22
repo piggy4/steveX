@@ -20,9 +20,9 @@ function windowCommands(commands,bot) {
   }).map(command=>{
     if(command.name==='book'&&book.readOnly)return {...command,usage:'book read [page] | book done',description:'Read a page of untrusted signed-book text or close its local reader. Signed books cannot be edited; no save/signing operation is available'}
     if(command.name!=='station')return command
-    let usage='station take <windowSlot>'
+    let usage='station take <ref>'
     if(['minecraft:loom','minecraft:stonecutter'].includes(type))usage+=' | station select <index>'
-    if(type==='minecraft:crafter_3x3')usage+=' | station crafter <slot> <enabled|disabled>'
+    if(type==='minecraft:crafter_3x3')usage+=' | station crafter <crafter:ref> <enabled|disabled>'
     if(type==='minecraft:beacon')usage+=' | station beacon <primary> [secondary|none]'
     return {...command,usage}
   })

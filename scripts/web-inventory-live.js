@@ -103,7 +103,7 @@ async function main() {
       const state = await preview(i)
       assert.equal(state.storage.length, 36)
       assert.equal(state.storage.filter(entry => !entry.item).length, 34)
-      assert.equal(state.selectedSlot, 38)
+      assert.equal(state.selectedRef, 'hotbar:3')
       await assertPageItem(i, '.inventory-grid', 9, i ? 'Diamond' : 'Apple', i ? 23 : 17)
     }
     return { server: truth, snapshots: await Promise.all([preview(0), preview(1)]) }

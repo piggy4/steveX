@@ -1,13 +1,52 @@
 function error(code,message){throw Object.assign(new Error(message),{code})}
-const playerSlotLayout={result:0,crafting:[1,4],head:5,torso:6,legs:7,feet:8,backpack:[9,35],hotbar:[36,44],offHand:45}
+const grid=(name,n)=>Array.from({length:n},(_,i)=>name+':'+(i+1))
+const named=(name,keys)=>keys.split(' ').map(key=>name+':'+key)
+const playerRefs=['crafting:result',...grid('crafting',4),...named('equipment','head torso legs feet'),...grid('inventory',27),...grid('hotbar',9),'equipment:offhand']
+const playerSlotLayout={backpack:'inventory:1..27',hotbar:'hotbar:1..9',equipment:'equipment:<part>',crafting:'crafting:1..4 or crafting:result'}
+const menus={
+ crafting:['workbench:result',...grid('workbench',9)],
+ furnace:named('furnace','input fuel output'),
+ enchantment:named('enchanting','item lapis'),
+ anvil:named('anvil','left right result'),
+ stonecutter:named('stonecutter','input result'),
+ grindstone:named('grindstone','top bottom result'),
+ smithing:named('smithing','template base addition result'),
+ cartography:named('cartography','map material result'),
+ loom:named('loom','banner dye pattern result'),
+ brewing_stand:named('brewing','bottle1 bottle2 bottle3 ingredient fuel'),
+ beacon:['beacon:payment'],crafter_3x3:grid('crafter',9),
+ merchant:named('merchant','input1 input2 result'),lectern:['lectern:book']
+}
+function menuRefs(w) {
+  const type=w.type?.replace(/^minecraft:/,'')
+  const alias={blast_furnace:'furnace',smoker:'furnace',enchanting_table:'enchantment',crafting_table:'crafting',villager:'merchant'}
+  if(Object.hasOwn(menus,alias[type]||type))return menus[alias[type]||type]
+  const storage=/^generic_(9x[1-6]|3x3)$/.exec(type)
+  const region=storage?(w.storageRegion||'storage_'+storage[1]):({hopper:'hopper',shulker_box:'shulker',dispenser:'dispenser',dropper:'dropper'})[type]
+  return region&&Number.isInteger(w.inventoryStart)&&w.inventoryStart<=54?grid(region,w.inventoryStart):[]
+}
+function readRef(bot,value) {
+  const i=playerRefs.indexOf(value)
+  if(i>=0)return {ref:value,slotSpace:'inventory',slot:i}
+  const w=bot.currentWindow
+  if(!isSlotRef(value))error('INVALID_SLOT_REFERENCE','Use an explicit typed slot reference')
+  if(!w)error('WINDOW_REQUIRED','Open the corresponding container or workstation first')
+  if(value==='crafter:preview'&&w.type==='minecraft:crafter_3x3')return {ref:value,slotSpace:'window',slot:45}
+  const slot=menuRefs(w).indexOf(value)
+  if(slot<0||slot>=w.inventoryStart)error('INVALID_SLOT_REFERENCE','Slot reference does not match the current interface')
+  return {ref:value,slotSpace:'window',slot}
+}
+const isSlotRef=value=>typeof value==='string'&&/^[a-z][a-z0-9_]*:[a-z0-9]+$/.test(value)&&!value.startsWith('window:')
+function playerIndex(ref){return playerRefs.indexOf(ref)}
+function storageIndex(ref){const i=playerIndex(ref);return i>=9&&i<=44?i:-1}
+function writeRef(bot,value){
+  if(value==='crafter:preview')error('RESULT_SLOT_READ_ONLY','Crafter preview is not interactive')
+  const r=readRef(bot,value)
+  return nativeSlot(bot,r.slotSpace,r.slot)
+}
 function resultSlot(w) {
   return Number.isInteger(w.craftingResultSlot)&&w.craftingResultSlot>=0?w.craftingResultSlot:
     w.type==='minecraft:inventory'?0:null
-}
-function parseSlotRef(value) {
-  const match=typeof value==='string'&&/^(inventory|window):(\d+)$/i.exec(value)
-  if(!match||!Number.isSafeInteger(Number(match[2])))error('INVALID_SLOT_REFERENCE','Use inventory:<slot> or window:<slot>; bare numbers are not inferred')
-  return {slotSpace:match[1].toLowerCase(),slot:Number(match[2])}
 }
 function resolveScope(bot,scope,{write=false}={}) {
   if(!['inventory','window'].includes(scope))error('INVALID_SLOT_SCOPE','Specify inventory or window explicitly')
@@ -33,8 +72,9 @@ function nativeSlot(bot,scope,slot) {
   return w.inventoryStart+slot-9
 }
 function logicalSlot(w,index,isPlayerWindow=false) {
-  return isPlayerWindow?{slotSpace:'inventory',slot:index}:index>=w.inventoryStart&&index<w.inventoryEnd?
-    {slotSpace:'inventory',slot:9+index-w.inventoryStart}:{slotSpace:'window',slot:index}
+  const ref=isPlayerWindow?playerRefs[index]:w.type==='minecraft:crafter_3x3'&&index===45?'crafter:preview':
+    index>=w.inventoryStart&&index<w.inventoryEnd?playerRefs[9+index-w.inventoryStart]:menuRefs(w)[index]
+  return {ref:ref??null}
 }
 function playerSlots(bot) {
   const slots=Array.from(resolveScope(bot,'inventory').slots)
@@ -55,4 +95,4 @@ function querySlot(bot,scope,slot) {
   return {item:slots[slot]??null,slotSpace:scope,slot,...(scope==='window'?{windowId:w.id,windowType:w.type}:{}),
     source:scope==='window'||(bot.currentWindow&&slot>=9&&slot<=44)?'current-window-cache':'player-inventory-cache'}
 }
-module.exports={resolveScope,playerSlots,querySlot,nativeSlot,logicalSlot,parseSlotRef,playerSlotLayout,resultSlot}
+module.exports={resolveScope,playerSlots,querySlot,nativeSlot,logicalSlot,playerSlotLayout,resultSlot,readRef,writeRef,isSlotRef,playerIndex,storageIndex,playerRefs}

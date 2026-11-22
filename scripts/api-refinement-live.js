@@ -68,50 +68,50 @@ async function run(){
   await check('inventory groups are compact and player slots stay fixed across window opening',async()=>{
     const summary=await call('inventory',[]),listed=await call('inventory',['slots'])
     assert.equal(summary.ok,true,JSON.stringify(summary));assert.doesNotMatch(summary.output,/"slot":|"components":/)
-    const select=r=>r.slots.filter(i=>i.slot>=9&&i.slot<=44).map(i=>[i.slot,i.name,i.count])
-    assert.deepEqual(select(listed),select(inventoryBefore));assert.equal(listed.slots.find(i=>i.name==='stone').slot,9)
+    const select=r=>r.slots.filter(i=>/^(inventory|hotbar):/.test(i.ref)).map(i=>[i.ref,i.name,i.count])
+    assert.deepEqual(select(listed),select(inventoryBefore));assert.equal(listed.slots.find(i=>i.name==='stone').ref,'inventory:1')
     const window=await call('window',[])
-    assert.ok(window.window.slots.some(i=>i.slotSpace==='inventory'&&i.slot===9&&i.name==='stone'))
+    assert.ok(window.window.slots.some(i=>i.ref==='inventory:1'&&i.name==='stone'))
     return {summary,listed,window:window.window}
   })
   await check('slotinfo decodes real enchantments and non-full durability',async()=>{
-    const r=await call('slotinfo',['inventory:12']);assert.equal(r.ok,true,JSON.stringify(r));assert.equal(r.item.durability.used,8)
+    const r=await call('slotinfo',['inventory:4']);assert.equal(r.ok,true,JSON.stringify(r));assert.equal(r.item.durability.used,8)
     assert.ok(r.item.enchantments.some(e=>e.name==='unbreaking'&&e.level===3));return r
   })
   await check('slotinfo decodes real carried shulker and bundle contents without opening them',async()=>{
-    const box=await call('slotinfo',['inventory:13']),bundle=await call('slotinfo',['inventory:14'])
+    const box=await call('slotinfo',['inventory:5']),bundle=await call('slotinfo',['inventory:6'])
     assert.equal(box.item.contentsKnown,true,JSON.stringify(box));assert.equal(box.item.contents[0].name,'diamond');assert.equal(box.item.contents[0].count,3)
     assert.equal(bundle.item.contentsKnown,true,JSON.stringify(bundle));assert.equal(bundle.item.contents[0].name,'apple');assert.equal(bundle.item.contents[0].count,2)
     return {box,bundle}
   })
   await check('window scope cannot alias player region',async()=>{
-    const r=await call('slotclick',[`window:${start}`]);assert.equal(r.errorCode,'INVALID_SLOT');return r
+    const r=await call('slotclick',[`chest:${start+1}`]);assert.equal(r.errorCode,'INVALID_SLOT_REFERENCE');return r
   })
   await check('partial moveslot reports source and destination counts',async()=>{
-    const r=await call('moveslot',['inventory:9','window:0','3']);assert.equal(r.confirmed,true,JSON.stringify(r))
+    const r=await call('moveslot',['inventory:1','chest:1','3']);assert.equal(r.confirmed,true,JSON.stringify(r))
     assert.equal(bot.currentWindow.slots[start].count,5);assert.equal(bot.currentWindow.slots[0].count,3)
     assert.match(rcon('data get block 7402 100 7402 Items'),/stone/);return r
   })
   await check('deposit and withdraw use explicit source slot and count',async()=>{
-    const deposit=await call('transfer',['deposit','9','2']);assert.equal(deposit.confirmed,true,JSON.stringify(deposit))
-    const withdraw=await call('transfer',['withdraw','0','1']);assert.equal(withdraw.confirmed,true,JSON.stringify(withdraw))
+    const deposit=await call('transfer',['deposit','inventory:1','2']);assert.equal(deposit.confirmed,true,JSON.stringify(deposit))
+    const withdraw=await call('transfer',['withdraw','chest:1','1']);assert.equal(withdraw.confirmed,true,JSON.stringify(withdraw))
     return {deposit,withdraw,server:rcon('data get block 7402 100 7402 Items')}
   })
   await check('different component variant cannot merge into ordinary stone',async()=>{
-    const r=await call('moveslot',['inventory:11','window:0','1']);assert.equal(r.errorCode,'DESTINATION_MISMATCH');return r
+    const r=await call('moveslot',['inventory:3','chest:1','1']);assert.equal(r.errorCode,'DESTINATION_MISMATCH');return r
   })
   await check('omitted moveslot count swaps different stacks',async()=>{
-    const r=await call('moveslot',['inventory:10','window:0']);assert.equal(r.confirmed,true,JSON.stringify(r));assert.equal(r.mode,'swap')
+    const r=await call('moveslot',['inventory:2','chest:1']);assert.equal(r.confirmed,true,JSON.stringify(r));assert.equal(r.mode,'swap')
     assert.equal(bot.currentWindow.slots[0].name,'dirt');return r
   })
   await check('right slot click splits stack and reports cursor; left places it',async()=>{
-    const split=await call('slotclick',['window:0','right']);assert.equal(split.confirmed,true,JSON.stringify(split));assert.ok(bot.currentWindow.selectedItem)
-    const place=await call('slotclick',['window:1','left']);assert.equal(place.confirmed,true,JSON.stringify(place));assert.equal(bot.currentWindow.selectedItem,null)
+    const split=await call('slotclick',['chest:1','right']);assert.equal(split.confirmed,true,JSON.stringify(split));assert.ok(bot.currentWindow.selectedItem)
+    const place=await call('slotclick',['chest:2','left']);assert.equal(place.confirmed,true,JSON.stringify(place));assert.equal(bot.currentWindow.selectedItem,null)
     return {split,place}
   })
   await check('shift-left native quick move and putaway report actual slots',async()=>{
-    const shift=await call('slotclick',['window:1','shift-left']);assert.equal(shift.confirmed,true,JSON.stringify(shift))
-    const putaway=await call('putaway',['window:0']);assert.equal(putaway.confirmed,true,JSON.stringify(putaway));return {shift,putaway}
+    const shift=await call('slotclick',['chest:2','shift-left']);assert.equal(shift.confirmed,true,JSON.stringify(shift))
+    const putaway=await call('putaway',['chest:1']);assert.equal(putaway.confirmed,true,JSON.stringify(putaway));return {shift,putaway}
   })
   await check('full container rejects deposit before consuming player stack',async()=>{
     await call('close',[])
@@ -119,7 +119,7 @@ async function run(){
     await bot.lookAt(new Vec3(7402.5,100.5,7402.5),true);await call('right',['click'])
     const slot=bot.currentWindow.slots.findIndex((i,n)=>n>=start&&i?.name==='stone')
     assert.ok(slot>=start)
-    const before=bot.currentWindow.slots[slot].count,r=await call('transfer',['deposit',String(slot-start+9),'1'])
+    const before=bot.currentWindow.slots[slot].count,r=await call('transfer',['deposit',require('../src/commands/slot_scope').logicalSlot(bot.currentWindow,slot).ref,'1'])
     assert.equal(r.errorCode,'DESTINATION_FULL');assert.equal(bot.currentWindow.slots[slot].count,before);assert.deepEqual(r.changes,[])
     return r
   })

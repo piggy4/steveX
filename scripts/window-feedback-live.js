@@ -18,40 +18,40 @@ async function run(){
  rcon(`gamemode survival ${name}`);rcon(`clear ${name}`)
  rcon(`item replace entity ${name} inventory.0 with stone 4`);rcon(`item replace entity ${name} inventory.1 with stone[custom_data={variant:"B"}] 5`);await sleep(200)
  await check('drop slot only consumes selected component stack; over-count refuses without spill',async()=>{
-  const refused=await call('drop',['slot','10','6']);assert.equal(refused.errorCode,'INSUFFICIENT_ITEMS')
-  const partial=await call('drop',['slot','10','2']);assert.equal(partial.confirmed,true,JSON.stringify(partial));assert.equal(bot.inventory.slots[9].count,4);assert.equal(bot.inventory.slots[10].count,3)
-  const rest=await call('drop',['slot','10']);assert.equal(rest.confirmed,true);assert.equal(bot.inventory.slots[10],null)
+  const refused=await call('drop',['slot','inventory:2','6']);assert.equal(refused.errorCode,'INSUFFICIENT_ITEMS')
+  const partial=await call('drop',['slot','inventory:2','2']);assert.equal(partial.confirmed,true,JSON.stringify(partial));assert.equal(bot.inventory.slots[9].count,4);assert.equal(bot.inventory.slots[10].count,3)
+  const rest=await call('drop',['slot','inventory:2']);assert.equal(rest.confirmed,true);assert.equal(bot.inventory.slots[10],null)
   const server=rcon(`data get entity ${name} Inventory`);assert.match(server,/Count|count/);return {refused,partial,rest,server}
  })
  await check('furnace fixed source input and fuel report server-confirmed effects',async()=>{
   rcon(`item replace entity ${name} inventory.0 with raw_iron 3`);rcon(`item replace entity ${name} inventory.1 with coal 2`);await replace('furnace')
-  const input=await call('furnace',['input','9','2']);assert.equal(input.confirmed,true,JSON.stringify(input))
-  const fuel=await call('furnace',['fuel','10','1']);assert.equal(fuel.confirmed,true,JSON.stringify(fuel));assert.equal(input.window,undefined)
+  const input=await call('furnace',['input','inventory:1','2']);assert.equal(input.confirmed,true,JSON.stringify(input))
+  const fuel=await call('furnace',['fuel','inventory:2','1']);assert.equal(fuel.confirmed,true,JSON.stringify(fuel));assert.equal(input.window,undefined)
   const server=rcon('data get block 7502 100 7502 Items');assert.match(server,/raw_iron/);return {input,fuel,server}
  })
  await check('furnace output take observes result and inventory; empty take refuses',async()=>{
   rcon('item replace block 7502 100 7502 container.2 with iron_ingot 2');await sleep(200)
-  const take=await call('furnace',['take','output']);assert.equal(take.confirmed,true,JSON.stringify(take))
-  const empty=await call('furnace',['take','output']);assert.equal(empty.ok,false);assert.equal(empty.confirmed,false)
+  const take=await call('furnace',['take','furnace:output']);assert.equal(take.confirmed,true,JSON.stringify(take))
+  const empty=await call('furnace',['take','furnace:output']);assert.equal(empty.ok,false);assert.equal(empty.confirmed,false)
   return {take,empty,server:rcon('data get block 7502 100 7502 Items')}
  })
  await check('removed station move is rejected and compact moveslot works in crafter',async()=>{
-  await replace('crafter');const removed=await call('station',['move','inventory:9','window:0']);assert.equal(removed.errorCode,'INVALID_ARGUMENTS')
-  const moved=await call('moveslot',['inventory:9','window:0','1']);assert.equal(moved.confirmed,true,JSON.stringify(moved));return {removed,moved}
+  await replace('crafter');const removed=await call('station',['move','inventory:1','crafter:1']);assert.equal(removed.errorCode,'INVALID_ARGUMENTS')
+  const moved=await call('moveslot',['inventory:1','crafter:1','1']);assert.equal(moved.confirmed,true,JSON.stringify(moved));return {removed,moved}
  })
  await check('crafter slot property change and idempotent request have consistent feedback',async()=>{
-  const changed=await call('station',['crafter','1','disabled']);assert.equal(changed.confirmed,true,JSON.stringify(changed))
-  const unchanged=await call('station',['crafter','1','disabled']);assert.equal(unchanged.confirmed,true,JSON.stringify(unchanged));assert.deepEqual(unchanged.changes,[])
-  const enabled=await call('station',['crafter','1','enabled']);assert.equal(enabled.confirmed,true,JSON.stringify(enabled));return {changed,unchanged,enabled,server:rcon('data get block 7502 100 7502 disabled_slots')}
+  const changed=await call('station',['crafter','crafter:2','disabled']);assert.equal(changed.confirmed,true,JSON.stringify(changed))
+  const unchanged=await call('station',['crafter','crafter:2','disabled']);assert.equal(unchanged.confirmed,true,JSON.stringify(unchanged));assert.deepEqual(unchanged.changes,[])
+  const enabled=await call('station',['crafter','crafter:2','enabled']);assert.equal(enabled.confirmed,true,JSON.stringify(enabled));return {changed,unchanged,enabled,server:rcon('data get block 7502 100 7502 disabled_slots')}
  })
  await check('anvil rename confirms player inventory change and server custom name',async()=>{
   await call('close');rcon(`clear ${name}`);rcon(`item replace entity ${name} inventory.0 with iron_sword`);rcon(`experience set ${name} 30 levels`);await replace('anvil')
-  const renamed=await call('anvil',['rename','9','FeedbackSword']);assert.equal(renamed.confirmed,true,JSON.stringify(renamed));const server=rcon(`data get entity ${name} Inventory`);assert.match(server,/FeedbackSword/);return {renamed,server}
+  const renamed=await call('anvil',['rename','inventory:1','FeedbackSword']);assert.equal(renamed.confirmed,true,JSON.stringify(renamed));const server=rcon(`data get entity ${name} Inventory`);assert.match(server,/FeedbackSword/);return {renamed,server}
  })
  await check('enchant put, lapis, choose and take confirm slot/component changes',async()=>{
   await call('close');rcon(`clear ${name}`);rcon(`item replace entity ${name} inventory.0 with diamond_sword`);rcon(`item replace entity ${name} inventory.1 with lapis_lazuli 5`);rcon(`experience set ${name} 30 levels`);await replace('enchanting_table')
-  const put=await call('enchant',['put','9']);assert.equal(put.confirmed,true,JSON.stringify(put))
-  const lapis=await call('enchant',['lapis','10']);assert.equal(lapis.confirmed,true,JSON.stringify(lapis));await sleep(300)
+  const put=await call('enchant',['put','inventory:1']);assert.equal(put.confirmed,true,JSON.stringify(put))
+  const lapis=await call('enchant',['lapis','inventory:2']);assert.equal(lapis.confirmed,true,JSON.stringify(lapis));await sleep(300)
   const choose=await call('enchant',['choose','0']);assert.equal(choose.confirmed,true,JSON.stringify(choose))
   const take=await call('enchant',['take']);assert.equal(take.confirmed,true,JSON.stringify(take));const server=rcon(`data get entity ${name} Inventory`);assert.match(server,/enchantments/);return {put,lapis,choose,take,server}
  })
@@ -69,7 +69,7 @@ async function run(){
   assert.equal(bot.listenerCount('setWindowItems:0'),baseline);await syncWindow(bot,bot.inventory);return {timeout:'INVENTORY_SYNC_TIMEOUT',listenersRestored:true,recovered:true}
  })
  await check('LLM formatted results preserve confirmed status and errors without entire window',async()=>{
-  const r=await call('drop',['slot','44']);const json=JSON.parse(formatCommandResult(r));assert.equal(json.ok,false);assert.equal(json.errorCode,'EMPTY_SLOT');assert.equal(json.confirmed,false);return json
+  const r=await call('drop',['slot','hotbar:9']);const json=JSON.parse(formatCommandResult(r));assert.equal(json.ok,false);assert.equal(json.errorCode,'EMPTY_SLOT');assert.equal(json.confirmed,false);return json
  })
 }
 run().catch(error=>{log.error=error.stack;process.exitCode=1}).finally(async()=>{

@@ -24,9 +24,9 @@ async function run() {
   assert.ok(bot.blockAt(new Vec3(7602, 99, 7602)))
   await check('equip slot, hotbar and unequip preserve item components and server equipment', async () => {
     await give('inventory.0', 'diamond_helmet[enchantments={"minecraft:protection":2}]')
-    const equip = await call('equip', ['slot', '9', 'head']); assert.equal(equip.confirmed, true, JSON.stringify(equip))
+    const equip = await call('equip', ['slot', 'inventory:1', 'head']); assert.equal(equip.confirmed, true, JSON.stringify(equip))
     assert.match(rcon(`data get entity ${name} equipment.head`), /diamond_helmet/)
-    const hotbar = await call('hotbar', ['8']); assert.equal(hotbar.ok, true); assert.equal(bot.quickBarSlot, 8)
+    const hotbar = await call('hotbar', ['9']); assert.equal(hotbar.ok, true); assert.equal(bot.quickBarSlot, 8)
     const unequip = await call('unequip', ['head']); assert.equal(unequip.confirmed, true, JSON.stringify(unequip))
     assert.equal(bot.inventory.slots[5], null)
     assert.match(rcon(`data get entity ${name} Inventory`), /minecraft:protection/)

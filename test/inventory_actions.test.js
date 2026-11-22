@@ -45,8 +45,8 @@ test('equip supports armor and does not upgrade a rejected move to success',asyn
 })
 test('hotbar validates complete integer tokens and confirms selected index',async()=>{
   const f=fixture()
-  for(const args of [['2abc'],['1.5'],['-1'],['9'],['0','extra']])assert.equal((await hotbar(f.bot,args)).errorCode,'INVALID_ARGUMENTS')
-  assert.equal((await hotbar(f.bot,['8'])).ok,true);assert.equal(f.bot.quickBarSlot,8)
+  for(const args of [['2abc'],['1.5'],['-1'],['10'],['0','extra']])assert.equal((await hotbar(f.bot,args)).errorCode,'INVALID_ARGUMENTS')
+  assert.equal((await hotbar(f.bot,['9'])).ok,true);assert.equal(f.bot.quickBarSlot,8)
 })
 test('unequip refuses a full inventory before the upstream auto-drop fallback',async()=>{
   const f=fixture();for(let i=9;i<45;i++)f.put(i,'stone',64)
@@ -76,10 +76,10 @@ test('omitted drop quantity means first stack, explicit count can span identical
 })
 test('drop slot selects exact variant, defaults to that stack and never spills to others',async()=>{
  const f=fixture();f.put(9,'stone',4,[{type:'custom_data',data:{variant:'A'}}]);f.put(10,'stone',5,[{type:'custom_data',data:{variant:'B'}}])
- assert.equal((await drop(f.bot,['slot','10','6'])).errorCode,'INSUFFICIENT_ITEMS');assert.equal(f.slots[10].count,5)
- const r=await drop(f.bot,['slot','10','2']);assert.equal(r.confirmed,true);assert.deepEqual(r.target.source,{slotSpace:'inventory',slot:10});assert.equal(f.slots[9].count,4);assert.equal(f.slots[10].count,3)
- assert.equal((await drop(f.bot,['slot','10'])).confirmed,true);assert.equal(f.slots[10],null)
- assert.equal((await drop(f.bot,['slot','10'])).errorCode,'EMPTY_SLOT')
+ assert.equal((await drop(f.bot,['slot','inventory:2','6'])).errorCode,'INSUFFICIENT_ITEMS');assert.equal(f.slots[10].count,5)
+ const r=await drop(f.bot,['slot','inventory:2','2']);assert.equal(r.confirmed,true);assert.deepEqual(r.target.source,{ref:'inventory:2'});assert.equal(f.slots[9].count,4);assert.equal(f.slots[10].count,3)
+ assert.equal((await drop(f.bot,['slot','inventory:2'])).confirmed,true);assert.equal(f.slots[10],null)
+ assert.equal((await drop(f.bot,['slot','inventory:2'])).errorCode,'EMPTY_SLOT')
  for(const args of [['slot','45'],['slot','5'],['slot','9','0'],['slot','9','1x']])assert.equal((await drop(f.bot,args)).errorCode,'INVALID_ARGUMENTS')
 })
 test('component comparison handles nested data and removed components',()=>{

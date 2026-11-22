@@ -67,13 +67,13 @@ test('missing explicit max-health uses registry default, never a hardcoded fallb
 
 test('slots omit every ordinary empty slot but retain the selected empty slot across window mapping', async () => {
   const bot = { quickBarSlot: 3, inventory: { slots: Array(46).fill(null) } }
-  assert.deepEqual((await inventory(bot, ['slots'])).slots, [{ slot: 39, selected: true }])
+  assert.deepEqual((await inventory(bot, ['slots'])).slots, [{ref:'hotbar:4',selected:true}])
   bot.inventory.slots[10] = { name: 'stone', count: 2 }
   let result = await inventory(bot, ['slots'])
-  assert.deepEqual(result.slots, [{ name: 'stone', count: 2, slot: 10 }, { slot: 39, selected: true }])
+  assert.deepEqual(result.slots, [{ name: 'stone', count: 2, ref: 'inventory:2' }, {ref:'hotbar:4',selected:true}])
   bot.currentWindow = { id: 1, type: 'minecraft:generic_9x3', inventoryStart: 27, inventoryEnd: 63, slots: Array(63).fill(null) }
   result = await inventory(bot, ['slots'])
-  assert.deepEqual(result.slots, [{ slot: 39, selected: true }])
+  assert.deepEqual(result.slots, [{ref:'hotbar:4',selected:true}])
   assert.equal(result.emptySlotCount, 36)
 })
 
