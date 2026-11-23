@@ -4,7 +4,6 @@
 
 | 记录 | 类型与范围 |
 | --- | --- |
-| [WQT API diagnostics follow-up](wqt-api-validation-2026-11-03.md) | Enchanted digging, output-slot preflight, cursor feedback and stable indices; 592 automated tests, 8 real Minecraft/DeepSeek scenario attempts |
 | [Scoped reliability maintenance](maintenance-2026-10-25.md) | Exception cleanup, entity rechecks, atomic config saves, local ETags, drag handling, dependency/test discovery cleanup; 546 automated checks |
 | [Held-use request boundaries](held-use-request-validation-2026-10-25.md) | User-confirmed manual acceptance; selected-hand requests, unsupported tools, instant vs sustained lifecycles; 26 automated inventory/use checks |
 | [Book gift and repeated inventory queries](book-gift-context-validation-2026-10-25.md) | Real DeepSeek two-page save and drop; server evidence and human screenshot; steps 24–26 audited against actual context, repetition distinguished from missing feedback and manual Continue |
@@ -13,13 +12,10 @@
 | [新任务循环复杂合成](task-crafting-validation-2026-10-24.md) | Minecraft＋DeepSeek八场景181次请求，严格5/8；区分物品达成与结束声明，保留预算耗尽与重复查询问题 |
 | [Compact agent workbench](web-compact-layout.md) | 紧凑布局、字体、Configs切换与过期加载修复；Edge桌面预览核对，4K／手机截图待测 |
 | [有界任务循环与调度](task-runtime-validation.md) | 全库481项自动回归、3项HTTP模拟、Edge任务生命周期核对；无付费模型／Minecraft实测 |
-| [交互、背包、窗口和工作站复测](interaction-crafting-recheck.md) | 当前22个命令入口的代表场景、独立DeepSeek复杂合成、SteveX身份及精确版本；保留未测边界 |
+| [DeepSeek 复杂合成实验对照](interaction-crafting-recheck.md) | 复杂合成的模型表现、预算与结束条件；不作为当前命令验收清单 |
 | [Web 视角与 LLM 调试](web-inspector-validation.md) | 真实 A→B→A RGB、无焦点按需渲染、本地模拟 provider 全链路；1次真实 DeepSeek 输入输出及双 agent 隔离通过 |
 | [Web 只读背包与物品详情](web-inventory-validation.md) | 双 agent 9项实机、附魔浮层及刷新专项；全库450项回归；装备开窗滞后与特殊材质限制单列 |
-| [统一反馈、库存同步与工作站](window-feedback-validation.md) | 全库448项自动回归、紧凑语法16项实机和工作站／反馈10项实机；保留固定编号及组件详情，不新增规划策略 |
-| [固定玩家槽号与按需详情](slot-scope-validation.md) | 紧凑语法16项完整实机；固定编号／详情查询及搬运；工作站新编号另见统一反馈专项 |
 | [疾跑、相对寻路、多候选搜索与钓鱼取消](motion-search-fish-validation.md) | 最新8项实机、18项独立回归；自然咬钩完整收获等边界仍待测 |
-| [目标、窗口与反馈优化](api-refinement-validation.md) | 最新 12 项实机：攻击归因、副手喂食、指定掉落物、槽位拆分／交换／存取、满箱拒绝；其余边界单列 |
 | [统一世界右键](rightclick-validation-2026-10-23.md) | 内部路径历史 19 组实测，含主副手、潜行、交互优先级和使用互斥；不冒充新入口全量复测 |
 | [持续潜行与上下车](sneak-validation-2026-10-23.md) | 当前入口 12 组实测，含船／矿车服务端乘客关系 |
 | [统一挖掘入口](dig-validation-2026-10-23.md) | 准星／坐标挖掘、遮挡、封闭路径、接近取消共 6 组实测 |

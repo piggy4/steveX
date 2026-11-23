@@ -1,8 +1,6 @@
 # Typed Slot References
 
-Slot arguments are explicit references; bare numbers and the old window scope
-are not accepted. Existing scripts must migrate: inventory:9 now means the
-ninth backpack slot, not the first.
+Use the typed slot references below for command arguments.
 
 | Region | References |
 | --- | --- |

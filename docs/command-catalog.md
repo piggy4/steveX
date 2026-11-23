@@ -71,7 +71,7 @@ Exact item names; hotbar 1..9 selects the corresponding hotbar:1..9. Equip/unequ
 
 ## Windows and interfaces (6)
 
-Aim and right click to open. inventory indices NEVER change across windows: result 0 (take only), crafting 1..4, armor 5..8, backpack 9..35, hotbar 36..44, off-hand 45. hotbar 0..8 only selects a quick-bar index; it is not an inventory slot reference. window indices address only container/workstation slots. Internal mapping is automatic, not planning. slotclick/moveslot/putaway also work without a container; nonempty cursor is separate from slots. Detailed operations are exposed by current UI type.
+Aim and right click to open. Copy typed slot refs from window or inventory slots. Player refs stay fixed across windows: inventory:1..27 and hotbar:1..9. hotbar 1..9 selects a position; hotbar:1 is a slot ref. Container and workstation refs address the current window. Cursor contents are separate from slots. Detailed operations depend on the current UI.
 
 | Command | Kind | LLM default | Description |
 | --- | --- | --- | --- |

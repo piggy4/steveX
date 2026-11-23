@@ -62,7 +62,7 @@ function nativeSlot(bot,scope,slot) {
   const w=resolveScope(bot,scope,{write:true})
   if(!Number.isSafeInteger(slot)||slot<0)error('INVALID_SLOT','Slot must be a nonnegative safe integer')
   if(scope==='window') {
-    if(!Number.isInteger(w.inventoryStart)||slot>=w.inventoryStart)error('INVALID_SLOT','Window scope only addresses container/workstation slots; player items use inventory 9..44')
+    if(!Number.isInteger(w.inventoryStart)||slot>=w.inventoryStart)error('INVALID_SLOT','Container and workstation slots belong to the current window; player items use inventory: or hotbar: references')
     return slot
   }
   if(slot>45)error('INVALID_SLOT','Fixed player inventory range is 0..45')
